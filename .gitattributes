@@ -1,0 +1,4 @@
+# Store every file byte-for-byte as committed: the PowerShell scripts, C sources
+# and Python tools are all LF on disk, and the batch launcher needs its CRLF to
+# survive. Disabling EOL conversion keeps checkout hashes identical everywhere.
+* -text
