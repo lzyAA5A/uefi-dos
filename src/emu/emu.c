@@ -362,9 +362,26 @@ void emu_wd(Emu *e, u16 seg, u16 off, u32 v)
     emu_ww(e, seg, (u16)(off + 2), (u16)(v >> 16));
 }
 
+/* The guest screen lives in emulated VRAM, so a program that paints with
+ * INT 10h already updates it.  Console text streams through INT 21h can dirty
+ * it hundreds of times per second, and every flush rewrites 25 rows, so the
+ * mirror is throttled; the force flush at the end of emu_run catches up. */
+static u32 g_last_flush_ms = 0;
+
 static void video_flush(Emu *e)
 {
     if (!g_video_dirty) return;
+    u32 now = plat_ticks_ms();
+    if (g_last_flush_ms && (now - g_last_flush_ms) < 30) return;
+    g_last_flush_ms = now;
+    g_video_dirty = 0;
+    plat_video_show(e->mem + 0xB8000);
+}
+
+static void video_flush_force(Emu *e)
+{
+    if (!g_video_dirty) return;
+    g_last_flush_ms = plat_ticks_ms();
     g_video_dirty = 0;
     plat_video_show(e->mem + 0xB8000);
 }
@@ -1603,6 +1620,67 @@ static int step_8086(Emu *e)
     }
     case 0x68: { int width = (op_is32(e) ? 32 : 16); pushv(e, fetch_imm(e, width), width); break; }
     case 0x6A: { int width = (op_is32(e) ? 32 : 16); pushv(e, (u32)(s32)(s8)fetch8(e), width); break; }
+    case 0x62: { /* BOUND r16, m16&16 */
+        /* No #BR in this VM: decode the operands and continue.  Some DOS
+         * binaries emit it from a bounds-checking compiler switch. */
+        MRM m;
+        decode_mrm(e, &m, seg_ov);
+        (void)m;
+        break;
+    }
+    case 0x63: { /* ARPL r/m16, r16 (only meaningful in protected mode) */
+        int width = op_is32(e) ? 32 : 16;
+        MRM m;
+        decode_mrm(e, &m, seg_ov);
+        u32 dst = mrm_rv(e, &m, width), src = rv(e, m.reg, width);
+        if ((dst & 3u) < (src & 3u)) {
+            mrm_wv(e, &m, (dst & ~3u) | (src & 3u), width);
+            setf(e, F_ZF, 1);
+        } else {
+            setf(e, F_ZF, 0);
+        }
+        break;
+    }
+    case 0x69: case 0x6B: { /* IMUL r16/32, r/m, imm16/imm8 */
+        int width = op_is32(e) ? 32 : 16;
+        MRM m;
+        u32 imm;
+        decode_mrm(e, &m, seg_ov);
+        imm = (op == 0x69) ? fetch_imm(e, width) : (u32)(s32)(s8)fetch8(e);
+        if (width == 32) {
+            s64 p = (s64)(s32)mrm_rv(e, &m, width) * (s64)(s32)imm;
+            wv(e, m.reg, (u32)p, width);
+            setf(e, F_CF, p != (s64)(s32)p);
+            setf(e, F_OF, getf(e, F_CF));
+        } else {
+            s32 p = (s32)(s16)mrm_rv(e, &m, width) * (s32)(s16)imm;
+            wv(e, m.reg, (u32)p, width);
+            setf(e, F_CF, p != (s32)(s16)p);
+            setf(e, F_OF, getf(e, F_CF));
+        }
+        break;
+    }
+    case 0x6C: case 0x6D: case 0x6E: case 0x6F: { /* INSB/W and OUTSB/W */
+        int ins = (op == 0x6C || op == 0x6D);
+        int width = (op & 1) ? (op_is32(e) ? 32 : 16) : 8;
+        u32 sz = (u32)width / 8;
+        int back = getf(e, F_DF) ? 1 : 0;
+        u32 cnt = rep ? str_cnt(e) : 1;
+        u16 srsel = seg_ov >= 0 ? seg_reg(e, seg_ov) : e->ds;
+        u16 port = (u16)e->dx;
+        if (rep && cnt == 0) break;
+        while (cnt--) {
+            if (ins) {
+                wr_mem(e, e->es, str_di(e), (u32)emu_in_port(e, port), width);
+                str_adv_di(e, sz, back);
+            } else {
+                emu_out_port(e, port, (u16)rd_mem(e, srsel, str_si(e), width));
+                str_adv_si(e, sz, back);
+            }
+            if (rep) str_cnt_dec(e);
+        }
+        break;
+    }
     case 0x9C: pushv(e, e->eflags, (op_is32(e) ? 32 : 16)); break;
     case 0x9D: {
         if (op_is32(e)) e->eflags = (pop32(e) & 0x00FD5FFFu) | EFLAGS_FIXED;
@@ -2429,19 +2507,28 @@ int emu_run(Emu *e)
 {
     u64 steps = 0;
     u64 limit = step_budget();
+    u64 total = 0;              /* never reset by keystrokes (host hard cap) */
+    u64 hard = 0;
+#ifdef UEFIDOS_HOST
+    {
+        const char *s = getenv("UEFIDOS_HARD_STEPS");
+        hard = s ? (u64)strtoull(s, 0, 10) : 0;
+    }
+#endif
     u32 kbd_seen = g_kbd_seq;
     while (!e->halted && !g_plat_shutdown_requested) {
         trace_step(e, steps);
         ring_note(e);
         step(e);
         steps++;
+        total++;
         if (g_video_dirty && (steps & 0x3FFFFull) == 0) video_flush(e);
         if ((steps & 0x3FFull) == 0) emu_kbd_pump(e);
         /* an interactive program that is receiving keys is alive, not stuck:
          * refill its instruction budget so it can never be killed while the
          * user is playing */
         if (g_kbd_seq != kbd_seen) { kbd_seen = g_kbd_seq; steps = 0; }
-        if (steps > limit) {
+        if (steps > limit || (hard && total > hard)) {
             trace_regs(e, steps);
             plat_puts("\nUEFI-DOS: program exceeded instruction limit; terminating\n");
             e->halted = 1;
@@ -2449,7 +2536,7 @@ int emu_run(Emu *e)
             break;
         }
     }
-    video_flush(e);
+    video_flush_force(e);
     dump_vram(e);
     g_dos.last_error = 0;
     e->last_exit_code = (u16)e->exit_code;

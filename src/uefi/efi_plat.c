@@ -63,14 +63,26 @@ void plat_putmem(const char *buf, u32 len)
     for (u32 i = 0; i < len; i++) plat_putc(buf[i]);
 }
 
-/* render the emulated 80x25 colour-text screen to console */
+/* render the emulated 80x25 colour-text screen to console.
+ *
+ * Only rows whose characters changed are written: a game or editor that
+ * repaints one line per keystroke used to rewrite all 25 rows, which made the
+ * serial log enormous and the screen flicker. */
+static u8 g_vid_shadow[25 * 80 * 2];
+
 void plat_video_show(const u8 *vram)
 {
     CHAR16 row[81];
     if (!gOut) return;
     for (int y = 0; y < 25; y++) {
-        int last = 0;
-        gOut->SetCursorPosition(gOut, 0, (UINTN)y);
+        int changed = 0, last = 0;
+        for (int x = 0; x < 80; x++) {
+            u8 c = vram[(y * 80 + x) * 2];
+            u8 a = vram[(y * 80 + x) * 2 + 1];
+            u8 *sh = &g_vid_shadow[(y * 80 + x) * 2];
+            if (sh[0] != c || sh[1] != a) { sh[0] = c; sh[1] = a; changed = 1; }
+        }
+        if (!changed) continue;
         for (int x = 0; x < 80; x++) {
             u8 c = vram[(y * 80 + x) * 2];
             CHAR16 ch;
@@ -81,6 +93,7 @@ void plat_video_show(const u8 *vram)
         }
         for (int x = last; x < 80; x++) row[x] = ' ';
         row[80] = 0;
+        gOut->SetCursorPosition(gOut, 0, (UINTN)y);
         gOut->OutputString(gOut, row);
     }
     gOut->SetCursorPosition(gOut, 0, 24);
@@ -94,10 +107,52 @@ int plat_init(void *sys_table, void *image_handle)
     gRT = st->RuntimeServices;
     gOut = st->ConOut;
     gIn = st->ConIn;
+    /* Prefer an 80x25 console: the guest screen is exactly 80x25 and the video
+     * mirror rewrites those 25 rows, so a taller console (EDK2 defaults to
+     * 80x50) leaves the guest screen floating above a separate console region. */
+    if (gOut && gOut->Mode) {
+        UINTN best = (UINTN)-1;
+        for (UINTN i = 0; i < gOut->Mode->MaxMode; i++) {
+            UINTN cols = 0, rows = 0;
+            if (gOut->QueryMode(gOut, i, &cols, &rows) != EFI_SUCCESS) continue;
+            if (cols == 80 && rows == 25) { best = i; break; }
+        }
+        if (best != (UINTN)-1) gOut->SetMode(gOut, best);
+        else if (gOut->Mode->CursorRow >= 25) gOut->SetCursorPosition(gOut, 0, 0);
+    }
     if (gBS->HandleProtocol((EFI_HANDLE)image_handle, &gEfiLoadedImageProtocolGuid,
                             (void **)&gLoadedImage) != EFI_SUCCESS)
         return 1;
     return 0;
+}
+
+/* EFI_INPUT_KEY.ScanCode -> PC/AT scan code set 1.
+ *
+ * DOS programs read the BIOS keyboard buffer (INT 16h, or 0040:001E directly)
+ * and expect an extended key as "scan code, ASCII 0".  The EFI scan codes are
+ * a different numbering, and an extended key carries no UnicodeChar at all, so
+ * the raw value used to be dropped -- arrow keys did nothing in menus, games
+ * and editors. */
+static int efi_scan_to_pc(UINT16 sc)
+{
+    switch (sc) {
+    case 0x01: return 0x48;     /* up */
+    case 0x02: return 0x50;     /* down */
+    case 0x03: return 0x4D;     /* right */
+    case 0x04: return 0x4B;     /* left */
+    case 0x05: return 0x47;     /* home */
+    case 0x06: return 0x4F;     /* end */
+    case 0x07: return 0x52;     /* insert */
+    case 0x08: return 0x53;     /* delete */
+    case 0x09: return 0x49;     /* page up */
+    case 0x0A: return 0x51;     /* page down */
+    case 0x17: return 0x01;     /* escape */
+    default:
+        if (sc >= 0x0B && sc <= 0x14) return 0x3B + ((int)sc - 0x0B); /* F1..F10 */
+        if (sc == 0x15) return 0x57;    /* F11 */
+        if (sc == 0x16) return 0x58;    /* F12 */
+        return 0;
+    }
 }
 
 int plat_kbd_poll(void)
@@ -107,8 +162,14 @@ int plat_kbd_poll(void)
     EFI_INPUT_KEY key;
     if (gIn->ReadKeyStroke(gIn, &key) != EFI_SUCCESS) return -1;
     g_last_scan = key.ScanCode;
-    if (key.UnicodeChar) return (int)(UINT8)key.UnicodeChar;
-    return -1;
+    if (!key.UnicodeChar) {
+        /* Extended key: hand it over as 0x100 | pc_scan so the emulator pushes
+         * a scan-code-only entry into the BIOS buffer. */
+        int pc = efi_scan_to_pc(key.ScanCode);
+        if (pc) return 0x100 | pc;
+        return -1;
+    }
+    return (int)(UINT8)key.UnicodeChar;
 }
 int plat_kbd_scan(void) { return g_last_scan; }
 

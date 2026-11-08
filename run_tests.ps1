@@ -140,6 +140,17 @@ Run-Check 'bundled tools: SUM checksum + HEX dump of a file (INT 21h handles)' {
     & $HostExe --shell (Join-Path $Build 't_tools.img') 'SUM HELLO.TXT' 'HEX HELLO.TXT'
 } @('bytes, checksum', 'Hello UEFI-DOS!.')
 
+# Extended keys (arrows, F-keys) must reach the guest as PC scan codes with
+# ASCII 0; they used to be dropped by the platform layer, so menus, editors and
+# games ignored the cursor keys entirely.
+$env:UEFIDOS_KBD = 'DOWN,UP,RIGHT,LEFT,ESC'
+$env:UEFIDOS_KBD_MAX_POLLS = '20000'
+Run-Check 'keyboard: arrow keys arrive as BIOS scan codes (INT 16h)' {
+    & $HostExe --shell (Join-Path $Build 't_tools.img') 'KEYTEST'
+} @('S=50 A=00', 'S=48 A=00', 'S=4D A=00', 'S=4B A=00', 'S=01 A=1B', 'KEYTEST-DONE')
+Remove-Item Env:UEFIDOS_KBD -ErrorAction SilentlyContinue
+Remove-Item Env:UEFIDOS_KBD_MAX_POLLS -ErrorAction SilentlyContinue
+
 
 Write-Host ""
 Write-Host "=============================="

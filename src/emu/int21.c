@@ -55,13 +55,7 @@ static int read_dos_str(Emu *e, u16 seg, u16 off, char *dst, int max)
     return n;
 }
 
-static void con_put(char c)
-{
-    if (c == '\r') { g_pending_cr = 1; return; }
-    if (c == '\n') { g_pending_cr = 0; plat_putc('\n'); return; }
-    if (g_pending_cr) { plat_putc('\r'); g_pending_cr = 0; }
-    plat_putc(c);
-}
+static void con_put(Emu *e, char c);
 
 static void set_err(Emu *e, u8 code) { e->flags |= F_CF; e->ax = code; }
 static void set_ok(Emu *e) { e->flags = (u16)(e->flags & ~F_CF); }
@@ -102,13 +96,6 @@ static int check_key(Emu *e)
     return 1;
 }
 
-/* key values: 0..0xFF = ASCII; 0x100|scan = extended (AL=0, AH=scan) */
-static u16 key_to_ax(int k)
-{
-    if (k & 0x100) return (u16)((k & 0xFF) << 8);
-    return (u16)(u8)k;
-}
-
 static void dta_set(Emu *e, const char *name, u8 attr, u32 size, u16 tm, u16 dt)
 {
     u16 seg = g_dos.dta_seg, off = g_dos.dta_off;
@@ -146,13 +133,13 @@ void int21_handler(Emu *e)
     case 0x01: {
         int c = input_key(e);
         if (c == '\r') c = '\r';
-        con_put((char)c);
+        con_put(e, (char)c);
         set_ok(e);
         e->ax = (u16)((e->ax & 0xFF00) | (u8)c);
         return;
     }
     case 0x02:
-        con_put((char)(e->dx & 0xFF));
+        con_put(e, (char)(e->dx & 0xFF));
         set_ok(e);
         return;
     case 0x03: case 0x04:
@@ -160,7 +147,7 @@ void int21_handler(Emu *e)
         e->ax = (u16)(e->ax & 0xFF00);
         return;
     case 0x05:
-        con_put((char)(e->dx & 0xFF));
+        con_put(e, (char)(e->dx & 0xFF));
         set_ok(e);
         return;
     case 0x06: {
@@ -174,7 +161,7 @@ void int21_handler(Emu *e)
                 e->ax = (u16)(e->ax & 0xFF00);
             }
         } else {
-            con_put((char)(e->dx & 0xFF));
+            con_put(e, (char)(e->dx & 0xFF));
             set_ok(e);
         }
         return;
@@ -196,7 +183,7 @@ void int21_handler(Emu *e)
         for (;;) {
             u8 c = emu_rb(e, seg, off++);
             if (c == '$') break;
-            con_put((char)c);
+            con_put(e, (char)c);
         }
         set_ok(e);
         return;
@@ -207,7 +194,7 @@ void int21_handler(Emu *e)
         int n = 0;
         for (;;) {
             int c = input_key(e);
-            if (c == '\r' || c == '\n') { con_put('\n'); break; }
+            if (c == '\r' || c == '\n') { con_put(e, '\n'); break; }
             if (c == 8) {
                 if (n > 0) {
                     n--;
@@ -217,7 +204,7 @@ void int21_handler(Emu *e)
             }
             if (c >= 32 && c < 127 && n < (int)maxlen - 1) {
                 emu_wb(e, seg, (u16)(off + 2 + n), (u8)c);
-                con_put((char)c);
+                con_put(e, (char)c);
                 n++;
             }
         }
@@ -415,7 +402,7 @@ void int21_handler(Emu *e)
         u32 len = e->cx;
         u16 seg = e->ds, off = e->dx;
         if (h == 1 || h == 2) {
-            for (u32 i = 0; i < len; i++) con_put((char)emu_rb(e, seg, (u16)(off + i)));
+            for (u32 i = 0; i < len; i++) con_put(e, (char)emu_rb(e, seg, (u16)(off + i)));
             set_ok(e);
             e->ax = (u16)len;
             return;
@@ -646,7 +633,111 @@ void int21_handler(Emu *e)
 /* ------------------------------------------------------------------ */
 /* INT 10h minimal video services                                      */
 /* ------------------------------------------------------------------ */
-static void clear_screen(void) { plat_puts("\x1b[2J\x1b[H"); }
+/* ------------------------------------------------------------------ */
+/* INT 10h text-mode video.                                            */
+/*                                                                     */
+/* These services write emulated VRAM at 0xB8000 -- the screen the host */
+/* mirror shows.  They used to push characters onto the host console    */
+/* stream instead, so every program that paints its own screen with     */
+/* AH=02 (set cursor) + AH=09 (write char+attr) drew somewhere the      */
+/* mirror then erased: the bundled editor came up as a black screen.    */
+/* ------------------------------------------------------------------ */
+#define VRAM_SEG 0xB800
+
+static void cur_sync(Emu *e)
+{
+    /* BIOS data area cursor position for page 0: 0040:0050 */
+    emu_ww(e, 0x40, 0x50, (u16)((e->cury << 8) | (e->curx)));
+}
+
+static void vram_put(Emu *e, int x, int y, u8 ch, u8 attr)
+{
+    if (x < 0 || x > 79 || y < 0 || y > 24) return;
+    emu_wb(e, VRAM_SEG, (u16)((y * 80 + x) * 2), ch);
+    emu_wb(e, VRAM_SEG, (u16)((y * 80 + x) * 2 + 1), attr);
+}
+
+static void vram_get(Emu *e, int x, int y, u8 *ch, u8 *attr)
+{
+    *ch = ' ';
+    *attr = 0x07;
+    if (x < 0 || x > 79 || y < 0 || y > 24) return;
+    *ch = emu_rb(e, VRAM_SEG, (u16)((y * 80 + x) * 2));
+    *attr = emu_rb(e, VRAM_SEG, (u16)((y * 80 + x) * 2 + 1));
+}
+
+static void vram_fill(Emu *e, int x0, int y0, int x1, int y1, u8 ch, u8 attr)
+{
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++) vram_put(e, x, y, ch, attr);
+}
+
+static void clear_screen(Emu *e) { vram_fill(e, 0, 0, 79, 24, ' ', 0x07); }
+
+/* AL lines of a window (CH,CL)=upper-left .. (DH,DL)=lower-right; AL=0 blanks
+ * the whole window.  up=1 scrolls towards the top (AH=06), up=0 towards the
+ * bottom (AH=07). */
+static void video_scroll(Emu *e, int up, int lines, int x0, int y0, int x1, int y1, u8 attr)
+{
+    if (x0 < 0) x0 = 0;
+    if (x1 > 79) x1 = 79;
+    if (y0 < 0) y0 = 0;
+    if (y1 > 24) y1 = 24;
+    int h = y1 - y0 + 1;
+    if (h <= 0 || x1 < x0) return;
+    if (lines <= 0 || lines > h) lines = h;
+    for (int y = y0; y <= y1; y++) {
+        int sy = up ? y + lines : y - lines;
+        if (sy >= y0 && sy <= y1) {
+            for (int x = x0; x <= x1; x++) {
+                u8 ch, at;
+                vram_get(e, x, sy, &ch, &at);
+                vram_put(e, x, y, ch, at);
+            }
+        } else {
+            vram_fill(e, x0, y, x1, y, ' ', attr);
+        }
+    }
+}
+
+/* teletype output shared by AH=0Eh and AH=13h: write, advance, scroll */
+static void tele_put(Emu *e, u8 c, u8 attr)
+{
+    int x = e->curx, y = e->cury;
+    if (c == 0x0D) {
+        x = 0;
+    } else if (c == 0x0A) {
+        y++;
+    } else if (c == 0x08) {
+        if (x > 0) x--;
+    } else if (c == 0x07) {
+        /* bell: no sound */
+    } else {
+        vram_put(e, x, y, c, attr);
+        x++;
+        if (x > 79) { x = 0; y++; }
+    }
+    if (y > 24) {
+        video_scroll(e, 1, 1, 0, 0, 79, 24, 0x07);
+        y = 24;
+    }
+    e->curx = x;
+    e->cury = y;
+    cur_sync(e);
+}
+
+/* INT 21h console output goes to the host console stream.  It deliberately does
+ * NOT paint emulated VRAM: the mirror refreshes whole rows, so mirroring every
+ * console character there flooded the screen and the serial log with
+ * full-screen refreshes.  Programs that own the screen paint it via INT 10h. */
+static void con_put(Emu *e, char c)
+{
+    (void)e;
+    if (c == '\r') { g_pending_cr = 1; return; }
+    if (c == '\n') { g_pending_cr = 0; plat_putc('\n'); return; }
+    if (g_pending_cr) { plat_putc('\r'); g_pending_cr = 0; }
+    plat_putc(c);
+}
 
 void int10_handler(Emu *e)
 {
@@ -656,57 +747,61 @@ void int10_handler(Emu *e)
     case 0x00:
         e->video_mode = (u16)(e->ax & 0xFF);
         e->curx = 0; e->cury = 0;
+        cur_sync(e);
         if ((e->ax & 0xFF) == 3 || (e->ax & 0xFF) == 7 || (e->ax & 0xFF) == 0)
-            clear_screen();
+            clear_screen(e);
         break;
     case 0x01: /* set cursor shape: ignore */
         break;
     case 0x02:
         e->curx = (int)(e->dx & 0xFF);
         e->cury = (int)((e->dx >> 8) & 0xFF);
+        if (e->curx > 79) e->curx = 79;
+        if (e->cury > 24) e->cury = 24;
+        cur_sync(e);
         break;
     case 0x03:
         e->dx = (u16)((e->cury << 8) | e->curx);
+        e->cx = (u16)(0x0607);             /* cursor shape: a normal underline */
         break;
     case 0x05:
         break;
     case 0x06: case 0x07:
-        if ((e->ax & 0xFF) == 0) { clear_screen(); e->curx = 0; e->cury = 0; }
+        /* scroll window CH,CL .. DH,DL by AL lines (AH=06 up, AH=07 down) */
+        video_scroll(e, ah == 0x06, (int)(e->ax & 0xFF),
+                     (int)(e->cx & 0xFF), (int)((e->cx >> 8) & 0xFF),
+                     (int)(e->dx & 0xFF), (int)((e->dx >> 8) & 0xFF),
+                     (u8)(e->bx & 0xFF));
         break;
-    case 0x08:
-        e->ax = (u16)(0x0720); /* space with grey-on-black */
+    case 0x08: { /* read character and attribute at the cursor */
+        u8 ch = ' ', at = 0x07;
+        vram_get(e, e->curx, e->cury, &ch, &at);
+        e->ax = (u16)((at << 8) | ch);
         break;
+    }
     case 0x09: case 0x0A: {
-        int n = e->cx;
-        char ch = (char)(e->ax & 0xFF);
+        /* write character (AH=09 also writes BL into the attribute byte),
+         * CX times from the cursor; the cursor itself does not move */
+        int n = e->cx ? (int)e->cx : 1;
+        u8 ch = (u8)(e->ax & 0xFF);
+        u8 attr = (u8)(e->bx & 0xFF);
         int x = e->curx, y = e->cury;
         for (int i = 0; i < n; i++) {
-            if (x > 0 || y > 0 || 1) {
-                /* emit spaces/char to approximate the position */
-                if (i == 0) {
-                    /* move to the cursor position with spaces/newlines */
-                    for (int k = 0; k < y; k++) con_put('\n');
-                    for (int k = 0; k < x; k++) con_put(' ');
-                }
-                con_put(ch);
-                x++;
+            if (x > 79) { x = 0; y++; }
+            if (y > 24) break;
+            if (ah == 0x09) {
+                vram_put(e, x, y, ch, attr);
+            } else {
+                u8 oldch, oldat;
+                vram_get(e, x, y, &oldch, &oldat);
+                vram_put(e, x, y, ch, oldat);
             }
+            x++;
         }
         break;
     }
-    case 0x0E: {
-        char c = (char)(e->ax & 0xFF);
-        if (c == '\r') { e->curx = 0; }
-        else if (c == '\n') { e->curx = 0; e->cury++; }
-        else if (c == 8) { if (e->curx > 0) e->curx--; }
-        else if (c == 7) { }
-        else {
-            con_put(c);
-            e->curx++;
-            if (e->curx >= 80) { e->curx = 0; e->cury++; }
-        }
-        if (c == '\r' || c == '\n') con_put(c);
-        if (c == 8) con_put('\b');
+    case 0x0E: { /* teletype output: writes, advances, scrolls at the bottom */
+        tele_put(e, (u8)(e->ax & 0xFF), (u8)(e->bx & 0xFF));
         break;
     }
     case 0x0F:
@@ -722,7 +817,7 @@ void int10_handler(Emu *e)
         u16 seg = e->es, off = e->bp;
         for (int i = 0; i < n; i++) {
             u8 c = emu_rb(e, seg, (u16)(off + i));
-            con_put((char)c);
+            tele_put(e, c, (u8)(e->bx & 0xFF));
         }
         break;
     }
@@ -741,7 +836,17 @@ void int16_handler(Emu *e)
     switch (ah) {
     case 0x00: case 0x10: {
         int scan = 0, asc = 0;
-        emu_kbd_get_full(e, &scan, &asc);
+        /* A key peeked by AH=01 is already off the BIOS buffer: consume that
+         * one first, otherwise peek-then-read loses it and returns the *next*
+         * keystroke (menus jumped two entries). */
+        if (g_pending_key >= 0) {
+            scan = g_pending_scan;
+            asc = g_pending_asc;
+            g_pending_key = -1;
+            g_pending_scan = g_pending_asc = -1;
+        } else {
+            emu_kbd_get_full(e, &scan, &asc);
+        }
         e->ax = (u16)(((scan & 0xFF) << 8) | (asc & 0xFF));
         break;
     }

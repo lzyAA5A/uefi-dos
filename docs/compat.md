@@ -50,7 +50,7 @@ are not part of this repository because they show third-party programs.
 | `SB.COM` | music | **runs** | jukebox screen (System Beeps / Astro Force / …); PC speaker writes are accepted but silent |
 | `CP86TEST.COM` | diagnostics | **passes** | RTC/DOS time, BIOS tick counter, INT 13h probe on DL=00/01/80/81, keyboard ASCII read, speaker, COM1 probe (`missing`), USB note |
 | `TERM.COM` | terminal | **runs** | banner, waits for a real COM1 device, exits on key |
-| `TE` (`TE.COM`, `TE.EXE`) | editor | **runs** | usage line `Usage: TE FILE.TXT` / `Max 40x14 chars` |
+| `TE` (`TE.COM`, `TE.EXE`) | editor | **runs** | `TE FILE.TXT` opens the document and paints title, buffer and `^O Save  ^X Exit  Arrows Move` on the guest screen; edit keys work |
 | `VID.COM`, `DIAG.COM`, `CPPTEST.EXE`, `HI.EXE`, `MININASM.COM`, `ASM.EXE` | tools | runs, no visible output | see "Open points" |
 
 `MININASM.COM`, `ASM.EXE`, `C86HELLO.COM` and `CPPTEST.EXE` need arguments
@@ -112,6 +112,24 @@ than the previous test programs, and they found four real defects:
 
 5. **INT 1Ah BIOS timer** was missing (see above), which made game timers
    and RNG seeds garbage.
+
+Two more, found after this report was first written (v0.6.1):
+
+6. **Extended keys never arrived**: `plat_kbd_poll()` dropped every key whose
+   `EFI_INPUT_KEY.UnicodeChar` was 0 — that is exactly what an arrow, Home/End,
+   PgUp/PgDn or F-key is. Menus (the `MINIGAME` selector), the mine sweeper
+   cursor and the editor's `Arrows Move` all appeared dead. EFI scan codes are
+   now mapped to PC scan-code set 1 and delivered as `0x100 | scan`, so the BIOS
+   buffer gets "scan code, ASCII 0" like real hardware; `KEYTEST.COM` asserts
+   `S=48/50/4B/4D` for the arrow keys. `INT 16h AH=01h` no longer consumes the
+   key it peeks at either.
+7. **`INT 10h AH=09h/0Ah` never touched video memory** — the characters went to
+   the console stream and the position was faked with spaces, so `TE` printed
+   its whole screen into the void, the mirror then redrew blank VRAM over it,
+   and the editor looked like it had failed to open the document (it had in fact
+   read the file correctly). Both `AH=09h` and `AH=0Ah`, plus `AH=02h/03h/06h/
+   07h/08h/0Eh/13h`, now operate on emulated VRAM with a real scroll, and the
+   console is switched to 80×25 when the firmware offers that mode.
 
 Additionally the emulator now answers the video-retrace polling port
 (`IN 0x3DA` alternates) and keeps a minimal CRTC register set, so text-mode

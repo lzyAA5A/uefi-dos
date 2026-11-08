@@ -42,8 +42,8 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 | 8086 模拟器 | 8086/80186 实模式解释器、16 MiB 模拟内存、PSP、IVT、带重定位的 `.COM` 与 MZ `.EXE` 加载器、8087 转义按 8086 空转处理 |
 | INT 21h | 控制台、文件 I/O、查找首/次 + DTA、目录、日期时间、版本、中断向量读写、IOCTL、句柄复制、PSP、内存桩、**EXEC（AH=4Bh）**、**AH=67h**、**AH=5Ch** 字节锁、**SHARE 模式** |
 | FCB 调用族 | AH=0Fh 10h 11h 12h 13h 14h 15h 16h 17h 21h 22h 23h 27h 28h（`src/emu/fcb.c`） |
-| INT 10h / 16h / 1Ah / 13h | 电传输出与光标、阻塞键盘、BIOS 计时、磁盘读/写/几何参数 |
-| 显示 | 直接写入 `B800:0000` 的 80×25 文本屏会被镜像到 UEFI 控制台 |
+| INT 10h / 16h / 1Ah / 13h | 文本服务（置模式、光标、读写字符+属性、电传、窗口滚动）作用于模拟屏幕、支持扩展键的阻塞键盘、BIOS 计时、磁盘读/写/几何参数 |
+| 显示 | 模拟内存里的 80×25 彩色文本屏（`B800:0000`）：直接写显存和 `INT 10h` 输出都落在同一块屏上，再镜像到控制台（只重画变化的行） |
 | 原生 32/64 位 API | `g_dosapi` 服务表 —— 操作与错误码与 INT 21h 完全一致，原生指针，同一份源码产出两种位宽的固件 |
 | 16 位桥 | `exec16()` 下行调用（原生 → 实模式）与 `INT 2Fh AX=5544h` 上行调用（实模式 → 原生） |
 | 386 保护模式 | 实模式 → 保护模式切换、GDT/LDT 解析、带限长检查的隐藏段缓存、`MOV CRn`/`LGDT`/`LIDT`/`LLDT`/`CLTS`、32 位寻址（SIB）、`0F xx` 指令族、保护模式 IDT 分发 |
@@ -221,11 +221,11 @@ start_qemu.bat -Firmware ia32  # 32 位载荷
 
 ## 回归测试
 
-`run_tests.ps1` 会先完整构建，再跑 16 项检查：FAT32 读/写自检；宿主命令解释器
+`run_tests.ps1` 会先完整构建，再跑 17 项检查：FAT32 读/写自检；宿主命令解释器
 DIR/TYPE/VER/COM/EXE/EXEC/显示 + 原生 API 与上行调用演示；宿主写路径；软盘镜像挂载
 为 `A:`；在 2.11 镜像上写 FAT12；读取 2.11 与 MS-DOS 5 镜像；两项 QEMU/OVMF 启动
 冒烟测试（x86_64 与 IA32）；阶段 4/6 语义与双路径对比；32 MB 与 1.9 GB FAT16 卷写入；
-以及由真实 16 位代码调用 FCB 的 `FCBTEST.COM`。
+由真实 16 位代码调用 FCB 的 `FCBTEST.COM`；以及 `KEYTEST.COM` —— 它通过 `INT 16h` 读五个键并打印扫描码，证明方向键和功能键确实以真实 BIOS 扫描码送达客户机。
 
 需要 Microsoft DOS 软盘镜像的检查在 `UEFIDOS_DOS211` / `UEFIDOS_DOS5` 未设置时会
 报告 `[SKIP]` 并跳过。
@@ -247,8 +247,9 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 
 | 变量 | 作用 |
 | --- | --- |
-| `UEFIDOS_MAX_STEPS=n` | 单个程序的指令预算（默认 200000000） |
-| `UEFIDOS_KBD=k1,k2,…` | 脚本化按键：单字符或 `ENTER ESC SPACE TAB BACKSPACE UP DOWN LEFT RIGHT` |
+| `UEFIDOS_MAX_STEPS=n` | 单个程序的指令预算（默认 200000000），每投递一个键就补满 |
+| `UEFIDOS_HARD_STEPS=n` | 绝对预算，投递按键也不补，交互程序仍能被终止 |
+| `UEFIDOS_KBD=k1,k2,…` | 脚本化按键：单字符，或 `ENTER ESC SPACE TAB BACKSPACE HOME END PGUP PGDN INS DEL UP DOWN LEFT RIGHT F1…F10`，以及 `CTRLA…CTRLZ` |
 | `UEFIDOS_KBD_MAX_POLLS=n` | 轮询多少次后投递 `ESC`，让"等按键"循环结束（默认 100000） |
 | `UEFIDOS_PSP_SEG=0x260` | 覆盖加载段，用于按固定 PSP 链接的程序 |
 | `UEFIDOS_DUMP_VRAM=1` | 把模拟的 80×25 屏 dump 到 `build/vram_dump.txt`（带列标尺） |
@@ -348,6 +349,24 @@ build.ps1 run_uefi.ps1 run_interactive.ps1 run_tests.ps1 start_qemu.bat
 - `INT 21h AH=19h`（取当前驱动器）永远返回 `A:`，`AH=0Eh` 根本没有真正切换驱动器，
   `AH=2Ah` 的星期值是写死的 1 而不是算出来的 —— 日历和星期相关逻辑因此全错。
   这三个问题都是写内置 `INFO`/`CAL` 工具时测出来的。
+
+- **方向键以及所有扩展键被静默丢弃**：两个平台层的 `plat_kbd_poll()` 都把
+  `EFI_INPUT_KEY.ScanCode` 原样返回（`UnicodeChar == 0` 时干脆返回“没有键”），
+  host 层则把 `0x00`/`0xE0` 序列的第二个字节扔掉。于是所有读 BIOS 键盘缓冲区的菜单、
+  编辑器和小游戏都收不到任何光标键。现在 EFI 扫描码会翻译成 PC 扫描码集 1，并以
+  `0x100 | scan` 交给模拟器，在 BIOS 缓冲区里落成“扫描码 + ASCII 0”。连带修掉两个键盘问题：
+  `INT 16h AH=01h` 会把本该只是“看一眼”的键消费掉（先查后读就丢键，菜单一次跳两格）；
+  交互程序永远不会被终止，因为每投递一个键就把指令预算补满（宿主侧新增
+  `UEFIDOS_HARD_STEPS` 作为不补的绝对上限）。
+- **`INT 10h AH=09h/0Ah` 根本没有写显存** —— 它把字符塞进控制台流、再用空格和换行去
+  “凑”位置；随后屏幕镜像又用空的显存把它重画掉，于是任何自己画屏的程序都是黑屏：
+  内置的 2.11 编辑器 `TE.COM` 明明已经正确读到文件，看起来却是“打不开文档”。
+  现在全部文本服务（`AH=00h 02h 03h 06h 07h 08h 09h 0Ah 0Eh 13h`）都作用于模拟显存 +
+  BIOS 数据区光标（`0040:0050`），并实现了真正的窗口滚动。同时如果固件提供 80×25 模式，
+  控制台会切过去，让客户机屏幕占满整屏而不是浮在一个独立控制台区上方；镜像刷新也只重画
+  真正变化了的行。
+- 指令 `0x62/0x63/0x69/0x6B/0x6C-0x6F`（BOUND、ARPL、IMUL 立即数形式、INSB/W、OUTSB/W）
+  缺失，导致内置 `MINIGAME` 合集一启动就撞 `unsupported 8086 opcode 0x6F` 停住。
 
 ## 限制与路线
 

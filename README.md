@@ -45,8 +45,8 @@ both inside. `make_release.ps1` rebuilds that package from source.
 | 8086 emulator | 8086/80186 real-mode interpreter, 16 MiB emulated RAM, PSP, IVT, `.COM` + MZ `.EXE` loader with relocations, 8087 escapes treated as 8086 no-ops |
 | INT 21h | console, file I/O, find first/next + DTA, dirs, date/time, version, vector get/set, IOCTL, dup, PSP, memory stubs, **EXEC (AH=4Bh)**, **AH=67h**, **AH=5Ch** byte locks, **SHARE modes** |
 | FCB family | AH=0Fh 10h 11h 12h 13h 14h 15h 16h 17h 21h 22h 23h 27h 28h (`src/emu/fcb.c`) |
-| INT 10h / 16h / 1Ah / 13h | teletype + cursor, blocking keyboard, BIOS tick counter, disk read/write/geometry |
-| Video | direct writes to the emulated 80×25 text screen at `B800:0000` are mirrored to the UEFI console |
+| INT 10h / 16h / 1Ah / 13h | text services (mode set, cursor, read/write char+attr, teletype, window scroll) on the emulated screen, blocking keyboard with extended keys, BIOS tick counter, disk read/write/geometry |
+| Video | an 80×25 colour-text screen at `B800:0000` inside emulated RAM; both direct VRAM writes and `INT 10h` output land there and are mirrored to the console (only changed rows are redrawn) |
 | Native 32/64-bit API | `g_dosapi` table — same operations and error codes as INT 21h, native pointers, one source for both firmware widths |
 | 16-bit bridge | `exec16()` downcall (native → real mode) and `INT 2Fh AX=5544h` upcall (real mode → native) |
 | 386 protected mode | real → protected transition, GDT/LDT parsing, hidden segment caches with limit checks, `MOV CRn`/`LGDT`/`LIDT`/`LLDT`/`CLTS`, 32-bit addressing (SIB), `0F xx` opcode set, protected-mode IDT delivery |
@@ -239,14 +239,14 @@ it as `A:`. Screenshot helpers (stdlib only): start QEMU with
 
 ## Regression suite
 
-`run_tests.ps1` builds everything and runs 16 checks: FAT32 read/write selftest;
+`run_tests.ps1` builds everything and runs 17 checks: FAT32 read/write selftest;
 host shell DIR/TYPE/VER/COM/EXE/EXEC/video plus native-API and upcall demos;
 host shell write path; floppy-image `A:` mount; FAT12 write on a 2.11 image;
 FAT12 read of 2.11 and MS-DOS 5 images; two QEMU/OVMF boot smoke tests (x86_64
 and IA32); phase 4/6 semantics with the dual-path comparison; FAT16 write on
 32 MB and 1.9 GB volumes; `FCBTEST.COM` exercising FCB calls from real 16-bit
 code; and the bundled `INFO`/`CAL`/`SUM`/`HEX` utilities (the calendar month is
-cross-checked against the host clock).
+cross-checked against the host clock); and `KEYTEST.COM`, which reads five keys through `INT 16h` and prints their scan codes, proving arrow and function keys reach the guest as real BIOS scan codes.
 
 Checks that need a Microsoft DOS floppy image are skipped (reported as
 `[SKIP]`) when `UEFIDOS_DOS211` / `UEFIDOS_DOS5` are unset.
@@ -268,8 +268,9 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 
 | Variable | Effect |
 | --- | --- |
-| `UEFIDOS_MAX_STEPS=n` | instruction budget for one program (default 200000000) |
-| `UEFIDOS_KBD=k1,k2,…` | scripted keys: single characters or `ENTER ESC SPACE TAB BACKSPACE UP DOWN LEFT RIGHT` |
+| `UEFIDOS_MAX_STEPS=n` | instruction budget for one program (default 200000000), refilled on every keystroke |
+| `UEFIDOS_HARD_STEPS=n` | absolute budget that keystrokes do not refill, so an interactive program still terminates |
+| `UEFIDOS_KBD=k1,k2,…` | scripted keys: single characters, `ENTER ESC SPACE TAB BACKSPACE HOME END PGUP PGDN INS DEL UP DOWN LEFT RIGHT F1…F10`, or `CTRLA…CTRLZ` |
 | `UEFIDOS_KBD_MAX_POLLS=n` | polls after which an `ESC` is delivered so "wait for key" loops finish (default 100000) |
 | `UEFIDOS_PSP_SEG=0x260` | load-segment override for programs linked for a fixed PSP |
 | `UEFIDOS_DUMP_VRAM=1` | dump the emulated 80×25 screen to `build/vram_dump.txt` with a column ruler |
@@ -387,6 +388,30 @@ start_prebuilt.bat   the launcher shipped as start.bat inside that package
   actually *selected* a drive; `AH=2Ah` returned a hard-coded weekday of 1
   instead of computing it, so calendars and day-of-week logic were wrong.
   Found while writing the bundled `INFO`/`CAL` utilities.
+- **Arrow keys and every other extended key were silently dropped** by both
+  platform layers: `plat_kbd_poll()` returned the raw `EFI_INPUT_KEY.ScanCode`
+  (or nothing at all when `UnicodeChar == 0`) and the host layer threw away the
+  second byte of an `0x00`/`0xE0` sequence. Menus, editors and games that read
+  the BIOS keyboard buffer never saw a single cursor key. EFI scan codes are now
+  translated to PC scan-code set 1 and delivered as `0x100 | scan`, so they land
+  in the BIOS buffer as "scan code, ASCII 0". Two related keyboard bugs went
+  with it: `INT 16h AH=01h` consumed the key it was supposed to peek (so
+  peek-then-read lost a keystroke and menus jumped two entries), and an
+  interactive program could never be stopped because every delivered key refilled
+  its instruction budget (the host harness now has `UEFIDOS_HARD_STEPS`).
+- **`INT 10h AH=09h/0Ah` did not write video memory at all** — it pushed the
+  characters onto the console stream and approximated the position with spaces
+  and newlines. The screen mirror then redrew stale (blank) VRAM over it, so a
+  program that paints its own screen came up black: the bundled 2.11 editor
+  `TE.COM` "could not open a document" although it had read the file correctly.
+  All text services (`AH=00h 02h 03h 06h 07h 08h 09h 0Ah 0Eh 13h`) now work on
+  the emulated VRAM + BIOS data area cursor (`0040:0050`), with real window
+  scrolling. The console is also switched to an 80×25 mode when the firmware
+  offers one, so the guest screen fills the display instead of floating above a
+  separate console region, and the mirror only redraws rows that changed.
+- Opcodes `0x62/0x63/0x69/0x6B/0x6C-0x6F` (BOUND, ARPL, IMUL imm forms,
+  INSB/W, OUTSB/W) were missing, which stopped the bundled `MINIGAME` collection
+  dead (`unsupported 8086 opcode 0x6F`).
 
 ## Limitations / roadmap
 

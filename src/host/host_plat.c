@@ -37,17 +37,24 @@ void plat_puts(const char *s) { fputs(s, stdout); }
 void plat_putmem(const char *buf, u32 len) { fwrite(buf, 1, len, stdout); }
 
 /* render the emulated 80x25 text screen (attributes ignored on the host) */
+/* Only rows whose characters changed are printed: a program that repaints one
+ * line per keypress used to dump the whole 25-row screen every time, which
+ * buried the harness output under repeated full screens. */
+static u8 g_vid_shadow[25 * 80];
+
 void plat_video_show(const u8 *vram)
 {
     for (int y = 0; y < 25; y++) {
         char line[81];
-        int last = 0;
+        int last = 0, changed = 0;
         for (int x = 0; x < 80; x++) {
             u8 c = vram[(y * 80 + x) * 2];
+            if (g_vid_shadow[y * 80 + x] != c) { changed = 1; g_vid_shadow[y * 80 + x] = c; }
             if (c < 32 || c > 126) c = ' ';
             line[x] = (char)c;
             if (c != ' ') last = x + 1;
         }
+        if (!changed) continue;
         line[last] = 0;
         fputs(line, stdout);
         fputc('\n', stdout);
@@ -83,7 +90,39 @@ static int key_token(const char *t)
     if (!_stricmp(t, "DOWN")) return 0x100 | 0x50;
     if (!_stricmp(t, "LEFT")) return 0x100 | 0x4B;
     if (!_stricmp(t, "RIGHT")) return 0x100 | 0x4D;
+    if (!_stricmp(t, "HOME")) return 0x100 | 0x47;
+    if (!_stricmp(t, "END")) return 0x100 | 0x4F;
+    if (!_stricmp(t, "PGUP")) return 0x100 | 0x49;
+    if (!_stricmp(t, "PGDN")) return 0x100 | 0x51;
+    if (!_stricmp(t, "DEL")) return 0x100 | 0x53;
+    if (!_stricmp(t, "INS")) return 0x100 | 0x52;
+    if (!_stricmp(t, "F1")) return 0x100 | 0x3B;
+    if (!_stricmp(t, "F2")) return 0x100 | 0x3C;
+    if (!_stricmp(t, "F3")) return 0x100 | 0x3D;
+    if (!_stricmp(t, "F4")) return 0x100 | 0x3E;
+    if (!_stricmp(t, "F5")) return 0x100 | 0x3F;
+    if (!_stricmp(t, "F6")) return 0x100 | 0x40;
+    if (!_stricmp(t, "F7")) return 0x100 | 0x41;
+    if (!_stricmp(t, "F8")) return 0x100 | 0x42;
+    if (!_stricmp(t, "F9")) return 0x100 | 0x43;
+    if (!_stricmp(t, "F10")) return 0x100 | 0x44;
+    /* CTRLA .. CTRLZ: control characters, e.g. CTRLX leaves the editor */
+    if (!strnicmp(t, "CTRL", 4) && t[4] >= 'A' && t[4] <= 'Z' && !t[5])
+        return t[4] - 'A' + 1;
+    if (!_stricmp(t, "CTRLSPACE")) return 0;
     return (unsigned char)t[0];
+}
+
+/* wall-clock gate for the scripted key stream.  A program blocked in an
+ * INT 16h wait only polls a handful of times (2 ms apart), so a pure
+ * poll-count gate would never hand it a key; games that spin poll thousands
+ * of times per millisecond, where the poll gate keeps the timing predictable. */
+static unsigned long long g_kb_next_ms = 0;
+static int kb_wall_ready(void)
+{
+    unsigned long long now = GetTickCount64();
+    if (!g_kb_next_ms) g_kb_next_ms = now + 400;
+    return now >= g_kb_next_ms;
 }
 
 static void kb_script_init(void)
@@ -110,6 +149,7 @@ static void kb_script_init(void)
     m = getenv("UEFIDOS_KBD_MAX_POLLS");
     if (m) g_kb_max_polls = strtoull(m, 0, 10);
     g_kb_next_poll = 5000;      /* let the program draw its first frame */
+    g_kb_next_ms = GetTickCount64() + 400;
 }
 
 int plat_kbd_poll(void)
@@ -117,16 +157,22 @@ int plat_kbd_poll(void)
     kb_script_init();
     g_kb_polls++;
     /* Scripted keys are injected by poll count -- independent of wall clock and
-     * of the instruction budget, so a spinning "any key?" loop still sees them. */
-    if (g_kb_idx < g_kb_n && g_kb_polls >= g_kb_next_poll) {
+     * of the instruction budget, so a spinning "any key?" loop still sees them.
+     * The wall-clock gate is the fallback for programs that block on a key. */
+    if (g_kb_idx < g_kb_n && (g_kb_polls >= g_kb_next_poll || kb_wall_ready())) {
         int k = g_kb_keys[g_kb_idx++];
         g_kb_next_poll = g_kb_polls + 20000;
+        g_kb_next_ms = GetTickCount64() + 250;
         return k;
     }
     if (g_kb_idx >= g_kb_n && g_kb_polls > g_kb_max_polls) return 27;   /* ESC */
     if (_kbhit()) {
         int c = _getch();
-        if (c == 0 || c == 0xE0) { g_last_scan = _getch(); return -1; }
+        if (c == 0 || c == 0xE0) {
+            /* extended key: the second byte is the PC scan code (arrows, F-keys) */
+            g_last_scan = _getch();
+            return 0x100 | (g_last_scan & 0xFF);
+        }
         return c;
     }
     return -1;
