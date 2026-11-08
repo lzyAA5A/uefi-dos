@@ -392,6 +392,8 @@ static int cmd_echo(const char *rest)
     upcase_inplace(tmp);
     if (strcmp(tmp, "ON") == 0) { echo_on = 1; return FAT_OK; }
     if (strcmp(tmp, "OFF") == 0) { echo_on = 0; return FAT_OK; }
+    /* DOS blank-line forms: "ECHO." "ECHO:" "ECHO;" "ECHO/" "ECHO+" "ECHO[" "ECHO]" */
+    if (rest[1] == 0 && strchr(".:;/,+[]\\", rest[0])) { say(""); return FAT_OK; }
     /* expand %VAR% from our tiny environment */
     char out[LINE_MAX];
     int o = 0;
@@ -626,6 +628,14 @@ static int dispatch(char *line)
         return FAT_OK;
     }
     if (ci_equal(cmd, "ECHO")) { cmd_echo(arg); return FAT_OK; }
+    /* DOS also accepts "ECHO." "ECHO:" "ECHO;" "ECHO/" "ECHO+" … as "print a
+       blank line", so the tokenizer hands us a five character command name. */
+    if (strlen(cmd) == 5 && strchr(".:;/,+[]\\", cmd[4]) &&
+        (cmd[0] == 'E' || cmd[0] == 'e') && (cmd[1] == 'C' || cmd[1] == 'c') &&
+        (cmd[2] == 'H' || cmd[2] == 'h') && (cmd[3] == 'O' || cmd[3] == 'o')) {
+        say("");
+        return FAT_OK;
+    }
     if (ci_equal(cmd, "VOL")) {
         int d = dos_current_drive();
         plat_puts(" Volume in drive ");
