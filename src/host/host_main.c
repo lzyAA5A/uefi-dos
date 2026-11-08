@@ -131,6 +131,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s image.img\n", argv[0]);
         return 2;
     }
+    /* instruction-level 8086 test vectors: no disk image needed */
+    if (strcmp(argv[1], "--itest") == 0) {
+        extern int itest_run(const char *filter);
+        return itest_run(argc >= 3 ? argv[2] : NULL);
+    }
     if (argc >= 4 && strcmp(argv[1], "--fat16") == 0) {
         extern int fat16_selftest(const char *image, const char *mode);
         return fat16_selftest(argv[2], argv[3]);

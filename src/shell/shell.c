@@ -12,6 +12,7 @@
 #include "emu/emu.h"
 #include "plat.h"
 #include "api/dosapi.h"
+#include "api/native.h"
 #define LINE_MAX 128
 
 
@@ -457,6 +458,42 @@ static void api_put_num(u16 v)
     while (n > 0) plat_putc(t[--n]);
 }
 
+/* RUN64: load and run a native PE image (see sdk/) on the real CPU. */
+static int cmd_run64(const char *rest)
+{
+    char path[DOS_MAX_PATH];
+    int n = 0, code = 0;
+    int rc;
+
+    while (*rest == ' ' || *rest == '\t') rest++;
+    while (*rest && *rest != ' ' && *rest != '\t' && n < (int)sizeof(path) - 1)
+        path[n++] = *rest++;
+    path[n] = 0;
+    if (!n) {
+        say("usage: RUN64 <file.exe> [args]");
+        return FAT_EINVAL;
+    }
+    while (*rest == ' ' || *rest == '\t') rest++;
+
+    plat_puts("RUN64: loading ");
+    plat_puts(path);
+    plat_puts(" as a native ");
+    api_put_num((u16)(sizeof(void *) * 8));
+    plat_puts("-bit image\n");
+
+    rc = native_run_file(path, rest, &code);
+    if (rc != FAT_OK) {
+        plat_puts("RUN64: cannot run ");
+        plat_puts(path);
+        plat_puts("\n");
+        return rc;
+    }
+    plat_puts("RUN64: exit code ");
+    api_put_num((u16)code);
+    plat_puts(" -> NATIVE-OK\n");
+    return FAT_OK;
+}
+
 /* APITEST: exercise the native 32/64-bit DOS API (api/dosapi.h) and the
  * 64/32 -> 16-bit downcall, then print API-OK. */
 static int cmd_apitest(const char *rest)
@@ -779,11 +816,13 @@ static int dispatch(char *line)
         say("  CLS   ECHO VER  VOL   DATE  TIME  PROMPT PATH");
         say("  SET   MEM  HELP EXIT  SHUTDOWN  MOUNT  UNMOUNT");
         say("  APITEST: native 32/64-bit DOS API demo (prints API-OK)");
+        say("  RUN64 <file.exe>: run a native 32/64-bit PE program (sdk/)");
         say("External programs: .COM and .EXE files on the current drive.");
         return FAT_OK;
     }
 
     if (ci_equal(cmd, "APITEST")) { cmd_apitest(arg); return FAT_OK; }
+    if (ci_equal(cmd, "RUN64")) return cmd_run64(arg);
 
     /* external command: find & run through the emulator */
     {

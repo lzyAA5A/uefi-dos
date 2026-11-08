@@ -321,7 +321,12 @@ int fat_free_chain(fat_vol *v, u32 first)
         if (set_fat_entry(v, cl, 0)) return FAT_EIO;
         if (v->free_count != 0xFFFFFFFFu) v->free_count++;
         if (nxt == CHAIN_END) break;
-        if (nxt >= CHAIN_FREE) return FAT_ECORRUPT;
+        /* A free or bad marker where a link was expected means the chain is
+         * already broken (a half-deleted file, or a volume written by a buggy
+         * tool).  Treat it as the end of the chain instead of refusing to free:
+         * that way the file can still be deleted or overwritten, which is what a
+         * rescue tool has to be able to do. */
+        if (nxt >= CHAIN_FREE) break;
         cl = nxt;
     }
     return FAT_OK;

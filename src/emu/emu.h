@@ -157,6 +157,7 @@ void int60_handler(Emu *e);   /* DPMI real-mode host entry */
 int  dpmi_install_check(Emu *e);
 void pm_patch_idt(Emu *e);    /* install service gates after LIDT */
 int  step_public(Emu *e);     /* execute one instruction (DPMI reflection) */
+int  itest_run(const char *filter); /* emu/itest.c: instruction-level tests */
 
 /* Linear address of the DPMI host LDT handed to protected-mode clients. */
 #define DPMI_LDT_LIN 0x00F00000u

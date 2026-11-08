@@ -152,6 +152,29 @@ Remove-Item Env:UEFIDOS_KBD -ErrorAction SilentlyContinue
 Remove-Item Env:UEFIDOS_KBD_MAX_POLLS -ErrorAction SilentlyContinue
 
 
+# AH=3Ch on an existing file must truncate it, not corrupt its chain: create a
+# file, write it, delete the content by recreating it, write again, read back.
+Run-Check 'FAT: create-over-existing truncates (AH=3Ch) and keeps the chain valid' {
+    & $HostExe --shell (Join-Path $Build 't_tools.img') 'COPY HELLO.TXT TRUNC.TXT' 'DEL TRUNC.TXT' 'COPY HELLO.TXT TRUNC.TXT' 'TYPE TRUNC.TXT' 'SUM TRUNC.TXT'
+} @('Hello UEFI-DOS!', 'TRUNC.TXT: 16 bytes')
+
+# Instruction-level emulator tests (emu/itest.c): every opcode we care about is
+# a byte stream plus a register/memory expectation, so a decoder regression is
+# caught here instead of as "a game renders garbage".
+Run-Check 'emulator: 8086 instruction test vectors (ITEST)' {
+    & $HostExe --itest
+} @('ITEST PASSED', 'itest: 49 passed, 0 failed')
+
+# Native 64-bit SDK program: a PE image built by sdk/ is mapped, relocated and
+# executed on the real CPU, with the DOS API and a 16-bit downcall inside.
+# run it twice on the same image: the second run recreates NATIVE.TXT, i.e. it
+# goes through INT 21h AH=3Ch truncation of an existing file.
+Run-Check 'native SDK: RUN64 runs a 64-bit PE program (dosapi + exec16)' {
+    & $HostExe --shell (Join-Path $Build 't_tools.img') 'RUN64 HELLO64.EXE' 'RUN64 HELLO64.EXE'
+} @('RUN64: loading HELLO64.EXE', 'pointer size : 64 bit', 'DOS version  : 2.10',
+    'reading      : HELLO.TXT', 'wrote        : NATIVE.TXT', 'exec16       : HELLO.COM -> exit 0',
+    'NATIVE-OK', 'exit code 0')
+
 Write-Host ""
 Write-Host "=============================="
 if ($skip -gt 0) { Write-Host "RESULTS: $pass passed, $fail failed, $skip skipped" }

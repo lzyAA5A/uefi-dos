@@ -233,11 +233,11 @@ struct EFI_BOOT_SERVICES {
     EFI_STATUS (*RaiseTPL)(UINTN NewTPL);
     void       (*RestoreTPL)(UINTN OldTPL);
     /* Memory Services */
-    EFI_STATUS (*AllocatePages)(UINT32 Type, UINT64 MemoryType, UINTN Pages, UINT64 *Memory);
+    EFI_STATUS (*AllocatePages)(UINT32 Type, UINTN MemoryType, UINTN Pages, UINT64 *Memory);
     EFI_STATUS (*FreePages)(UINT64 Memory, UINTN Pages);
     EFI_STATUS (*GetMemoryMap)(UINTN *MemoryMapSize, void *MemoryMap, UINTN *MapKey,
                                UINTN *DescriptorSize, UINT32 *DescriptorVersion);
-    EFI_STATUS (*AllocatePool)(UINT32 PoolType, UINTN Size, void **Buffer);
+    EFI_STATUS (*AllocatePool)(UINTN PoolType, UINTN Size, void **Buffer);
     EFI_STATUS (*FreePool)(void *Buffer);
     /* Event & Timer Services */
     EFI_STATUS (*CreateEvent)(UINT32 Type, UINTN NotifyTpl, void *NotifyFunction, void *NotifyContext, void *Event);

@@ -676,19 +676,26 @@ int dos_creat_ex(const char *path, int attr, int share, int open_mode, int *out)
     rc = resolve_entry(drive, abs, &d, &parent, nm, &root);
     if (rc == FAT_OK) {
         if (root || (d.raw[11] & 0x10)) return FAT_EISDIR;
-        /* truncate existing file */
+        /* AH=3Ch truncates an existing file: shrink the directory entry first,
+         * then release the chain.  The entry location must be looked up into a
+         * SCRATCH dirent -- fat_find() overwrites whatever it is given, so
+         * passing &d here used to restore the original cluster/size and leave a
+         * freed cluster pointed to by a 44-byte file (later writes then found
+         * FAT[cluster] == 0 and reported "corrupt"). */
         u32 cl = fat_entry_cluster(&d);
-        if (cl >= 2) {
-            rc = fat_free_chain(vol_of(drive), cl);
-            if (rc != FAT_OK) return rc;
-        }
+        u32 lba = 0, idx = 0;
+        fat_dirent scratch;
         d.raw[26] = d.raw[27] = 0;
         d.raw[20] = d.raw[21] = 0;
         fat_entry_set_size(&d, 0);
         fat_entry_set_cluster(&d, 0);
-        u32 lba, idx;
-        if (fat_find(vol_of(drive), parent, nm, &d, NULL, &lba, &idx) == FAT_OK) {
-            fat_write_entry_at(vol_of(drive), lba, idx, &d);
+        if (fat_find(vol_of(drive), parent, nm, &scratch, NULL, &lba, &idx) == FAT_OK) {
+            rc = fat_write_entry_at(vol_of(drive), lba, idx, &d);
+            if (rc != FAT_OK) return rc;
+        }
+        if (cl >= 2) {
+            rc = fat_free_chain(vol_of(drive), cl);
+            if (rc != FAT_OK) return rc;
         }
     } else if (rc == FAT_ENOENT) {
         rc = fat_create_file(vol_of(drive), parent, nm, NULL);

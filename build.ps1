@@ -41,6 +41,7 @@ try {
         'src/kernel/dos.c',
         'src/shell/shell.c',
         'src/api/dosapi.c',
+        'src/api/native.c',
         'src/emu/emu.c',
         'src/emu/int21.c',
             'src/emu/fcb.c',
@@ -89,6 +90,8 @@ try {
             'src/kernel/dos.c',
             'src/shell/shell.c',
             'src/api/dosapi.c',
+            'src/api/native.c',
+            'src/emu/itest.c',
             'src/emu/emu.c',
             'src/emu/int21.c',
             'src/emu/fcb.c',
@@ -116,6 +119,15 @@ try {
             & $Python $gp $Build
             if ($LASTEXITCODE -ne 0) { throw "$($g.what) generation failed" }
         }
+        # native 64-bit SDK examples (sdk/): PE images run on the real CPU
+        $sdkScript = Join-Path $Root 'sdk/build_sdk.ps1'
+        if ((Test-Path $sdkScript) -and (Test-Path $Gcc)) {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $sdkScript -Gcc $Gcc -OutDir $Build
+            if ($LASTEXITCODE -ne 0) { throw 'native SDK examples failed to build' }
+        } else {
+            Write-Host 'skip native SDK examples'
+        }
+
         # Optional hook: pull a curated third-party game/tool set from local DOS
         # disk images.  Nothing of that kind ships with this repository, so this
         # only runs when you drop in tools/import_cardputer.py yourself.
@@ -127,11 +139,17 @@ try {
         $programs = @('HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM',
                       'UPCALL.COM','DTATEST.COM','I2FTEST.COM','DPMITEST.COM','FCBTEST.COM',
                       'INFO.COM','CLOCK.COM','HEX.COM','SUM.COM','CAL.COM','KEYTEST.COM')
+        # the native SDK examples are PE images, not DOS programs: optional
+        $nativePrograms = @()
+        foreach ($p in @('HELLO64.EXE','HELLO32.EXE')) {
+            if (Test-Path (Join-Path $Build $p)) { $nativePrograms += $p }
+        }
         foreach ($prog in $programs) {
             if (-not (Test-Path (Join-Path $Build $prog))) { throw "missing generated program: $prog" }
         }
         $extraFiles = @()
         foreach ($prog in $programs) { $extraFiles += @('--file', "$Build/$prog=$prog") }
+        foreach ($prog in $nativePrograms) { $extraFiles += @('--file', "$Build/$prog=$prog") }
 
         $autoexecLines = @(
             'VER','DIR','TYPE HELLO.TXT','HELLO','TELETYPE','MZEXE','RUNNER','VRAM',
@@ -147,6 +165,8 @@ try {
             Write-Host 'note: UEFIDOS_DOS211 is not set, so the test image ships without a'
             Write-Host '      2.11 floppy: the MOUNT/floppy-write checks will be skipped.'
         }
+        if ($nativePrograms -contains 'HELLO64.EXE') { $autoexecLines += @('RUN64 HELLO64.EXE') }
+        if ($nativePrograms -contains 'HELLO32.EXE') { $autoexecLines += @('RUN64 HELLO32.EXE') }
         $autoexecLines += @('CONFIG','FCBTEST','INFO','CAL','SUM HELLO.TXT','HEX HELLO.TXT','SHUTDOWN')
 
         $imported = Join-Path $Build 'imported'

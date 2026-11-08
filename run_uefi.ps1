@@ -61,7 +61,12 @@ if (Test-Path $Serial) {
 # assertions
 $text = if (Test-Path $Serial) { Get-Content $Serial -Raw } else { '' }
 $ok = $true
-$markers = @('UEFI-DOS', 'BOOT OK', 'Hello from 8086 code!', 'TELETYPE OK!', 'Hello from MZ EXE!', 'RUNNER DONE!', 'VIDEO-OK!', 'API-OK', 'UPCALL-OK','DTA-OK','INT2F-OK','DPMI-HOST-OK','PM16-OK','PM32-DOS-OK','RMREFLECT-OK','DOSMEM-OK','REFLECTED-21H-OK','ABI-OK','TICKS-OK', 'UEFI-DOS native API v1.00', 'WRITE-OK', 'FCB-OK', 'FILES=20', '=== UEFI-DOS system info ===', 'Su Mo Tu We Th Fr Sa', 'bytes, checksum', 'Hello UEFI-DOS!.')
+$markers = @('UEFI-DOS', 'BOOT OK', 'Hello from 8086 code!', 'TELETYPE OK!', 'Hello from MZ EXE!', 'RUNNER DONE!', 'VIDEO-OK!', 'API-OK', 'UPCALL-OK','DTA-OK','INT2F-OK','DPMI-HOST-OK','PM16-OK','PM32-DOS-OK','RMREFLECT-OK','DOSMEM-OK','REFLECTED-21H-OK','ABI-OK','TICKS-OK', 'UEFI-DOS native API v1.00', 'WRITE-OK', 'FCB-OK', 'FILES=20', '=== UEFI-DOS system info ===', 'Su Mo Tu We Th Fr Sa', 'bytes, checksum', 'Hello UEFI-DOS!.', 'RUN64: loading HELLO64.EXE', 'NATIVE-OK')
+if ($Firmware -eq 'ia32') {
+    $markers += @('pointer size : 32 bit')   # HELLO32.EXE is the one that runs
+} else {
+    $markers += @('pointer size : 64 bit')   # HELLO64.EXE is the one that runs
+}
 if (-not $SkipFloppy) { $markers += @('FLOPPY-WRITE-OK', 'FLOPPY-OK', 'IBMBIO') }
 foreach ($m in $markers) {
     if ($text -notmatch [regex]::Escape($m)) { Write-Host "MISSING marker: $m"; $ok = $false }

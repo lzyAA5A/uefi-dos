@@ -290,6 +290,49 @@ void *plat_alloc(u32 size)
 }
 void plat_free(void *p) { if (p && gBS->FreePool) gBS->FreePool(p); }
 
+/* remembered so plat_free_code() uses the matching deallocator */
+static void *g_code_base;
+static UINTN g_code_pages;
+
+/* Executable memory for native PE images.  EfiLoaderCode (6) is mapped
+ * read/write/execute by every conforming firmware, whereas EfiLoaderData is
+ * NX on x86_64.  Page granularity: the loader sizes the block from
+ * SizeOfImage, so rounding up here is harmless. */
+void *plat_alloc_code(u32 size)
+{
+    UINTN pages = ((UINTN)size + 4095u) / 4096u;
+    UINT64 mem = 0;
+    void *pool = NULL;
+    if (!pages) pages = 1;
+    if (gBS->AllocatePages && gBS->AllocatePages(0 /* AnyPages */, 6 /* EfiLoaderCode */,
+                                                 pages, &mem) == EFI_SUCCESS) {
+        g_code_pages = pages;
+        g_code_base = (void *)(UINTN)mem;
+        return g_code_base;
+    }
+    /* some firmware maps pool pages of type EfiLoaderCode as executable where
+     * it refuses to hand out whole pages; try that before giving up */
+    if (gBS->AllocatePool && gBS->AllocatePool(6 /* EfiLoaderCode */, size, &pool) == EFI_SUCCESS) {
+        g_code_pages = 0;
+        g_code_base = pool;
+        return pool;
+    }
+    return NULL;
+}
+
+void plat_free_code(void *p, u32 size)
+{
+    (void)size;
+    if (!p) return;
+    if (g_code_pages && p == g_code_base) {
+        if (gBS->FreePages) gBS->FreePages((UINT64)(UINTN)p, g_code_pages);
+    } else if (gBS->FreePool) {
+        gBS->FreePool(p);
+    }
+    g_code_pages = 0;
+    g_code_base = NULL;
+}
+
 static int ubd_read(blockdev *bd, u64 lba, void *buf, u32 count)
 {
     (void)bd;

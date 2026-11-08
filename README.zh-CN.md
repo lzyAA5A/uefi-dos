@@ -11,13 +11,15 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 有过的东西：FAT32、64 位 UEFI 启动、FAT16 大容量卷、DOS 4.0 的文件共享/加锁/FCB
 语义、原生 32/64 位 DOS API，以及 386 保护模式与 DPMI 0.9 宿主。
 
-当前版本 0.6.1 —— 17 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
-的 x86_64 与 IA32 实机启动）。
+当前版本 0.7.0 —— 19 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+的 x86_64 与 IA32 实机启动）。0.7.0 新增：Linux 上一条 `make` 就能构建（附带
+`Dockerfile`）、**原生 32/64 位程序 SDK**（编译出的自由式 PE 程序用 `RUN64` 直接
+在真 CPU 上跑），以及针对 8086 解释器的**指令级测试框架**。
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-0.6.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.6.1.zip)
-（230 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
+[**下载 `UEFI-DOS-0.7.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.7.0.zip)
+（240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
    `winget install SoftwareFreedomConservancy.QEMU`
@@ -49,6 +51,9 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 | 386 保护模式 | 实模式 → 保护模式切换、GDT/LDT 解析、带限长检查的隐藏段缓存、`MOV CRn`/`LGDT`/`LIDT`/`LLDT`/`CLTS`、32 位寻址（SIB）、`0F xx` 指令族、保护模式 IDT 分发 |
 | DPMI 0.9 宿主 | `INT 2Fh AX=1687h` 引导、`INT 31h` 描述符/DOS 内存/实模式反射 —— 见 [`docs/protected-mode.md`](docs/protected-mode.md) |
 | 内置工具 | `INFO CAL SUM HEX CLOCK` —— 由 `tools/make_tools.py` 生成的 16 位 `.COM` 程序 |
+| 原生程序（SDK） | `RUN64 file.exe` 把自由式 PE32+/PE32 镜像映射进可执行内存、做基址重定位，然后在真 CPU 上调用 —— 见 [`docs/sdk.md`](docs/sdk.md) |
+| 解释器测试 | `hosttest.exe --itest`：49 条字节流指令用例 —— 见 [`docs/itest.md`](docs/itest.md) |
+| 构建方式 | PowerShell 脚本（Windows）、`make`（Linux/macOS/WSL）与 `Dockerfile` |
 
 ## 内置工具
 
@@ -167,6 +172,45 @@ DOSMEM-OK          INT 31h AX=0501h 分配 DOS 内存成功
 
 ## 构建与运行
 
+### Linux / macOS / WSL：`make`
+
+只要有一个能产出 PE 的 GCC（Linux/macOS 上的 mingw-w64），整个系统就能构建，
+WSL 里同样适用：
+
+```sh
+sudo apt install build-essential gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 python3 make
+
+make            # build/BOOTX64.EFI
+make all        # 再加上 build/BOOTIA32.EFI
+make image      # 再加上 build/UEFIDOS.img（可启动，AUTOEXEC 末尾停在 C:\> 提示符）
+make sdk        # 再加上 build/HELLO64.EXE、build/HELLO32.EXE（原生 32/64 位程序）
+make run        # 用 QEMU 启动镜像（设 OVMF_DIR=/usr/share/OVMF）
+make clean
+```
+
+`make` 不需要 Visual Studio、不需要 PowerShell、也不需要任何 Python 包 —— 只要交叉
+编译器、`make` 与 `python3`（标准库）。`make host` / `make test`（宿主测试器与指令级
+测试向量）只在 Windows 上可用，因为宿主平台层直接调用 Win32 控制台与文件 API。
+
+### 或者完全在 Docker 里构建
+
+```sh
+docker build -t uefi-dos .
+docker run --rm -v "$PWD/out:/src/build" uefi-dos        # BOOTX64/IA32 + 镜像 + SDK
+docker run --rm -v "$PWD/out:/src/build" uefi-dos make sdk
+```
+
+镜像里安装 `gcc-mingw-w64`，全部从源码构建，构建过程本身不下载任何二进制。
+
+### Windows：PowerShell
+
+依赖：
+
+- Windows + MSYS2 `mingw64` gcc —— 一个 x86_64 工具链同时产出 64 位与 32 位 UEFI 程序
+  （项目不用 libc，64 位除法助手在 `src/common/divdi3.c`）
+- Python 3（镜像生成与手汇编测试程序，仅用标准库）
+- QEMU 与 OVMF/edk2 固件（用于启动测试）
+
 依赖：
 
 - Windows + MSYS2 `mingw64` gcc —— 一个 x86_64 工具链同时产出 64 位与 32 位 UEFI 程序
@@ -219,9 +263,90 @@ start_qemu.bat -Firmware ia32  # 32 位载荷
 `python tools/screenshot.py 55555 build/screen.ppm` 与
 `python tools/ppm2png.py build/screen.ppm build/screen.png`。
 
+## 原生 32/64 位程序（SDK）
+
+DOS 程序是 16 位的；UEFI-DOS 另外还能跑**原生**程序：自由式（freestanding）PE 镜像
+被映射到可执行内存、做完基址重定位后**直接在真 CPU 上调用** —— 没有解释器、没有模式
+切换 —— 而它用的 DOS 服务、文件句柄、当前目录，和 16 位世界是同一套。
+
+```sh
+make sdk                       # 产出 build/HELLO64.EXE（PE32+）与 HELLO32.EXE（PE32）
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File sdk\build_sdk.ps1
+```
+
+一个原生程序就是一个普通 C 文件加一个入口函数：
+
+```c
+#include "uefidos/dosapi.h"
+#include "uefidos/runtime.h"
+
+int uefidos_main(const uefidos_exports *api, const char *args)
+{
+    uefidos_init(api);
+    rt_puts("hello from a 64-bit program\n");
+
+    u16 h;
+    if (api->svc->open("HELLO.TXT", DOS_OPEN_READ, &h) == 0) {
+        char buf[80]; u32 got;
+        api->svc->read(h, buf, sizeof(buf) - 1, &got);
+        api->svc->write(1, buf, got, &got);       /* 句柄 1 = 控制台 */
+        api->svc->close(h);
+    }
+    i16 code;                                      /* 16 位下行调用 */
+    api->svc->exec16("HELLO.COM", "", &code);
+    return 0;
+}
+```
+
+```
+C:\> RUN64 HELLO64.EXE
+RUN64: loading HELLO64.EXE as a native 64-bit image
+=== UEFI-DOS native SDK demo ===
+pointer size : 64 bit
+DOS version  : 2.10
+reading      : HELLO.TXT (16 bytes)
+Hello UEFI-DOS!
+wrote        : NATIVE.TXT (44 bytes)
+Hello from 8086 code!
+exec16       : HELLO.COM -> exit 0 (16-bit program ran)
+NATIVE-OK
+RUN64: exit code 0 -> NATIVE-OK
+```
+
+其中 `Hello from 8086 code!` 那一行，是 64 位程序启动的 16 位 `.COM` 打印出来的 ——
+下行调用链完整跑通。位宽由加载器强制校验（64 位内核拒绝 32 位镜像：那段代码不可能在
+64 位地址空间里执行）。完整的服务表、链接参数与已知限制见
+[`docs/sdk.md`](docs/sdk.md)。
+
+## 指令级解释器测试
+
+`src/emu/emu.c` 是一个巨大的 `switch`，过去这里的回归往往表现为"某个游戏画面糊了"。
+`src/emu/itest.c` 把每条指令变成"一段字节流 + 寄存器/内存期望值"，交给**真实解码器**
+执行：
+
+```powershell
+build\hosttest.exe --itest          # 49 条用例
+build\hosttest.exe --itest shift    # 只跑名字里带 shift 的用例
+```
+
+```
+  [PASS] add ax,bx (reg dst)
+  [PASS] shl ax,1
+  [PASS] rep stosw (3 words, 2 store units)
+  [PASS] jmp far (EA)
+itest: 49 passed, 0 failed
+ITEST PASSED
+```
+
+加一条用例就是改五行表格；格式、坑（宏里的逗号、`lodsb` 不动 `AH`）以及尚未覆盖的
+部分见 [`docs/itest.md`](docs/itest.md)。
+
 ## 回归测试
 
-`run_tests.ps1` 会先完整构建，再跑 17 项检查：FAT32 读/写自检；宿主命令解释器
+`run_tests.ps1` 会先完整构建，再跑 20 项检查：FAT32 读/写自检；宿主命令解释器
 DIR/TYPE/VER/COM/EXE/EXEC/显示 + 原生 API 与上行调用演示；宿主写路径；软盘镜像挂载
 为 `A:`；在 2.11 镜像上写 FAT12；读取 2.11 与 MS-DOS 5 镜像；两项 QEMU/OVMF 启动
 冒烟测试（x86_64 与 IA32）；阶段 4/6 语义与双路径对比；32 MB 与 1.9 GB FAT16 卷写入；
@@ -308,6 +433,7 @@ tools/
   qemu_probe.py      通过 QEMU monitor 驱动 UEFI shell
   qmon.py qtype.py screenshot.py ppm2png.py   QEMU monitor/键盘/截图助手
 docs/                兼容性报告、DOS 4.0 语义、迁移坑、保护模式/DPMI 笔记
+Makefile Dockerfile   一条命令构建（Linux/macOS/WSL，以及容器内）
 build.ps1 run_uefi.ps1 run_interactive.ps1 run_tests.ps1 start_qemu.bat
 ```
 
@@ -345,6 +471,18 @@ build.ps1 run_uefi.ps1 run_interactive.ps1 run_tests.ps1 start_qemu.bat
 - `dos_fat_name()` 无条件解引用可能为 NULL 的 `ok` 指针；`dos_unlink()` 不拒绝只读文件。
 - FAT 扇区缓存原本只有单个槽位，簇链遍历反复读盘 —— 写 8 个扇区要 32720 毫秒，改成 8 槽
   缓存后 113 毫秒。
+- `INT 21h AH=3Ch` 对已存在的文件做截断时，把目录项的位置查回到了**刚被清零的同一个结构体**里，
+  `fat_find()` 因此把旧的簇号与大小又写了回去：文件指向一个刚刚被释放的簇
+  （`FAT[簇] == 0`），下一次写入直接报"损坏"（DOS 错误 0x1E）。修法是另用一份临时目录项查位置，
+  并且**先**把目录项收缩、**再**释放簇链。这个 bug 是 SDK 示例连续两次创建同一个文件才暴露出来的。
+- `src/efi/efi.h` 里 `AllocatePages`/`AllocatePool` 的内存类型参数写成了 `UINT64`/`UINT32`，
+  而固件 ABI 里 `EFI_MEMORY_TYPE` 是 `UINTN`：IA32 上多压了 8 字节，于是**每一个**原生镜像
+  加载都失败并打印 `native loader: out of memory`，而参数宽度恰好对上的 x86_64 却正常。
+  改成 `UINTN` 并补了 `EfiLoaderCode` 池回退，现在两种固件各自的原生程序都能跑
+  （IA32 冒烟测试已验证）。
+- **新指令级测试框架第一次运行报了 4 条失败，逐条排查后全部是测试自己期望值写错**
+  （`div` 把商写进 `AX`、`lodsb` 不改 `AH`、有一处 `mov [bx],ax` 夹具写的正是原值）。
+  这正是想要的结果：先把标尺校准，再怀疑解释器。
 
 - `INT 21h AH=19h`（取当前驱动器）永远返回 `A:`，`AH=0Eh` 根本没有真正切换驱动器，
   `AH=2Ah` 的星期值是写死的 1 而不是算出来的 —— 日历和星期相关逻辑因此全错。
@@ -377,8 +515,13 @@ build.ps1 run_uefi.ps1 run_interactive.ps1 run_tests.ps1 start_qemu.bat
 - FAT32 的 `FSInfo` 空闲簇数不写回（内核内存里维护 `free_count`）。
 - 未实现 TSR 常驻（`INT 27h` 只终止程序）。
 - 单文件按 DOS 4.0 语义限 32 MB（理由见 `docs/dos4-semantics.md` §4.6）。
-- 路线：ring 3 + TSS/门 → `CR3` 分页 + `#PF` → DPMI 0600/0B00 → LFN 读取 → 图形模式 →
-  用 DOS 2.11 时期源码重建部分工具 → 扩充兼容性矩阵。
+- 目前只挂载启动卷（`C:`）：其他 UEFI 块设备（U 盘、其他分区）还没有枚举成
+  `D:`/`E:` —— 设计见 [`docs/roadmap-video-usb-lfn.md`](docs/roadmap-video-usb-lfn.md)。
+- 原生程序：64 位构建不能运行 32 位镜像（反之亦然）；除 C SDK 外还没有
+  C++/Zig/Rust 的接入胶水代码。
+- 路线（顺序按设计文档的建议）：把所有块设备枚举成 `D:`/`E:`（半天）→ LFN 读取
+  （1 天）→ 经 GOP 实现 VESA 640×480×256（3 天）→ LFN 创建 → ring 3 + TSS/门 →
+  `CR3` 分页 + `#PF` → DPMI 0600/0B00 → 扩充兼容性矩阵。
 
 ## 许可证
 

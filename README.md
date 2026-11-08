@@ -13,13 +13,16 @@ programs see) and then adds the things DOS 2.11 never had: FAT32, 64-bit UEFI
 boot, FAT16 large volumes, DOS 4.0 file-sharing/locking/FCB semantics, a native
 32/64-bit DOS API, and 386 protected mode with a DPMI 0.9 host.
 
-Version 0.6.1 — 17 of 17 automated checks pass on the Windows host harness and
-on QEMU + OVMF (x86_64 and IA32).
+Version 0.7.0 — 20 of 20 automated checks pass on the Windows host harness and
+on QEMU + OVMF (x86_64 and IA32). 0.7.0 adds a one-command build for Linux
+(`Makefile` + `Dockerfile`), a native 32/64-bit **SDK** that compiles freestanding
+PE programs against the DOS API (`RUN64 HELLO64.EXE` runs one on the real CPU),
+and an **instruction-level test framework** for the 8086 interpreter.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-0.6.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.6.1.zip)
-(230 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
+[**Download `UEFI-DOS-0.7.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.7.0.zip)
+(240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
    `winget install SoftwareFreedomConservancy.QEMU`
@@ -52,6 +55,9 @@ both inside. `make_release.ps1` rebuilds that package from source.
 | 386 protected mode | real → protected transition, GDT/LDT parsing, hidden segment caches with limit checks, `MOV CRn`/`LGDT`/`LIDT`/`LLDT`/`CLTS`, 32-bit addressing (SIB), `0F xx` opcode set, protected-mode IDT delivery |
 | DPMI 0.9 host | `INT 2Fh AX=1687h` bootstrap, `INT 31h` descriptors/DoS memory/real-mode reflection — see [`docs/protected-mode.md`](docs/protected-mode.md) |
 | Bundled utilities | `INFO CAL SUM HEX CLOCK` — 16-bit `.COM` programs built from `tools/make_tools.py` (see below) |
+| Native programs (SDK) | `RUN64 file.exe` maps a freestanding PE32+/PE32 image, applies base relocations and calls it on the real CPU — see [`docs/sdk.md`](docs/sdk.md) |
+| Emulator tests | `hosttest.exe --itest` — 49 byte-stream instruction cases — see [`docs/itest.md`](docs/itest.md) |
+| Build | PowerShell scripts (Windows), `make` (Linux/macOS/WSL) and a `Dockerfile` |
 
 ## Bundled utilities
 
@@ -182,9 +188,42 @@ in [`docs/protected-mode.md`](docs/protected-mode.md).
 
 ## Build and run
 
+### Linux / macOS / WSL: `make`
+
+The whole OS builds with any PE-targeting GCC -- mingw-w64 on Linux or macOS --
+and the same `make` works under WSL:
+
+```sh
+sudo apt install build-essential gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 python3 make
+
+make            # build/BOOTX64.EFI
+make all        # + build/BOOTIA32.EFI
+make image      # + build/UEFIDOS.img (bootable, AUTOEXEC ends at a live C:\> prompt)
+make sdk        # + build/HELLO64.EXE, build/HELLO32.EXE (native 32/64-bit programs)
+make run        # boot the image in QEMU (set OVMF_DIR=/usr/share/OVMF)
+make clean
+```
+
+`make` needs no Visual Studio, no PowerShell and no Python packages -- only a
+cross compiler, `make` and `python3` (stdlib). `make host` / `make test` (the host
+harness and the instruction test vectors) are Windows-only: the harness uses
+Win32 console and file APIs.
+
+### Or entirely inside Docker
+
+```sh
+docker build -t uefi-dos .
+docker run --rm -v "$PWD/out:/src/build" uefi-dos        # BOOTX64/IA32 + image + SDK
+docker run --rm -v "$PWD/out:/src/build" uefi-dos make sdk
+```
+
+The container installs `gcc-mingw-w64` and builds everything from source.
+
+### Windows: PowerShell
+
 Requirements:
 
-- Windows with MSYS2 `mingw64` gcc — one x86_64 toolchain builds both the
+- Windows with MSYS2 `mingw64` gcc -- one x86_64 toolchain builds both the
   64-bit and the 32-bit UEFI binaries (the project avoids libc; 64-bit division
   helpers live in `src/common/divdi3.c`)
 - Python 3 (image builder and hand-assembled test programs; stdlib only)
@@ -237,16 +276,104 @@ it as `A:`. Screenshot helpers (stdlib only): start QEMU with
 `python tools/screenshot.py 55555 build/screen.ppm` and
 `python tools/ppm2png.py build/screen.ppm build/screen.png`.
 
+## Native 32/64-bit programs (SDK)
+
+DOS programs are 16-bit. UEFI-DOS also runs **native** programs: freestanding PE
+images loaded into executable memory, relocated, and called on the real CPU --
+no interpreter, no mode switch -- using the same DOS services, the same file
+handles and the same current directory as the 16-bit world.
+
+```sh
+make sdk                       # build/HELLO64.EXE (PE32+) and HELLO32.EXE (PE32)
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File sdk\build_sdk.ps1
+```
+
+A native program is a normal C file with one entry point:
+
+```c
+#include "uefidos/dosapi.h"
+#include "uefidos/runtime.h"
+
+int uefidos_main(const uefidos_exports *api, const char *args)
+{
+    uefidos_init(api);
+    rt_puts("hello from a 64-bit program\n");
+
+    u16 h;
+    if (api->svc->open("HELLO.TXT", DOS_OPEN_READ, &h) == 0) {
+        char buf[80]; u32 got;
+        api->svc->read(h, buf, sizeof(buf) - 1, &got);
+        api->svc->write(1, buf, got, &got);       /* handle 1 == console */
+        api->svc->close(h);
+    }
+    i16 code;                                      /* 16-bit downcall */
+    api->svc->exec16("HELLO.COM", "", &code);
+    return 0;
+}
+```
+
+```
+C:\> RUN64 HELLO64.EXE
+RUN64: loading HELLO64.EXE as a native 64-bit image
+=== UEFI-DOS native SDK demo ===
+pointer size : 64 bit
+DOS version  : 2.10
+reading      : HELLO.TXT (16 bytes)
+Hello UEFI-DOS!
+wrote        : NATIVE.TXT (44 bytes)
+Hello from 8086 code!
+exec16       : HELLO.COM -> exit 0 (16-bit program ran)
+NATIVE-OK
+RUN64: exit code 0 -> NATIVE-OK
+```
+
+The `Hello from 8086 code!` line is a 16-bit `.COM` started by the 64-bit program
+-- the downcall path end to end. Bitness is enforced by the loader (a 64-bit
+kernel refuses 32-bit images: that code cannot execute in a 64-bit address
+space). The full service list, the linker flags and the limitations are in
+[`docs/sdk.md`](docs/sdk.md).
+
+## Instruction-level emulator tests
+
+`src/emu/emu.c` is one large `switch`, so regressions there used to surface as
+"a game renders garbage". `src/emu/itest.c` turns each opcode into a byte stream
+plus a register/memory expectation, executed through the real decoder:
+
+```powershell
+build\hosttest.exe --itest          # 49 cases
+build\hosttest.exe --itest shift    # only cases whose name contains "shift"
+```
+
+```
+  [PASS] add ax,bx (reg dst)
+  [PASS] shl ax,1
+  [PASS] rep stosw (3 words, 2 store units)
+  [PASS] jmp far (EA)
+itest: 49 passed, 0 failed
+ITEST PASSED
+```
+
+Adding a case is a five-line table edit; see [`docs/itest.md`](docs/itest.md) for
+the format, the traps (macro commas, `lodsb` preserving `AH`) and what is still
+uncovered.
+
 ## Regression suite
 
-`run_tests.ps1` builds everything and runs 17 checks: FAT32 read/write selftest;
+`run_tests.ps1` builds everything and runs 20 checks: FAT32 read/write selftest;
 host shell DIR/TYPE/VER/COM/EXE/EXEC/video plus native-API and upcall demos;
 host shell write path; floppy-image `A:` mount; FAT12 write on a 2.11 image;
 FAT12 read of 2.11 and MS-DOS 5 images; two QEMU/OVMF boot smoke tests (x86_64
 and IA32); phase 4/6 semantics with the dual-path comparison; FAT16 write on
 32 MB and 1.9 GB volumes; `FCBTEST.COM` exercising FCB calls from real 16-bit
 code; and the bundled `INFO`/`CAL`/`SUM`/`HEX` utilities (the calendar month is
-cross-checked against the host clock); and `KEYTEST.COM`, which reads five keys through `INT 16h` and prints their scan codes, proving arrow and function keys reach the guest as real BIOS scan codes.
+cross-checked against the host clock); and `KEYTEST.COM`, which reads five keys through `INT 16h` and prints their scan codes, proving arrow and function keys reach the guest as real BIOS scan codes; the
+instruction-level emulator test vectors (`--itest`, 49 cases); and `RUN64
+HELLO64.EXE`, a native 64-bit program built by the SDK, which prints the DOS
+version, reads and writes files, lists `*.TXT`, then runs a 16-bit `.COM` through
+the interpreter and reports its exit code.
 
 Checks that need a Microsoft DOS floppy image are skipped (reported as
 `[SKIP]`) when `UEFIDOS_DOS211` / `UEFIDOS_DOS5` are unset.
@@ -312,13 +439,20 @@ src/
   kernel/dos.c|h     drives, path resolution, file handles, find/DTA, CONFIG.SYS,
                      SHARE modes, byte-range locks, read-only delete protection
   api/dosapi.c|h     native 32/64-bit DOS API (INT 21h parity table + exports)
+  api/native.c|h     native PE loader: map, relocate, call uefidos_main() on the real CPU
   shell/shell.c|h    COMMAND.COM-like interpreter and batch execution
   emu/emu.c          8086 real-mode interpreter, PSP/IVT, .COM/.EXE loader, video mirror
   emu/int21.c        INT 21h / INT 10h / INT 13h / INT 16h / INT 1Ah services
   emu/fcb.c          DOS 4.0 FCB call family (AH=0Fh..28h)
   emu/int2f.c        INT 2Fh native multiplex (16-bit -> native upcall)
   emu/dpmi.c         DPMI 0.9 host: INT 2Fh/1687h, INT 31h, INT 60h entry
+  emu/itest.c        instruction-level test vectors (hosttest --itest)
   host/              Windows platform + selftest/shell/fatlist/phase46/fat16 harness
+sdk/
+  include/uefidos/   dosapi.h (public ABI), runtime.h (freestanding helpers)
+  examples/hello64.c the demo native program (file I/O, find, clock, exec16)
+  Makefile           builds HELLO64.EXE / HELLO32.EXE with a mingw cross compiler
+  build_sdk.ps1      the same build for Windows
 tools/
   fat32.py           FAT32 formatter (no dependencies)
   make_image.py      image builder (boot files, text files, AUTOEXEC.BAT)
@@ -333,7 +467,9 @@ tools/
   qemu_probe.py      drive the UEFI shell through the QEMU monitor
   qmon.py qtype.py screenshot.py ppm2png.py   QEMU monitor/keyboard/screenshot helpers
 docs/                compatibility report, DOS 4.0 semantics, migration pitfalls,
-                     protected-mode/DPMI notes
+                     protected-mode/DPMI notes, native SDK, instruction tests,
+                     and the VESA/USB/LFN roadmap design
+Makefile Dockerfile   one-command build for Linux/macOS/WSL (and in a container)
 build.ps1 run_uefi.ps1 run_interactive.ps1 run_tests.ps1 start_qemu.bat
 make_release.ps1     stage + zip the ready-to-run package (image + launcher)
 start_prebuilt.bat   the launcher shipped as start.bat inside that package
@@ -384,6 +520,25 @@ start_prebuilt.bat   the launcher shipped as start.bat inside that package
   reject read-only files.
 - The FAT sector cache was a single slot, making chain walks re-read the FAT —
   32,720 ms for an 8-sector write versus 113 ms after the 8-slot cache.
+- `INT 21h AH=3Ch` on an existing file looked up the directory entry **into the
+  same struct it had just zeroed**, so `fat_find()` restored the old cluster and
+  size: the file was left pointing at a cluster that had just been freed
+  (`FAT[cluster] == 0`) and the next write reported "corrupt" (DOS error 0x1E).
+  Fixed by looking the entry position up in a scratch dirent and shrinking the
+  entry *before* releasing the chain. Found because the SDK demo creates its
+  output file twice in a row.
+- `AllocatePages`/`AllocatePool` were declared with a `UINT64` / `UINT32` memory
+  type in `src/efi/efi.h`. `EFI_MEMORY_TYPE` is `UINTN`, so on IA32 the call
+  pushed 8 bytes for a 4-byte parameter and *every* native image load failed with
+  `native loader: out of memory` — while x86_64, where the widths happened to
+  line up, worked. Fixed to `UINTN` plus an `EfiLoaderCode` pool fallback, and
+  both firmwares now run their native program (verified in the IA32 smoke test).
+
+**Found by the new instruction tester:** none yet — its first run reported four
+failing cases, and all four were wrong expectations in the *tests* (`div` writes
+the quotient to `AX`, `lodsb` preserves `AH`, a `mov [bx],ax` fixture that wrote
+the same bytes it already contained). That is the intended outcome: the framework
+is calibrated before the interpreter is blamed.
 - `INT 21h AH=19h` (default drive) always returned `A:`, and `AH=0Eh` never
   actually *selected* a drive; `AH=2Ah` returned a hard-coded weekday of 1
   instead of computing it, so calendars and day-of-week logic were wrong.

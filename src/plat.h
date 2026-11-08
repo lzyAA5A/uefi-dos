@@ -33,6 +33,10 @@ int  plat_abi_selftest(u32 *year_out); /* 0 = ABI/services OK */
 int  plat_boot_blockdev(blockdev *bd);  /* block device holding the OS image */
 void *plat_alloc(u32 size);
 void plat_free(void *p);
+/* Executable memory for native (PE) images: the returned block must be
+ * readable, writable and executable.  plat_free_code takes the same size. */
+void *plat_alloc_code(u32 size);
+void plat_free_code(void *p, u32 size);
 void plat_banner(const char *s);        /* serial/mirror output hook */
 void plat_video_show(const u8 *vram);   /* render emulated 80x25 text screen */
 

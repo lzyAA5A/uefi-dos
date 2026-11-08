@@ -199,6 +199,12 @@ void plat_get_time(int *h, int *mi, int *s)
 
 void *plat_alloc(u32 size) { return malloc(size); }
 void plat_free(void *p) { free(p); }
+void *plat_alloc_code(u32 size)
+{
+    return VirtualAlloc(NULL, size ? size : 4096, MEM_COMMIT | MEM_RESERVE,
+                        PAGE_EXECUTE_READWRITE);
+}
+void plat_free_code(void *p, u32 size) { (void)size; if (p) VirtualFree(p, 0, MEM_RELEASE); }
 
 /* ---- file-backed block device ---- */
 static int hbd_read(blockdev *bd, u64 lba, void *buf, u32 count)

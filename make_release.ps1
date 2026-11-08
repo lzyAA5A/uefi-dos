@@ -33,7 +33,8 @@ Write-Host "== release $Version -> $Stage"
 # ---- 1. the EFI payload and the bundled programs must be up to date ----
 & (Join-Path $Root 'build.ps1') | Out-Null
 foreach ($f in 'BOOTX64.EFI','BOOTIA32.EFI','INFO.COM','CAL.COM','SUM.COM','HEX.COM','CLOCK.COM',
-               'HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM','UPCALL.COM') {
+               'HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM','UPCALL.COM',
+               'HELLO64.EXE','HELLO32.EXE') {
     if (-not (Test-Path (Join-Path $Build $f))) { throw "missing build artifact: $f (run build.ps1)" }
 }
 
@@ -50,7 +51,8 @@ $makeArgs = @($img, '--size-mb', "$SizeMB",
     '--text',      "CONFIG.SYS=FILES=20`nLASTDRIVE=D",
     '--text',      'README.TXT=UEFI-DOS release image. Type HELP for commands.')
 foreach ($p in 'HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM','UPCALL.COM',
-               'INFO.COM','CAL.COM','SUM.COM','HEX.COM','CLOCK.COM') {
+               'INFO.COM','CAL.COM','SUM.COM','HEX.COM','CLOCK.COM',
+               'HELLO64.EXE','HELLO32.EXE') {
     $makeArgs += @('--file', "$Build/$p=$p")
 }
 # No SHUTDOWN here: the user gets a shell prompt to play with.
@@ -65,8 +67,10 @@ $autoexec = @(
     'HEX HELLO.TXT',
     'HELLO',
     'VRAM',
+    'RUN64 HELLO64.EXE',
     'ECHO.',
     'ECHO Try: DIR  CD DEMO  TYPE HELLO.TXT  CLOCK (any key)  APITEST',
+    'ECHO      RUN64 HELLO64.EXE  (native 64-bit program, see docs/sdk.md)',
     'ECHO Type SHUTDOWN to power off.'
 ) -join "`n"
 $makeArgs += @('--autoexec', $autoexec)
