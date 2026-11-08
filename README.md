@@ -13,12 +13,12 @@ programs see) and then adds the things DOS 2.11 never had: FAT32, 64-bit UEFI
 boot, FAT16 large volumes, DOS 4.0 file-sharing/locking/FCB semantics, a native
 32/64-bit DOS API, and 386 protected mode with a DPMI 0.9 host.
 
-Version 0.6.0 — 16 of 16 automated checks pass on the Windows host harness and
+Version 0.6.1 — 17 of 17 automated checks pass on the Windows host harness and
 on QEMU + OVMF (x86_64 and IA32).
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-0.6.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.6.0.zip)
+[**Download `UEFI-DOS-0.6.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.6.1.zip)
 (230 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):

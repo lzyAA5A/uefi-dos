@@ -11,12 +11,12 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 有过的东西：FAT32、64 位 UEFI 启动、FAT16 大容量卷、DOS 4.0 的文件共享/加锁/FCB
 语义、原生 32/64 位 DOS API，以及 386 保护模式与 DPMI 0.9 宿主。
 
-当前版本 0.6.0 —— 16 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 0.6.1 —— 17 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-0.6.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.6.0.zip)
+[**下载 `UEFI-DOS-0.6.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.6.1.zip)
 （230 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
