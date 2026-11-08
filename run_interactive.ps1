@@ -44,6 +44,10 @@ $lines = @(
     'VRAM'
     'APITEST'
     'UPCALL'
+    'INFO'
+    'CAL'
+    'SUM HELLO.TXT'
+    'HEX HELLO.TXT'
 )
 $makeArgs = @($Img, '--size-mb', '64',
     '--boot',    (Join-Path $Build 'BOOTX64.EFI'),
@@ -56,7 +60,12 @@ $makeArgs = @($Img, '--size-mb', '64',
     '--file',    ((Join-Path $Build 'MZEXE.EXE')   + '=MZEXE.EXE'),
     '--file',    ((Join-Path $Build 'RUNNER.COM')  + '=RUNNER.COM'),
     '--file',    ((Join-Path $Build 'VRAM.COM')    + '=VRAM.COM'),
-    '--file',    ((Join-Path $Build 'UPCALL.COM')  + '=UPCALL.COM'))
+    '--file',    ((Join-Path $Build 'UPCALL.COM')  + '=UPCALL.COM'),
+    '--file',    ((Join-Path $Build 'INFO.COM')    + '=INFO.COM'),
+    '--file',    ((Join-Path $Build 'CLOCK.COM')   + '=CLOCK.COM'),
+    '--file',    ((Join-Path $Build 'HEX.COM')     + '=HEX.COM'),
+    '--file',    ((Join-Path $Build 'SUM.COM')     + '=SUM.COM'),
+    '--file',    ((Join-Path $Build 'CAL.COM')     + '=CAL.COM'))
 # the curated third-party games/tools that build.ps1 may have extracted from your
 # own DOS disk images (nothing of that kind ships with this repository)
 $imported = Join-Path $Build 'imported'

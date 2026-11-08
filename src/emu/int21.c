@@ -66,6 +66,17 @@ static void con_put(char c)
 static void set_err(Emu *e, u8 code) { e->flags |= F_CF; e->ax = code; }
 static void set_ok(Emu *e) { e->flags = (u16)(e->flags & ~F_CF); }
 
+/* Day of week for a Gregorian date: 0 = Sunday .. 6 = Saturday
+   (Sakamoto's method, which is valid for any y >= 1). */
+static int dos_weekday(int y, int m, int d)
+{
+    static const int t[12] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+    if (m < 1 || m > 12) return 0;
+    if (m < 3) y -= 1;
+    int w = (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+    return w < 0 ? w + 7 : w;
+}
+
 static int input_key(Emu *e)
 {
     int scan = 0, asc = 0;
@@ -225,14 +236,18 @@ void int21_handler(Emu *e)
         set_ok(e);
         e->ax = (u16)(e->ax & 0xFF00);
         return;
-    case 0x0D: case 0x0E: case 0x18: case 0x19:
+    case 0x0D: case 0x18:                       /* flush buffers / no-op */
         set_ok(e);
         e->ax = (u16)(e->ax & 0xFF00);
-        if (ah == 0x0E) {
-            int d = (e->dx & 0xFF) - 1;
-            if (d < 0) d = 0;
-            e->ax = (u16)((e->ax & 0xFF00) | (u8)dos_current_drive());
-        }
+        return;
+    case 0x0E:                                  /* select default drive */
+        set_ok(e);
+        dos_set_drive((int)(e->dx & 0xFF));
+        e->ax = (u16)((e->ax & 0xFF00) | (u8)(g_dos.last_drive + 1));
+        return;
+    case 0x19:                                  /* current default drive */
+        set_ok(e);
+        e->ax = (u16)((e->ax & 0xFF00) | (u8)dos_current_drive());
         return;
     case 0x1A:
         g_dos.dta_seg = e->ds;
@@ -252,7 +267,7 @@ void int21_handler(Emu *e)
         e->cx = (u16)y;
         e->dx = (u16)((m << 8) | d);
         set_ok(e);
-        e->ax = (u16)((e->ax & 0xFF00) | 1);
+        e->ax = (u16)((e->ax & 0xFF00) | (u8)dos_weekday(y, m, d));
         return;
     }
     case 0x2B: set_ok(e); return;

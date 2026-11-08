@@ -106,7 +106,8 @@ try {
         $generators = @(
             @{ script = 'tools/make_hello.py';    what = 'demo COM/EXE programs' },
             @{ script = 'tools/make_pm_tests.py'; what = 'protected-mode and DPMI test' },
-            @{ script = 'tools/make_fcb_test.py'; what = 'FCB test program' }
+            @{ script = 'tools/make_fcb_test.py'; what = 'FCB test program' },
+            @{ script = 'tools/make_tools.py';    what = 'bundled utility set' }
         )
         foreach ($g in $generators) {
             $gp = Join-Path $Root $g.script
@@ -123,7 +124,8 @@ try {
         }
 
         $programs = @('HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM',
-                      'UPCALL.COM','DTATEST.COM','I2FTEST.COM','DPMITEST.COM','FCBTEST.COM')
+                      'UPCALL.COM','DTATEST.COM','I2FTEST.COM','DPMITEST.COM','FCBTEST.COM',
+                      'INFO.COM','CLOCK.COM','HEX.COM','SUM.COM','CAL.COM')
         foreach ($prog in $programs) {
             if (-not (Test-Path (Join-Path $Build $prog))) { throw "missing generated program: $prog" }
         }
@@ -144,7 +146,7 @@ try {
             Write-Host 'note: UEFIDOS_DOS211 is not set, so the test image ships without a'
             Write-Host '      2.11 floppy: the MOUNT/floppy-write checks will be skipped.'
         }
-        $autoexecLines += @('CONFIG','FCBTEST','SHUTDOWN')
+        $autoexecLines += @('CONFIG','FCBTEST','INFO','CAL','SUM HELLO.TXT','HEX HELLO.TXT','SHUTDOWN')
 
         $imported = Join-Path $Build 'imported'
         if (Test-Path $imported) {

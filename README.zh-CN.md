@@ -11,7 +11,7 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 有过的东西：FAT32、64 位 UEFI 启动、FAT16 大容量卷、DOS 4.0 的文件共享/加锁/FCB
 语义、原生 32/64 位 DOS API，以及 386 保护模式与 DPMI 0.9 宿主。
 
-当前版本 0.5.0 —— 13 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 0.6.0 —— 16 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
 ## 功能状态
@@ -35,6 +35,48 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 | 16 位桥 | `exec16()` 下行调用（原生 → 实模式）与 `INT 2Fh AX=5544h` 上行调用（实模式 → 原生） |
 | 386 保护模式 | 实模式 → 保护模式切换、GDT/LDT 解析、带限长检查的隐藏段缓存、`MOV CRn`/`LGDT`/`LIDT`/`LLDT`/`CLTS`、32 位寻址（SIB）、`0F xx` 指令族、保护模式 IDT 分发 |
 | DPMI 0.9 宿主 | `INT 2Fh AX=1687h` 引导、`INT 31h` 描述符/DOS 内存/实模式反射 —— 见 [`docs/protected-mode.md`](docs/protected-mode.md) |
+| 内置工具 | `INFO CAL SUM HEX CLOCK` —— 由 `tools/make_tools.py` 生成的 16 位 `.COM` 程序 |
+
+## 内置工具
+
+五个小工具由 [`tools/make_tools.py`](tools/make_tools.py) 生成并打进 `build/UEFIDOS.img`。
+它们都是为本项目从零手写的（MIT，与本仓库其余部分一致），所以镜像自带工具、
+不含任何第三方二进制；而且它们走的是真正的 `INT 21h` 服务，而不是命令解释器自己的代码：
+
+| 程序 | 作用 | 用到的 DOS 服务 |
+| --- | --- | --- |
+| `INFO` | 系统面板：DOS 版本、日期、时间、当前驱动器、当前目录、原生 API 版本与指针位宽 | `AH=30h, 2Ah, 2Ch, 19h, 47h`、`INT 2Fh AX=5544h` |
+| `CAL` | 当前月份的日历（首日星期与闰年都正确） | `AH=2Ah`（星期）、控制台输出 |
+| `SUM` | 命令行指定文件的字节数与 16 位校验和 | `AH=3Dh 42h 3Fh 3Eh`（打开/lseek/读/关） |
+| `HEX` | 十六进制 + ASCII 转储，每行 16 字节 | 同一套句柄路径、命令行尾解析 |
+| `CLOCK` | 实时 `HH:MM:SS` 时钟，按任意键退出 | `AH=2Ch, 0Bh, 08h`（取时间、查键、读键） |
+
+```
+C:\> INFO
+=== UEFI-DOS system info ===
+DOS version : 2.10
+Date        : 2026-11-08
+Time        : 13:58:09
+Drive       : C:
+Directory   : C:\
+Native API  : 01/64-bit pointers
+
+C:\> CAL
+
+      November  2026
+Su Mo Tu We Th Fr Sa
+  1   2   3   4   5   6   7
+  8   9  10  11  12  13  14
+ 15  16  17  18  19  20  21
+ 22  23  24  25  26  27  28
+ 29  30
+
+C:\> SUM HELLO.TXT
+HELLO.TXT: 15 bytes, checksum 0471
+```
+
+`CLOCK` 是交互式的，所以不放进 `AUTOEXEC.BAT`：在提示符下输入 `CLOCK`，
+按任意键即回到命令行。
 
 ## 原生 32/64 位 API 与 16 位桥
 
@@ -166,7 +208,7 @@ start_qemu.bat -Firmware ia32  # 32 位载荷
 
 ## 回归测试
 
-`run_tests.ps1` 会先完整构建，再跑 13 项检查：FAT32 读/写自检；宿主命令解释器
+`run_tests.ps1` 会先完整构建，再跑 16 项检查：FAT32 读/写自检；宿主命令解释器
 DIR/TYPE/VER/COM/EXE/EXEC/显示 + 原生 API 与上行调用演示；宿主写路径；软盘镜像挂载
 为 `A:`；在 2.11 镜像上写 FAT12；读取 2.11 与 MS-DOS 5 镜像；两项 QEMU/OVMF 启动
 冒烟测试（x86_64 与 IA32）；阶段 4/6 语义与双路径对比；32 MB 与 1.9 GB FAT16 卷写入；
@@ -244,6 +286,7 @@ tools/
                      VRAM.COM / UPCALL.COM
   make_pm_tests.py   手汇编 DPMITEST.COM（实模式 → PM16 → PM32 → 反射）
   make_fcb_test.py   手汇编 FCBTEST.COM（FCB 建/写/读/删）
+  make_tools.py      生成内置工具 INFO/CAL/SUM/HEX/CLOCK
   mkfat16.py         稀疏 FAT16 格式化器（32 MB .. 1.9 GB 测试卷）
   fat_extract.py     只读 FAT12/16/32 提取器（list/get/extract）
   extract_dos_file.py  按簇链从裸 FAT 镜像里取出单个文件
@@ -287,6 +330,10 @@ build.ps1 run_uefi.ps1 run_interactive.ps1 run_tests.ps1 start_qemu.bat
 - `dos_fat_name()` 无条件解引用可能为 NULL 的 `ok` 指针；`dos_unlink()` 不拒绝只读文件。
 - FAT 扇区缓存原本只有单个槽位，簇链遍历反复读盘 —— 写 8 个扇区要 32720 毫秒，改成 8 槽
   缓存后 113 毫秒。
+
+- `INT 21h AH=19h`（取当前驱动器）永远返回 `A:`，`AH=0Eh` 根本没有真正切换驱动器，
+  `AH=2Ah` 的星期值是写死的 1 而不是算出来的 —— 日历和星期相关逻辑因此全错。
+  这三个问题都是写内置 `INFO`/`CAL` 工具时测出来的。
 
 ## 限制与路线
 

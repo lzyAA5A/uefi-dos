@@ -270,6 +270,16 @@ int dos_unmount_drive(int letter)
 
 int dos_current_drive(void) { return g_dos.cur_drive; }
 
+/* Select the default drive (INT 21h AH=0Eh).  Like DOS we accept a letter
+   with no medium mounted -- the following file operation then fails instead
+   of the drive switch failing. */
+int dos_set_drive(int drive)
+{
+    if (drive < 0 || drive >= DOS_MAX_DRIVES) return -1;
+    g_dos.cur_drive = drive;
+    return 0;
+}
+
 int dos_fs_type(int drive)
 {
     if (!mounted(drive)) return 0;

@@ -123,6 +123,23 @@ Run-Check 'FCBTEST.COM: FCB create/write/read/delete from 16-bit code' {
     & $HostExe --shell (Join-Path $Build 't_fcb.img') 'FCBTEST'
 } @('FCB-OK')
 
+# ---- bundled utilities (INFO / CAL / SUM / HEX) ----
+# CAL's month name is cross-checked against the host clock, which also proves
+# the INT 21h AH=2Ah wiring end to end.
+$monthName = (Get-Date).ToString('MMMM', [System.Globalization.CultureInfo]::InvariantCulture)
+Copy-Item (Join-Path $Build 'UEFIDOS.img') (Join-Path $Build 't_tools.img') -Force
+Run-Check 'bundled tools: INFO panel (version/date/time/drive/dir/native API)' {
+    & $HostExe --shell (Join-Path $Build 't_tools.img') 'INFO'
+} @('=== UEFI-DOS system info ===', 'DOS version : 2.10', 'Native API  : 01/64-bit pointers')
+
+Run-Check 'bundled tools: CAL prints the current month grid' {
+    & $HostExe --shell (Join-Path $Build 't_tools.img') 'CAL'
+} @('Su Mo Tu We Th Fr Sa', $monthName)
+
+Run-Check 'bundled tools: SUM checksum + HEX dump of a file (INT 21h handles)' {
+    & $HostExe --shell (Join-Path $Build 't_tools.img') 'SUM HELLO.TXT' 'HEX HELLO.TXT'
+} @('bytes, checksum', 'Hello UEFI-DOS!.')
+
 
 Write-Host ""
 Write-Host "=============================="

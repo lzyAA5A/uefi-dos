@@ -126,6 +126,7 @@ int  dos_find_next(dos_find *f, char name_out[13], u8 *attr_out, u32 *size_out,
 void dos_get_cwd(char *out, int max);      /* "C:\\SUB" or "C:" at root */
 void dos_get_prompt(char *out, int max);
 int  dos_current_drive(void);
+int  dos_set_drive(int drive);              /* INT 21h AH=0Eh */
 int  dos_fs_type(int drive);
 
 /* helpers shared with shell / emulator */
