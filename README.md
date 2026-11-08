@@ -16,6 +16,20 @@ boot, FAT16 large volumes, DOS 4.0 file-sharing/locking/FCB semantics, a native
 Version 0.6.0 — 16 of 16 automated checks pass on the Windows host harness and
 on QEMU + OVMF (x86_64 and IA32).
 
+## Run it now (no compiler needed)
+
+[**Download `UEFI-DOS-0.6.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.6.0.zip)
+(230 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
+
+1. install QEMU for Windows (it also brings the OVMF firmware):
+   `winget install SoftwareFreedomConservancy.QEMU`
+2. unzip, double-click **`start.bat`** — UEFI-DOS boots and stops at a live
+   `C:\>` prompt with the demos already run.
+
+The same image can be written to a USB stick (Rufus in *DD image* mode, or `dd`)
+and booted on real UEFI hardware; `EFI/BOOT/BOOTX64.EFI` and `BOOTIA32.EFI` are
+both inside. `make_release.ps1` rebuilds that package from source.
+
 ## Status
 
 | Area | Status |
@@ -320,6 +334,8 @@ tools/
 docs/                compatibility report, DOS 4.0 semantics, migration pitfalls,
                      protected-mode/DPMI notes
 build.ps1 run_uefi.ps1 run_interactive.ps1 run_tests.ps1 start_qemu.bat
+make_release.ps1     stage + zip the ready-to-run package (image + launcher)
+start_prebuilt.bat   the launcher shipped as start.bat inside that package
 ```
 
 ## Design notes

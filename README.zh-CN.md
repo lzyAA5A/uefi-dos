@@ -14,6 +14,19 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 当前版本 0.6.0 —— 16 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
+## 立刻跑起来（不需要编译器）
+
+[**下载 `UEFI-DOS-0.6.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.6.0.zip)
+（230 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
+
+1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
+   `winget install SoftwareFreedomConservancy.QEMU`
+2. 解压后双击 **`start.bat`** —— UEFI-DOS 直接启动，跑完演示程序后停在 `C:\>` 提示符。
+
+同一个镜像也可以写到 U 盘（Rufus 选 *DD 镜像* 模式，或 Linux 下 `dd`），
+在真实 UEFI 机器上启动；镜像里同时有 `EFI/BOOT/BOOTX64.EFI` 与 `BOOTIA32.EFI`。
+`make_release.ps1` 可以从源码重新生成这个发布包。
+
 ## 功能状态
 
 | 领域 | 状态 |
@@ -287,6 +300,7 @@ tools/
   make_pm_tests.py   手汇编 DPMITEST.COM（实模式 → PM16 → PM32 → 反射）
   make_fcb_test.py   手汇编 FCBTEST.COM（FCB 建/写/读/删）
   make_tools.py      生成内置工具 INFO/CAL/SUM/HEX/CLOCK
+  make_release.ps1   打包"开箱即用"发布版（镜像 + start.bat）
   mkfat16.py         稀疏 FAT16 格式化器（32 MB .. 1.9 GB 测试卷）
   fat_extract.py     只读 FAT12/16/32 提取器（list/get/extract）
   extract_dos_file.py  按簇链从裸 FAT 镜像里取出单个文件
