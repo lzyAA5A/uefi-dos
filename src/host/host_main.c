@@ -136,6 +136,12 @@ int main(int argc, char **argv)
         extern int itest_run(const char *filter);
         return itest_run(argc >= 3 ? argv[2] : NULL);
     }
+    /* brute-force opcode audit: every first byte, every 0F second byte.
+       --ifuzz -v lists each rejected opcode as it is found. */
+    if (strcmp(argv[1], "--ifuzz") == 0) {
+        extern int ifuzz_run(int verbose);
+        return ifuzz_run(argc >= 3);
+    }
     if (argc >= 4 && strcmp(argv[1], "--fat16") == 0) {
         extern int fat16_selftest(const char *image, const char *mode);
         return fat16_selftest(argv[2], argv[3]);

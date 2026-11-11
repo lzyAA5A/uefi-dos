@@ -1,4 +1,4 @@
-# UEFI-DOS build script (PowerShell, Windows).
+﻿# UEFI-DOS build script (PowerShell, Windows).
 # Builds the x86_64 UEFI application, the Windows host test harness and
 # (optionally) a bootable FAT32 image.
 #
@@ -145,7 +145,7 @@ try {
                             'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM')
         # the native SDK examples are PE images, not DOS programs: optional
         $nativePrograms = @()
-        foreach ($p in @('HELLO64.EXE','HELLO32.EXE')) {
+        foreach ($p in @('HELLO64.EXE','HELLO32.EXE','FILET64.EXE','FILET32.EXE')) {
             if (Test-Path (Join-Path $Build $p)) { $nativePrograms += $p }
         }
         foreach ($prog in $programs) {
@@ -171,6 +171,7 @@ try {
         }
         if ($nativePrograms -contains 'HELLO64.EXE') { $autoexecLines += @('RUN64 HELLO64.EXE') }
         if ($nativePrograms -contains 'HELLO32.EXE') { $autoexecLines += @('RUN64 HELLO32.EXE') }
+        if ($nativePrograms -contains 'FILET64.EXE') { $autoexecLines += @('RUN64 FILET64.EXE -w NATBIG.TXT 3000','RUN64 FILET64.EXE -s NATBIG.TXT','RUN64 FILET32.EXE -w NATBIG.TXT 3000','RUN64 FILET32.EXE -s NATBIG.TXT','DEL NATBIG.TXT') }
         if (Test-Path (Join-Path $Build 'SECOND.img')) {
             $autoexecLines += @('DRIVES','DIR D:','TYPE D:\SECOND.TXT','ECHO SECOND-DRIVE-OK')
         }

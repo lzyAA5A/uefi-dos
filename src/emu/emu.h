@@ -174,6 +174,9 @@ int  dpmi_install_check(Emu *e);
 void pm_patch_idt(Emu *e);    /* install service gates after LIDT */
 int  step_public(Emu *e);     /* execute one instruction (DPMI reflection) */
 int  itest_run(const char *filter); /* emu/itest.c: instruction-level tests */
+int  ifuzz_run(int verbose);        /* emu/itest.c: brute-force opcode audit */
+extern int emu_unsupported_ops;     /* number of unsupported opcodes executed */
+extern int emu_unsupported_quiet;   /* 1 = do not print them (fuzz mode) */
 
 /* Linear address of the DPMI host LDT handed to protected-mode clients. */
 #define DPMI_LDT_LIN 0x00F00000u

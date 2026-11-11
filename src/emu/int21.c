@@ -675,6 +675,7 @@ void int21_handler(Emu *e)
         }
         u32 total = 0;
         char tmp[512];
+        u32 start_pos = (h < DOS_HANDLE_MAX) ? g_dos.handles[h].pos : 0;
         while (total < want) {
             u32 chunk = want - total;
             if (chunk > sizeof(tmp)) chunk = sizeof(tmp);
@@ -685,6 +686,40 @@ void int21_handler(Emu *e)
             total += got;
             if (got < chunk) break;
         }
+#ifdef UEFIDOS_HOST
+        /* UEFIDOS_TRACE_READ=<handle> dumps every read of that handle with the
+           file position and the first bytes, so a seek/read mismatch is
+           visible instead of being inferred from a program's error. */
+        {
+            static int rd_trace = -1;
+            static int rd_handle = -99;
+            if (rd_trace < 0) {
+                const char *v = getenv("UEFIDOS_TRACE_READ");
+                rd_trace = v ? 1 : 0;
+                if (v) rd_handle = (int)strtol(v, 0, 0);
+            }
+            if (rd_trace && (rd_handle < 0 || rd_handle == h)) {
+                static const char hexd[] = "0123456789ABCDEF";
+                char line[96];
+                int n = 0;
+                line[n++] = '['; line[n++] = 'r'; line[n++] = 'e'; line[n++] = 'a'; line[n++] = 'd'; line[n++] = ']';
+                line[n++] = ' ';
+                line[n++] = 'h'; line[n++] = '='; line[n++] = hexd[(h >> 4) & 15]; line[n++] = hexd[h & 15];
+                line[n++] = ' '; line[n++] = 'p'; line[n++] = 'o'; line[n++] = 's'; line[n++] = '=';
+                for (int sh = 28; sh >= 0; sh -= 4) line[n++] = hexd[(start_pos >> sh) & 15];
+                line[n++] = ' '; line[n++] = 'w'; line[n++] = '='; line[n++] = hexd[(want >> 4) & 15]; line[n++] = hexd[want & 15];
+                line[n++] = ' '; line[n++] = 'd'; line[n++] = '='; line[n++] = ' ';
+                for (u32 i = 0; i < total && i < 8 && i < sizeof(tmp); i++) {
+                    line[n++] = hexd[(tmp[i] >> 4) & 15];
+                    line[n++] = hexd[tmp[i] & 15];
+                    line[n++] = ' ';
+                }
+                line[n++] = '\n';
+                line[n] = 0;
+                plat_puts(line);
+            }
+        }
+#endif
         set_ok(e);
         e->ax = (u16)total;
         return;

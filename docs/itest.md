@@ -95,3 +95,31 @@ the keyboard buffer and port 0x61.
 The framework is deliberately tiny: ~430 lines, no dependencies beyond
 `plat.h` + `emu.h`, and the case table is plain data so adding one is a 5-line
 edit. When you touch `step_8086()`, add a case first.
+
+## Brute-force opcode audit (`--ifuzz`)
+
+The vectors above are curated: they encode the bugs that were actually found.
+`--ifuzz` is the systematic counterpart. It feeds **every** first-byte opcode
+(plus the `26`/`66`/`67` prefixes) and **every** `0F xx` second byte, each with
+ten addressing-mode fillers, into a fresh emulator and steps it six
+instructions. Any opcode whose decoder rejects it is reported.
+
+```
+build\hosttest.exe --ifuzz        # summary
+build\hosttest.exe --ifuzz -v     # print each rejected opcode
+
+ifuzz: 12800 streams, 1786 rejects
+ifuzz: 8086 opcodes missing: 0F D6 F1 (3 total)
+ifuzz: 0F opcodes missing: 04 0A 0C 0D ... (169 total)
+IFUZZ DONE
+```
+
+The 8086 result is the useful gate: after the audit the only holes are `0F`
+(the 386 escape prefix), `D6` (SALC) and `F1` (ICEBP) -- both undocumented on
+the 8086 and unused by DOS software. `run_tests.ps1` asserts exactly that line,
+so a decoder regression that loses an 8086 opcode fails the suite instead of
+surfacing as "game X renders garbage".
+
+The `0F` list is deliberately *not* asserted: it is dominated by MMX/SSE and
+486-only system instructions that a DOS-era program cannot use, and it shrinks
+as those get implemented. Use `-v` to see which ones a new program needs.

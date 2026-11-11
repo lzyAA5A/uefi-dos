@@ -13,20 +13,30 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version 0.10.0 — 25 of 25 automated checks pass on the Windows host harness and
-on QEMU + OVMF (x86_64 and IA32). 0.10.0 is a **real-software release**: it is
-the first version that installs and runs a commercial 1993 DOS game,
-[SimEarth 1.5](docs/simearth.md) — the Maxis installer completes, and the game
-paints its 320×200×256 terrain map. Getting there meant fixing eight separate
-assumptions such a program makes about a PC: 16-bit code with negative stack
-displacements, real-mode address wraparound at 1 MB (the A20 gate), a populated
-BIOS data area, a DOS memory arena (`AH=48h/49h/4Ah`), a correct PSP, EXE images
-larger than 64 KB, `AH=47h` returning a drive-less path, and a usable default
-`FILES=`. Details and reproduction steps: [`docs/simearth.md`](docs/simearth.md).
+Version **1.0.0** — 27 of 27 automated checks pass on the Windows host harness
+and on QEMU + OVMF (x86_64 and IA32). 1.0.0 is the first stable release: the
+command surface, the native ABI and the on-disk layout are frozen from here on.
+
+What changed since 0.9.0: the native SDK grew a real program
+([`FILETOOL`](docs/sdk-guide.md): 32-bit file I/O, long names, drive table and a
+16-bit downcall) plus whole-file helpers, a full
+[**SDK developer guide**](docs/sdk-guide.md), and a brute-force opcode audit
+(`--ifuzz`, 12,800 instruction streams) that guards the emulator's decoder.
+Testing against real software continued: [DOOM 0.99](docs/doom.md) found three
+more genuine DOS bugs — `POPF` discarding IOPL/NT (so DOS/16M decided the CPU was
+a 286), a missing `0F BA` (BT/BTS/BTR/BTC with an immediate bit) and an
+environment block without the program path (so any DOS extender failed to reopen
+its own image). The same release keeps everything 0.10.0 earned:
+[SimEarth 1.5](docs/simearth.md) installs and runs, and eight of its
+assumptions about a PC are now part of the test suite — 16-bit code with
+negative stack displacements, real-mode address wraparound at 1 MB (the A20
+gate), a populated BIOS data area, a DOS memory arena (`AH=48h/49h/4Ah`), a
+correct PSP, EXE images larger than 64 KB, `AH=47h` returning a drive-less path,
+and a usable default `FILES=`.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-0.10.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.10.0.zip)
+[**Download `UEFI-DOS-1.0.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.0.0.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -63,8 +73,8 @@ both inside. `make_release.ps1` rebuilds that package from source.
 | 386 protected mode | real → protected transition, GDT/LDT parsing, hidden segment caches with limit checks, `MOV CRn`/`LGDT`/`LIDT`/`LLDT`/`CLTS`, 32-bit addressing (SIB), `0F xx` opcode set, protected-mode IDT delivery |
 | DPMI 0.9 host | `INT 2Fh AX=1687h` bootstrap, `INT 31h` descriptors/DoS memory/real-mode reflection — see [`docs/protected-mode.md`](docs/protected-mode.md) |
 | Bundled utilities | `INFO CAL SUM HEX CLOCK` — 16-bit `.COM` programs built from `tools/make_tools.py` (see below) |
-| Native programs (SDK) | `RUN64 file.exe` maps a freestanding PE32+/PE32 image, applies base relocations and calls it on the real CPU — see [`docs/sdk.md`](docs/sdk.md) |
-| Emulator tests | `hosttest.exe --itest` — 49 byte-stream instruction cases — see [`docs/itest.md`](docs/itest.md) |
+| Native programs (SDK) | `RUN64 file.exe` maps a freestanding PE32+/PE32 image, applies base relocations and calls it on the real CPU — see [`docs/sdk-guide.md`](docs/sdk-guide.md) |
+| Emulator tests | `hosttest.exe --itest` — 64 byte-stream instruction cases — and `--ifuzz`, a brute-force audit of every opcode — see [`docs/itest.md`](docs/itest.md) |
 | Build | PowerShell scripts (Windows), `make` (Linux/macOS/WSL) and a `Dockerfile` |
 
 ## Bundled utilities
@@ -213,7 +223,7 @@ sudo apt install build-essential gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 python3
 make            # build/BOOTX64.EFI
 make all        # + build/BOOTIA32.EFI
 make image      # + build/UEFIDOS.img (bootable, AUTOEXEC ends at a live C:\> prompt)
-make sdk        # + build/HELLO64.EXE, build/HELLO32.EXE (native 32/64-bit programs)
+make sdk        # + build/HELLO64/FILET64.EXE (64-bit), HELLO32/FILET32.EXE (32-bit)
 make run        # boot the image in QEMU (set OVMF_DIR=/usr/share/OVMF)
 make clean
 ```
@@ -298,7 +308,7 @@ no interpreter, no mode switch -- using the same DOS services, the same file
 handles and the same current directory as the 16-bit world.
 
 ```sh
-make sdk                       # build/HELLO64.EXE (PE32+) and HELLO32.EXE (PE32)
+make sdk                       # HELLO64/FILET64.EXE (PE32+) and HELLO32/FILET32.EXE (PE32)
 ```
 
 ```powershell
@@ -348,7 +358,7 @@ The `Hello from 8086 code!` line is a 16-bit `.COM` started by the 64-bit progra
 -- the downcall path end to end. Bitness is enforced by the loader (a 64-bit
 kernel refuses 32-bit images: that code cannot execute in a 64-bit address
 space). The full service list, the linker flags and the limitations are in
-[`docs/sdk.md`](docs/sdk.md).
+[`docs/sdk-guide.md`](docs/sdk-guide.md).
 
 ## Instruction-level emulator tests
 
@@ -357,7 +367,8 @@ space). The full service list, the linker flags and the limitations are in
 plus a register/memory expectation, executed through the real decoder:
 
 ```powershell
-build\hosttest.exe --itest          # 49 cases
+build\hosttest.exe --itest          # 64 cases
+build\hosttest.exe --ifuzz          # brute-force audit of every opcode
 build\hosttest.exe --itest shift    # only cases whose name contains "shift"
 ```
 
@@ -366,7 +377,7 @@ build\hosttest.exe --itest shift    # only cases whose name contains "shift"
   [PASS] shl ax,1
   [PASS] rep stosw (3 words, 2 store units)
   [PASS] jmp far (EA)
-itest: 49 passed, 0 failed
+itest: 64 passed, 0 failed
 ITEST PASSED
 ```
 
@@ -417,7 +428,7 @@ Long Name Report.txt         31 13:12  11-11-26
 
 ## Regression suite
 
-`run_tests.ps1` builds everything and runs 25 checks: FAT32 read/write selftest;
+`run_tests.ps1` builds everything and runs 27 checks: FAT32 read/write selftest;
 host shell DIR/TYPE/VER/COM/EXE/EXEC/video plus native-API and upcall demos;
 host shell write path; floppy-image `A:` mount; FAT12 write on a 2.11 image;
 FAT12 read of 2.11 and MS-DOS 5 images; two QEMU/OVMF boot smoke tests (x86_64
@@ -428,7 +439,7 @@ error, `AH=6Ch` create/open/replace/refuse, temp file, truename, DBCS, commit �
 30 assertions, one `DOS4-OK` line); and the bundled `INFO`/`CAL`/`SUM`/`HEX`
 utilities (the calendar month is
 cross-checked against the host clock); and `KEYTEST.COM`, which reads five keys through `INT 16h` and prints their scan codes, proving arrow and function keys reach the guest as real BIOS scan codes; the
-instruction-level emulator test vectors (`--itest`, 49 cases); and `RUN64
+instruction-level emulator test vectors (`--itest`, 64 cases) plus a brute-force opcode audit (`--ifuzz`); and `RUN64
 HELLO64.EXE`, a native 64-bit program built by the SDK, which prints the DOS
 version, reads and writes files, lists `*.TXT`, then runs a 16-bit `.COM` through
 the interpreter and reports its exit code; a second UEFI volume mounted as
@@ -546,7 +557,8 @@ src/
 sdk/
   include/uefidos/   dosapi.h (public ABI), runtime.h (freestanding helpers)
   examples/hello64.c the demo native program (file I/O, find, clock, exec16)
-  Makefile           builds HELLO64.EXE / HELLO32.EXE with a mingw cross compiler
+  examples/filetool.c  reference utility: 32-bit file I/O, LFN, drives, exec16
+  Makefile           builds both examples for both bitnesses with a mingw cross compiler
   build_sdk.ps1      the same build for Windows
 tools/
   fat32.py           FAT32 formatter (no dependencies)
@@ -600,6 +612,24 @@ start_prebuilt.bat   the launcher shipped as start.bat inside that package
   `A:`..`D:`, MBR partition probing with a superfloppy fallback.
 
 ## Notable bugs found and fixed
+
+The 1.0.0 batch came from running DOOM 0.99 (see `docs/doom.md`), whose DOS/16M
+loader is a ruthless CPU/DOS conformance test:
+
+- **`POPF` discarded IOPL and NT** (mask `0x0FD5`, i.e. 8086/286 behaviour). The
+  extender writes `FLAGS=0F000h` and reads it back to tell a 386 from a 286, so
+  it printed `DOS/16M error: [15] protected mode available only with 386 or 486`
+  on an emulator that supported protected mode. A 386/486 keeps bits 12-14
+  writable and only bit 15 is reserved; the 16-bit `POPF` now masks `0x7FD5`.
+- **`0F BA` was not implemented** (`BT`/`BTS`/`BTR`/`BTC` with an immediate bit
+  index) — the very next instruction the loader ran. The emulator stopped with
+  `unsupported 386 opcode 0F BA`.
+- **the environment block had no program path.** DOS stores the executing
+  program's full path at `env:2` after a string-count word, and every DOS
+  extender reopens its own image through it. We wrote only `PATH=C:\`, so the
+  loader opened `""` and then reported `not a DOS/16M executable 'DOOM.EXE'`.
+  `build_psp()` now emits the real DOS layout including the DOS 5 "extra
+  strings" trailer.
 
 The 0.10.0 batch came from running SimEarth (see `docs/simearth.md`):
 

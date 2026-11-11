@@ -21,13 +21,15 @@ $ldflags = @(
 )
 
 $targets = @(
-    @{ name = 'HELLO64.EXE'; machine = '-m64' },
-    @{ name = 'HELLO32.EXE'; machine = '-m32' }
+    @{ name = 'HELLO64.EXE'; machine = '-m64'; src = 'sdk/examples/hello64.c' },
+    @{ name = 'HELLO32.EXE'; machine = '-m32'; src = 'sdk/examples/hello64.c' },
+    @{ name = 'FILET64.EXE'; machine = '-m64'; src = 'sdk/examples/filetool.c' },
+    @{ name = 'FILET32.EXE'; machine = '-m32'; src = 'sdk/examples/filetool.c' }
 )
 foreach ($t in $targets) {
     $out = Join-Path $OutDir $t.name
     Write-Host "SDK: $($t.name)"
-    & $Gcc @cflags @($t.machine) @ldflags -o $out sdk/examples/hello64.c
+    & $Gcc @cflags @($t.machine) @ldflags -o $out $t.src
     if ($LASTEXITCODE -ne 0) { throw "sdk build failed for $($t.name)" }
     $len = (Get-Item $out).Length
     Write-Host ("SDK: {0} ({1} bytes)" -f $out, $len)

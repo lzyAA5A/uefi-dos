@@ -217,7 +217,7 @@ Run-Check 'FAT: create-over-existing truncates (AH=3Ch) and keeps the chain vali
 # caught here instead of as "a game renders garbage".
 Run-Check 'emulator: 8086 instruction test vectors (ITEST)' {
     & $HostExe --itest
-} @('ITEST PASSED', 'itest: 59 passed, 0 failed')
+} @('ITEST PASSED', 'itest: 64 passed, 0 failed')
 
 # Native 64-bit SDK program: a PE image built by sdk/ is mapped, relocated and
 # executed on the real CPU, with the DOS API and a 16-bit downcall inside.
@@ -228,6 +228,22 @@ Run-Check 'native SDK: RUN64 runs a 64-bit PE program (dosapi + exec16)' {
 } @('RUN64: loading HELLO64.EXE', 'pointer size : 64 bit', 'DOS version  : 4.00',
     'reading      : HELLO.TXT', 'wrote        : NATIVE.TXT', 'exec16       : HELLO.COM -> exit 0',
     'NATIVE-OK', 'exit code 0')
+
+# Native SDK file tool: whole-file write/read with 32-bit sizes, directory
+# listing with long names, drive/FS table and a 16-bit downcall, all driven by
+# the command tail (RUN64 FILET64.EXE -w ... 3000).
+Run-Check 'native SDK: FILETOOL writes/verifies a 3000-byte file and lists drives' {
+    & $HostExe --shell (Join-Path $Build 't_tools.img') 'RUN64 FILET64.EXE -w NATBIG.TXT 3000' 'RUN64 FILET64.EXE -s NATBIG.TXT' 'RUN64 FILET64.EXE -l *.TXT' 'DEL NATBIG.TXT'
+} @('wrote 3000 bytes to NATBIG.TXT', 'read back 3000 bytes, mismatches: 0', 'FILEIO-OK',
+    'size  : 3000 bytes', 'HELLO.TXT', 'FILETOOL-DONE')
+
+# Brute-force opcode audit: every first-byte opcode (and every 0F second
+# byte) is fed into a fresh emulator.  The 8086 set must be complete apart
+# from the three documented holes: 0F (the 386 escape), D6 (SALC) and F1
+# (ICEBP) -- both undocumented on the 8086 and unused by DOS software.
+Run-Check 'emulator: brute-force opcode audit (IFUZZ)' {
+    & $HostExe --ifuzz
+} @('IFUZZ DONE', 'ifuzz: 8086 opcodes missing: 0F D6 F1 (3 total)')
 
 Write-Host ""
 Write-Host "=============================="

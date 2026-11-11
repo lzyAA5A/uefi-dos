@@ -12,9 +12,10 @@
 #   - -e uefidos_main to name the entry point.
 #
 # Usage:
-#   make                 # HELLO64.EXE (64-bit) and HELLO32.EXE (32-bit)
-#   make hello64         # only the 64-bit one
-#   make check           # print the PE headers / machine type
+#   make               # both examples, both bitnesses
+#   make hello         # HELLO64.EXE + HELLO32.EXE
+#   make filetool      # FILET64.EXE + FILET32.EXE
+#   make check         # print the PE headers / machine type
 #   make clean
 
 CC64  ?= x86_64-w64-mingw32-gcc
@@ -34,24 +35,35 @@ CFLAGS = -O2 -std=gnu11 -ffreestanding -Wall -Wextra \
 LDFLAGS = -nostdlib -Wl,--subsystem,10 -Wl,-e,uefidos_main \
           -Wl,--enable-reloc-section -Wl,--no-insert-timestamp
 
-TARGETS = $(OUT)/HELLO64.EXE $(OUT)/HELLO32.EXE
+# 8.3 names only: DIR and DOS programs address the binary by its short name.
+HELLO64 = $(OUT)/HELLO64.EXE
+HELLO32 = $(OUT)/HELLO32.EXE
+FILET64 = $(OUT)/FILET64.EXE
+FILET32 = $(OUT)/FILET32.EXE
 
-all: $(TARGETS)
+all: hello filetool
+
+hello: $(HELLO64) $(HELLO32)
+filetool: $(FILET64) $(FILET32)
 
 $(OUT):
 	mkdir -p $(OUT)
 
-$(OUT)/HELLO64.EXE: examples/hello64.c | $(OUT)
+$(HELLO64): examples/hello64.c | $(OUT)
 	$(CC64) $(CFLAGS) -m64 $(LDFLAGS) -o $@ $<
-
-$(OUT)/HELLO32.EXE: examples/hello64.c | $(OUT)
+$(HELLO32): examples/hello64.c | $(OUT)
+	$(CC32) $(CFLAGS) -m32 $(LDFLAGS) -o $@ $<
+$(FILET64): examples/filetool.c | $(OUT)
+	$(CC64) $(CFLAGS) -m64 $(LDFLAGS) -o $@ $<
+$(FILET32): examples/filetool.c | $(OUT)
 	$(CC32) $(CFLAGS) -m32 $(LDFLAGS) -o $@ $<
 
-check: $(TARGETS)
-	@for f in $(TARGETS); do echo "== $$f"; file $$f 2>/dev/null || true; \
+check: all
+	@for f in $(HELLO64) $(HELLO32) $(FILET64) $(FILET32); do \
+	  echo "== $$f"; file $$f 2>/dev/null || true; \
 	  objdump -f $$f | head -n 6; done
 
 clean:
 	rm -rf $(OUT)
 
-.PHONY: all check clean
+.PHONY: all hello filetool check clean

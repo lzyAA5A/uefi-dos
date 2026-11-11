@@ -19,7 +19,7 @@
 
 int uefidos_main(const uefidos_exports *api, const char *args)
 {
-    uefidos_init(api);
+    uefidos_init(api, args);
 
     rt_puts("\n=== UEFI-DOS native SDK demo ===\n");
     rt_puts("pointer size : ");

@@ -44,6 +44,7 @@ $lines = @(
     'VRAM'
     'APITEST',
     'RUN64 HELLO64.EXE'
+    'RUN64 FILET64.EXE -l *.TXT'
     'UPCALL'
     'INFO'
     'CAL'
@@ -65,6 +66,7 @@ $makeArgs = @($Img, '--size-mb', '64',
     '--file',    ((Join-Path $Build 'INFO.COM')    + '=INFO.COM'),
     '--file',    ((Join-Path $Build 'CLOCK.COM')   + '=CLOCK.COM'),
     '--file',    ((Join-Path $Build 'HELLO64.EXE') + '=HELLO64.EXE'),
+    '--file',    ((Join-Path $Build 'FILET64.EXE') + '=FILET64.EXE'),
     '--file',    ((Join-Path $Build 'HEX.COM')     + '=HEX.COM'),
     '--file',    ((Join-Path $Build 'SUM.COM')     + '=SUM.COM'),
     '--file',    ((Join-Path $Build 'CAL.COM')     + '=CAL.COM'),

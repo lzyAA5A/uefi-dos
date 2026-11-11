@@ -67,7 +67,7 @@ if (Test-Path $Serial) {
 # assertions
 $text = if (Test-Path $Serial) { Get-Content $Serial -Raw } else { '' }
 $ok = $true
-$markers = @('UEFI-DOS', 'BOOT OK', 'Hello from 8086 code!', 'TELETYPE OK!', 'Hello from MZ EXE!', 'RUNNER DONE!', 'VIDEO-OK!', 'API-OK', 'UPCALL-OK','DTA-OK','INT2F-OK','DPMI-HOST-OK','PM16-OK','PM32-DOS-OK','RMREFLECT-OK','DOSMEM-OK','REFLECTED-21H-OK','ABI-OK','TICKS-OK', 'UEFI-DOS native API v1.01', 'WRITE-OK', 'FCB-OK', 'FILES=20', 'DOS4-OK', 'DOS version 4.00', 'exterr-class: OK', '6c-trunc: OK', '=== UEFI-DOS system info ===', 'Su Mo Tu We Th Fr Sa', 'bytes, checksum', 'Hello UEFI-DOS!.', 'RUN64: loading HELLO64.EXE', 'NATIVE-OK', 'long name    : created "Long Name Report.txt"', '8.3 alias    : LONGNA~1.TXT -> Long Name Report.txt')
+$markers = @('UEFI-DOS', 'BOOT OK', 'Hello from 8086 code!', 'TELETYPE OK!', 'Hello from MZ EXE!', 'RUNNER DONE!', 'VIDEO-OK!', 'API-OK', 'UPCALL-OK','DTA-OK','INT2F-OK','DPMI-HOST-OK','PM16-OK','PM32-DOS-OK','RMREFLECT-OK','DOSMEM-OK','REFLECTED-21H-OK','ABI-OK','TICKS-OK', 'UEFI-DOS native API v1.01', 'WRITE-OK', 'FCB-OK', 'FILES=20', 'DOS4-OK', 'DOS version 4.00', 'exterr-class: OK', '6c-trunc: OK', '=== UEFI-DOS system info ===', 'Su Mo Tu We Th Fr Sa', 'bytes, checksum', 'Hello UEFI-DOS!.', 'RUN64: loading HELLO64.EXE', 'NATIVE-OK', 'long name    : created "Long Name Report.txt"', '8.3 alias    : LONGNA~1.TXT -> Long Name Report.txt', 'RUN64: loading FILET64.EXE', 'FILEIO-OK', 'size  : 3000 bytes')
 if ($Firmware -eq 'ia32') {
     $markers += @('pointer size : 32 bit')   # HELLO32.EXE is the one that runs
 } else {

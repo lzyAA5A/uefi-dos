@@ -1449,6 +1449,22 @@ static int step_386(Emu *e, int seg_ov)
     case 0xA1: set_seg_reg(e, SEG_FS, (u16)popv(e, width)); return 0;
     case 0xA8: pushv(e, e->gs, width); return 0;
     case 0xA9: set_seg_reg(e, SEG_GS, (u16)popv(e, width)); return 0;
+    case 0xBA: { /* BT / BTS / BTR / BTC r/m, imm8 (386) */
+        MRM m;
+        int bit;
+        u32 v, mask;
+        decode_mrm(e, &m, seg_ov);
+        bit = (int)fetch8(e);
+        v = mrm_rv(e, &m, width);
+        if (width == 32) { bit &= 31; mask = 1u << bit; }
+        else if (width == 16) { bit &= 15; mask = 1u << bit; }
+        else { bit &= 7; mask = 1u << bit; }
+        setf(e, F_CF, (v & mask) != 0);
+        if (m.reg == 5) mrm_wv(e, &m, v | mask, width);        /* BTS */
+        else if (m.reg == 6) mrm_wv(e, &m, v & ~mask, width);  /* BTR */
+        else if (m.reg == 7) mrm_wv(e, &m, v ^ mask, width);   /* BTC */
+        return 0;
+    }
     case 0xA3: case 0xAB: case 0xB3: case 0xBB: { /* BT / BTS / BTR / BTC */
         MRM m;
         int bit;
@@ -1559,8 +1575,9 @@ static int step_386(Emu *e, int seg_ov)
     case 0x05: case 0x07: case 0x30: case 0x32: case 0x33: case 0x34: case 0x35:
         return 0;   /* SYSCALL/SYSRET/WRMSR/RDMSR/SYSENTER/SYSEXIT: ignored */
     default:
-        plat_puts("UEFI-DOS: unsupported 386 opcode 0F ");
-        {
+        emu_unsupported_ops++;
+        if (!emu_unsupported_quiet) {
+            plat_puts("UEFI-DOS: unsupported 386 opcode 0F ");
             char hex[3];
             hex[0] = "0123456789ABCDEF"[op2 >> 4];
             hex[1] = "0123456789ABCDEF"[op2 & 15];
@@ -1908,8 +1925,13 @@ static int step_8086(Emu *e)
     }
     case 0x9C: pushv(e, e->eflags, (op_is32(e) ? 32 : 16)); break;
     case 0x9D: {
-        if (op_is32(e)) e->eflags = (pop32(e) & 0x00FD5FFFu) | EFLAGS_FIXED;
-        else e->flags = (u16)((pop16(e) & 0x0FD5) | 0x0002);
+        /* A 386/486 in real mode keeps IOPL (bits 12-13) and NT (bit 14)
+           writable through POPF, and only bit 15 is reserved.  An 8086/286
+           drops all four.  DOS/16M (the DOOM 0.99 loader) tells the two
+           apart by writing FLAGS=0F000h and reading it back, so emulate the
+           386 mask.  PUSHF already returns the stored bits. */
+        if (op_is32(e)) e->eflags = (pop32(e) & 0x00FDDFFFu) | EFLAGS_FIXED;
+        else e->flags = (u16)(((pop16(e) & 0x7FD5) | 0x0002));
         break;
     }
 
@@ -2353,13 +2375,16 @@ static int step_8086(Emu *e)
         break;
     }
     default: {
-        plat_puts("UEFI-DOS: unsupported 8086 opcode 0x");
-        char hex[3];
-        hex[0] = "0123456789ABCDEF"[op >> 4];
-        hex[1] = "0123456789ABCDEF"[op & 15];
-        hex[2] = 0;
-        plat_puts(hex);
-        plat_putc('\n');
+        emu_unsupported_ops++;
+        if (!emu_unsupported_quiet) {
+            plat_puts("UEFI-DOS: unsupported 8086 opcode 0x");
+            char hex[3];
+            hex[0] = "0123456789ABCDEF"[op >> 4];
+            hex[1] = "0123456789ABCDEF"[op & 15];
+            hex[2] = 0;
+            plat_puts(hex);
+            plat_putc('\n');
+        }
         e->halted = 1;
         e->exit_code = 0xFF;
         return 0;
@@ -2488,6 +2513,17 @@ static void arena_setup(Emu *e, u16 psp_seg, u32 image_bytes);
  * window and fill in the rest of the PSP the way DOS does. */
 #define PSP_CALL_OFF 0xFFD0u
 
+/* Full DOS path of the program currently being started.  DOS stores it in
+   the environment block at offset 2 and DOS extenders (DOS/16M, DOS/4GW)
+   read it back to reopen their own EXE and load the 32-bit image. */
+static char g_prog_path[DOS_MAX_PATH];
+
+/* Number of times an unsupported opcode was executed, and whether the message
+   should be printed.  The brute-force audit (tools --ifuzz) silences the text
+   and reports the offending opcodes in one line each instead. */
+int emu_unsupported_ops;
+int emu_unsupported_quiet;
+
 static void build_psp(Emu *e, u16 psp_seg, const char *argline)
 {
     u16 s = psp_seg;
@@ -2512,13 +2548,25 @@ static void build_psp(Emu *e, u16 psp_seg, const char *argline)
     emu_ww(e, s, 0x16, e->psp_seg ? e->psp_seg : s); /* parent PSP */
     /* job file table: 20 handles, all "not open" */
     for (int i = 0; i < 20; i++) emu_wb(e, s, (u16)(0x18 + i), 0xFF);
-    /* environment */
+    /* environment: offset 0 = string count word, offset 2 = the program's
+       full path (DOS 3+), then the variables, then the DOS 5 "extra
+       strings" trailer (count + path again).  DOS extenders depend on the
+       path at +2; without it DOS/16M opens "" and gives up. */
     u16 env_seg = 0x0B00;
     u32 env_off = (u32)env_seg * 16;
     const char *env = "PATH=C:\\";
+    const char *prog = g_prog_path[0] ? g_prog_path : "C:\\COMMAND.COM";
     u32 k = 0;
+    e->mem[(env_off + k) & MEM_MASK] = 1; k++;   /* word: 1 string */
+    e->mem[(env_off + k) & MEM_MASK] = 0; k++;
+    for (const char *p = prog; *p; p++) e->mem[(env_off + k++) & MEM_MASK] = (u8)*p;
+    e->mem[(env_off + k++) & MEM_MASK] = 0;
     for (const char *p = env; *p; p++) e->mem[(env_off + k++) & MEM_MASK] = (u8)*p;
     e->mem[(env_off + k++) & MEM_MASK] = 0;
+    e->mem[(env_off + k++) & MEM_MASK] = 0;
+    e->mem[(env_off + k) & MEM_MASK] = 1; k++;   /* extra strings: 1 */
+    e->mem[(env_off + k) & MEM_MASK] = 0; k++;
+    for (const char *p = prog; *p; p++) e->mem[(env_off + k++) & MEM_MASK] = (u8)*p;
     e->mem[(env_off + k++) & MEM_MASK] = 0;
     emu_ww(e, s, 0x2C, env_seg);
     emu_ww(e, s, 0x2E, 0xFFFE);              /* SS:SP before the first CALL 5 */
@@ -2963,7 +3011,10 @@ static int read_program(const char *path, u8 **img_out, u32 *size_out)
     int rc = dos_open(path, 0, &h);
     if (rc != FAT_OK) return rc;
     u32 size = g_dos.handles[h].size;
-    if (size == 0 || size > 400000u) {
+    /* A DOS program can be much larger than the 640 KB it loads into: the file
+     * itself only has to fit in RAM because it is read whole.  0.10.0 capped
+     * this at 400 KB, which rejected DOOM.EXE (523 KB) and SETUP.EXE. */
+    if (size == 0 || size > 8u * 1024u * 1024u) {
         dos_close(h);
         return FAT_EINVAL;
     }
@@ -3003,6 +3054,8 @@ int emu_shell_exec(const char *name, const char *args)
     Emu *e = (Emu *)plat_alloc(sizeof(Emu));
     if (!e) { plat_free(img); return FAT_ENOSPC; }
     if (emu_init(e)) { plat_free(img); plat_free(e); return FAT_ENOSPC; }
+    strncpy(g_prog_path, found, sizeof(g_prog_path) - 1);
+    g_prog_path[sizeof(g_prog_path) - 1] = 0;
     u16 psp_seg = 0x0D00;
 #ifdef UEFIDOS_HOST
     {
@@ -3034,6 +3087,8 @@ int emu_exec_program(Emu *e, const char *prog, const char *args)
 {
     char path[DOS_MAX_PATH];
     if (locate_program(prog, path, sizeof(path))) return -1;
+    strncpy(g_prog_path, path, sizeof(g_prog_path) - 1);
+    g_prog_path[sizeof(g_prog_path) - 1] = 0;
     u8 *img = NULL;
     u32 size = 0;
     int rc = read_program(path, &img, &size);

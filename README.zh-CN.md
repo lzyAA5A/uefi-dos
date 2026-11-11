@@ -12,8 +12,16 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 0.10.0 —— 25 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
-的 x86_64 与 IA32 实机启动）。0.10.0 是**真软件版本**：第一次把一款 1993 年的商业
+当前版本 **1.0.0** —— 27 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+的 x86_64 与 IA32 实机启动）。1.0.0 是第一个正式版：命令面、原生 ABI 与磁盘布局从此
+冻结。相对 0.9.0 的变化：原生 SDK 多了一个真正干活的程序
+[`FILETOOL`](docs/sdk-guide.md)（32 位文件读写、长文件名、盘符表与 16 位下行调用），
+新增整文件读写辅助函数、完整的 [**SDK 开发文档**](docs/sdk-guide.md)，以及一个
+暴力指令审计（`--ifuzz`，12,800 条指令流）来守住模拟器的译码器。真软件测试继续：
+[DOOM 0.99](docs/doom.md) 又挖出三个货真价实的 DOS 兼容性 bug —— `POPF` 丢掉
+IOPL/NT（导致 DOS/16M 判定 CPU 是 286）、缺 `0F BA`（立即数位的
+BT/BTS/BTR/BTC）、以及环境块里没有程序路径（任何 DOS 扩展器都无法重新打开自己的
+镜像）。0.10.0 的战果全部保留：SimEarth 1.5 可以安装并运行。0.10.0 是**真软件版本**：第一次把一款 1993 年的商业
 DOS 游戏真正跑起来 —— [SimEarth 1.5](docs/simearth.md)：Maxis 的安装程序走完五屏、
 解开 overlay、写出 `SIMEARTH.CFG`，随后游戏以 320×200×256 画出地形图与控制面板。
 为此修掉了这类程序对 PC 的八个假设（详见 `docs/simearth.md`）：16 位代码用**负的
@@ -24,7 +32,7 @@ DOS 游戏真正跑起来 —— [SimEarth 1.5](docs/simearth.md)：Maxis 的安
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-0.10.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.10.0.zip)
+[**下载 `UEFI-DOS-1.0.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.0.0.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -60,7 +68,7 @@ DOS 游戏真正跑起来 —— [SimEarth 1.5](docs/simearth.md)：Maxis 的安
 | 386 保护模式 | 实模式 → 保护模式切换、GDT/LDT 解析、带限长检查的隐藏段缓存、`MOV CRn`/`LGDT`/`LIDT`/`LLDT`/`CLTS`、32 位寻址（SIB）、`0F xx` 指令族、保护模式 IDT 分发 |
 | DPMI 0.9 宿主 | `INT 2Fh AX=1687h` 引导、`INT 31h` 描述符/DOS 内存/实模式反射 —— 见 [`docs/protected-mode.md`](docs/protected-mode.md) |
 | 内置工具 | `INFO CAL SUM HEX CLOCK` —— 由 `tools/make_tools.py` 生成的 16 位 `.COM` 程序 |
-| 原生程序（SDK） | `RUN64 file.exe` 把自由式 PE32+/PE32 镜像映射进可执行内存、做基址重定位，然后在真 CPU 上调用 —— 见 [`docs/sdk.md`](docs/sdk.md) |
+| 原生程序（SDK） | `RUN64 file.exe` 把自由式 PE32+/PE32 镜像映射进可执行内存、做基址重定位，然后在真 CPU 上调用 —— 见 [`docs/sdk-guide.md`](docs/sdk-guide.md) |
 | 解释器测试 | `hosttest.exe --itest`：49 条字节流指令用例 —— 见 [`docs/itest.md`](docs/itest.md) |
 | 构建方式 | PowerShell 脚本（Windows）、`make`（Linux/macOS/WSL）与 `Dockerfile` |
 
@@ -334,7 +342,7 @@ RUN64: exit code 0 -> NATIVE-OK
 其中 `Hello from 8086 code!` 那一行，是 64 位程序启动的 16 位 `.COM` 打印出来的 ——
 下行调用链完整跑通。位宽由加载器强制校验（64 位内核拒绝 32 位镜像：那段代码不可能在
 64 位地址空间里执行）。完整的服务表、链接参数与已知限制见
-[`docs/sdk.md`](docs/sdk.md)。
+[`docs/sdk-guide.md`](docs/sdk-guide.md)。
 
 ## 指令级解释器测试
 
@@ -524,6 +532,20 @@ build.ps1 run_uefi.ps1 run_interactive.ps1 run_tests.ps1 start_qemu.bat
   MBR 分区，失败再按超级软盘处理。
 
 ## 值得一提的已修 bug
+
+1.0.0 这一批来自实跑 DOOM 0.99（见 `docs/doom.md`）——它自带的 DOS/16M 加载器
+是最苛刻的 CPU/DOS 一致性测试：
+
+- **`POPF` 丢掉 IOPL 与 NT**（掩码 `0x0FD5`，那是 8086/286 的行为）。扩展器写
+  `FLAGS=0F000h` 再读回来判断是 386 还是 286，于是在一个**已经支持保护模式**的
+  模拟器上打出 `DOS/16M error: [15] protected mode available only with 386 or 486`。
+  386/486 的 12-14 位可写、只有第 15 位保留，16 位 `POPF` 现在按 `0x7FD5` 掩码。
+- **缺 `0F BA`**（立即数位的 `BT`/`BTS`/`BTR`/`BTC`）——加载器通过 CPU 检测后
+  执行的下一条指令，模拟器直接报 `unsupported 386 opcode 0F BA` 停机。
+- **环境块里没有程序路径**。DOS 把被执行的程序全路径放在 `env:2`（前面是串计数
+  字），所有 DOS 扩展器都靠它重新打开自己的镜像。我们只写了 `PATH=C:\`，于是
+  加载器打开 `""`，随后报 `not a DOS/16M executable 'DOOM.EXE'`。`build_psp()`
+  现在写完整的 DOS 布局，包括 DOS 5 的 "extra strings" 尾块。
 
 - `fat_read_chain_byte` 在跨多个 512 字节块读取时重复累加输出偏移、并且重加了扇区索引，
   导致多簇 `.COM`/`.EXE` 整体偏移一个簇加载。

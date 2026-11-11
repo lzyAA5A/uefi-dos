@@ -129,6 +129,14 @@ static const u8 c_mov_bx_si_neg[] = { 0x8B, 0x40, 0xFE };      /* mov ax,[bx+si-
 static const u8 c_mov_bp_pos[]  = { 0x8B, 0x46, 0x04 };        /* mov ax,[bp+04h] */
 static const u8 c_rep_stosb_df1[] = { 0xF3, 0xAA };           /* rep stosb (DF=1) */
 
+/* 386 additions: POPF keeping IOPL/NT (DOS/16M's CPU probe) and the
+   0F BA BT/BTS/BTR/BTC immediate forms (the DOOM 0.99 stub died on them). */
+static const u8 c_popf_iopl[]  = { 0xB8, 0x00, 0xF0, 0x50, 0x9D, 0x9C, 0x58 };  /* mov ax,0F000h; push ax; popf; pushf; pop ax */
+static const u8 c_bt_imm[]     = { 0x0F, 0xBA, 0xE0, 0x0C };  /* bt ax,12 */
+static const u8 c_bts_imm[]    = { 0x0F, 0xBA, 0xE8, 0x03 };  /* bts ax,3 */
+static const u8 c_btr_imm[]    = { 0x0F, 0xBA, 0xF0, 0x01 };  /* btr ax,1 */
+static const u8 c_btc_imm[]    = { 0x0F, 0xBA, 0xF8, 0x00 };  /* btc ax,0 */
+
 /* ---- memory fixtures (8 bytes each) ---- */
 static const u8 m_ff_tail[]      = { 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00 };
 static const u8 m_ff_b0[]        = { 0xFF, 0xFF, 0xFF, 0xB0, 0x00, 0x00, 0x00, 0x00 };
@@ -238,6 +246,16 @@ static const it_case g_cases[] = {
     CASE("arpl ax,bx (rpl 3)", c_arpl, ((it_regs){.ax = 0, .bx = 3}), ((it_regs){.ax = 3}), IT_C_AX, 1, 0, 0, 0, 0, 0),
     CASE("insb from port 61h", c_insb, ((it_regs){.di = IT_DATA_OFF, .cx = 1}), ((it_regs){.di = IT_DATA_OFF + 1}), IT_C_DI, 1, 0, 0, 0, 0, 0),
     CASE("outsb to port 61h", c_outsb, ((it_regs){.si = IT_DATA_OFF, .cx = 1}), ((it_regs){.si = IT_DATA_OFF + 1}), IT_C_SI, 1, m_words, 0, IT_SEG, IT_DATA_OFF, 1),
+
+    /* --- 386 POPF keeps IOPL/NT (bits 12-14).  DOS/16M, the loader inside
+     * DOOM 0.99, writes FLAGS=0F000h and reads it back to tell a 386 from a
+     * 286; bit 15 is reserved and reads back 0 on a 386. --- */
+    CASE("popf keeps IOPL/NT (386)", c_popf_iopl, ((it_regs){.flags = 0x0002}), ((it_regs){.ax = 0x7002}), IT_C_AX, 5, 0, 0, 0, 0, 0),
+    /* --- 0F BA: BT/BTS/BTR/BTC with an immediate bit index (386). --- */
+    CASE("bt ax,12 sets CF", c_bt_imm, ((it_regs){.ax = 0x1000, .flags = 0x0002}), ((it_regs){.ax = 0x1000, .flags = 0x0001}), IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
+    CASE("bts ax,3", c_bts_imm, ((it_regs){.ax = 0x0000, .flags = 0x0002}), ((it_regs){.ax = 0x0008, .flags = 0x0002}), IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
+    CASE("btr ax,1", c_btr_imm, ((it_regs){.ax = 0x0002, .flags = 0x0002}), ((it_regs){.ax = 0x0000, .flags = 0x0001}), IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
+    CASE("btc ax,0", c_btc_imm, ((it_regs){.ax = 0x0001, .flags = 0x0002}), ((it_regs){.ax = 0x0000, .flags = 0x0001}), IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
 };
 
 #define IT_NCASES ((int)(sizeof(g_cases) / sizeof(g_cases[0])))
@@ -402,4 +420,150 @@ int itest_run(const char *filter)
     plat_puts(" failed\n");
     plat_puts(fail == 0 ? "ITEST PASSED\n" : "ITEST FAILED\n");
     return fail == 0 ? 0 : 1;
+}
+
+/* ====================================================================== */
+/* Brute-force opcode audit ("ifuzz")                                     */
+/*                                                                        */
+/* The 8086 decoder is a long switch, and a missing opcode only shows up   */
+/* as "program X died" months later.  This feeds every first-byte opcode   */
+/* (and every 0F-prefixed second byte) into a fresh Emu with a handful of  */
+/* addressing-mode fillers, steps it a few instructions and records which  */
+/* ones the decoder rejects.  It is an audit, not an assertion: the report  */
+/* lists the holes so they can be triaged.                                 */
+/* ====================================================================== */
+#define IFUZZ_SEG      0x9100
+#define IFUZZ_CODE_OFF 0x0100
+#define IFUZZ_STEP     6          /* instructions to run per stream */
+
+static const u8 g_fillers[] = { 0x00, 0x01, 0x04, 0x05, 0x06, 0x44, 0x84, 0xC0, 0xE0, 0xF8 };
+#define IFUZZ_NFILL ((int)(sizeof(g_fillers) / sizeof(g_fillers[0])))
+
+/* Run one stream; returns the number of unsupported opcodes it hit. */
+static int fuzz_stream(Emu *e, const u8 *code, int len)
+{
+    int before = emu_unsupported_ops;
+    e->ax = 0x1234; e->bx = 0x0100; e->cx = 0x0004; e->dx = 0x0300;
+    e->si = 0x0200; e->di = 0x0240; e->bp = 0x0300; e->sp = 0xF000;
+    e->eflags = 0x0202;
+    e->eip = IFUZZ_CODE_OFF;
+    emu_set_seg(e, 0, IFUZZ_SEG);
+    emu_set_seg(e, 1, IFUZZ_SEG);
+    emu_set_seg(e, 2, IFUZZ_SEG);
+    emu_set_seg(e, 3, IFUZZ_SEG);
+    for (int i = 0; i < len && i < 32; i++)
+        emu_wb(e, IFUZZ_SEG, (u16)(IFUZZ_CODE_OFF + i), code[i]);
+    for (int s = 0; s < IFUZZ_STEP; s++) {
+        if (step_public(e) != 0) break;
+        if (e->halted) break;
+    }
+    return emu_unsupported_ops - before;
+}
+
+static void itest_puthex(u32 v)
+{
+    char hex[3];
+    hex[0] = "0123456789ABCDEF"[(v >> 4) & 15];
+    hex[1] = "0123456789ABCDEF"[v & 15];
+    hex[2] = 0;
+    plat_puts(hex);
+}
+
+/* Records one rejected opcode per (prefix, opcode) pair. */
+static u8 g_bad_first[256];         /* 8086 first-byte opcode rejected */
+static u8 g_bad_386[256];           /* 0F xx rejected */
+
+int ifuzz_run(int verbose)
+{
+    Emu *e = (Emu *)plat_alloc(sizeof(Emu));
+    if (!e) { plat_puts("ifuzz: out of memory\n"); return 1; }
+    if (emu_init(e) != 0) { plat_free(e); plat_puts("ifuzz: emu_init failed\n"); return 1; }
+
+    int saved_quiet = emu_unsupported_quiet;
+    emu_unsupported_quiet = 1;      /* report them summarised, not per hit */
+
+    u32 streams = 0, holes = 0;
+    u8 code[8];
+
+    /* --- 8086 first-byte opcodes, with prefixes and addressing fillers --- */
+    for (int pre = 0; pre < 4; pre++) {
+        static const u8 prefixes[4] = { 0x00, 0x26, 0x66, 0x67 };  /* none, seg, opsz, adsz */
+        for (int op = 0; op < 256; op++) {
+            for (int f = 0; f < IFUZZ_NFILL; f++) {
+                int n = 0;
+                if (prefixes[pre]) code[n++] = prefixes[pre];
+                code[n++] = (u8)op;
+                code[n++] = g_fillers[f];
+                code[n++] = 0x90;   /* nop padding: immediates land on it */
+                code[n++] = 0x90;
+                code[n++] = 0x90;
+                code[n++] = 0x90;
+                streams++;
+                if (fuzz_stream(e, code, n)) {
+                    holes++;
+                    if (!g_bad_first[op]) {
+                        g_bad_first[op] = 1;
+                        if (verbose) {
+                            char line[32];
+                            snprintf(line, sizeof(line), "  rejected 8086 op %02X (prefix %02X)\n",
+                                     (unsigned)op, (unsigned)prefixes[pre]);
+                            plat_puts(line);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* --- 0F-prefixed (386 / DPMI extension) second bytes --- */
+    for (int op2 = 0; op2 < 256; op2++) {
+        for (int f = 0; f < IFUZZ_NFILL; f++) {
+            code[0] = 0x0F;
+            code[1] = (u8)op2;
+            code[2] = g_fillers[f];
+            code[3] = 0x90;
+            code[4] = 0x90;
+            code[5] = 0x90;
+            code[6] = 0x90;
+            streams++;
+            if (fuzz_stream(e, code, 7)) {
+                holes++;
+                if (!g_bad_386[op2]) {
+                    g_bad_386[op2] = 1;
+                    if (verbose) {
+                        char line[32];
+                        snprintf(line, sizeof(line), "  rejected 0F %02X\n", (unsigned)op2);
+                        plat_puts(line);
+                    }
+                }
+            }
+        }
+    }
+
+    emu_unsupported_quiet = saved_quiet;
+    emu_free(e);
+    plat_free(e);
+
+    /* --- summary --- */
+    char num[16];
+    int n8086 = 0, n386 = 0;
+    plat_puts("ifuzz: ");
+    snprintf(num, sizeof(num), "%u", (unsigned)streams);
+    plat_puts(num);
+    plat_puts(" streams, ");
+    snprintf(num, sizeof(num), "%u", (unsigned)holes);
+    plat_puts(num);
+    plat_puts(" rejects\n");
+    plat_puts("ifuzz: 8086 opcodes missing:");
+    for (int i = 0; i < 256; i++) if (g_bad_first[i]) { n8086++; if (n8086 <= 32) { plat_putc(' '); itest_puthex((u32)i); } }
+    if (!n8086) plat_puts(" none");
+    else { plat_puts(" ("); snprintf(num, sizeof(num), "%d", n8086); plat_puts(num); plat_puts(" total)"); }
+    plat_putc('\n');
+    plat_puts("ifuzz: 0F opcodes missing:");
+    for (int i = 0; i < 256; i++) if (g_bad_386[i]) { n386++; if (n386 <= 32) { plat_putc(' '); itest_puthex((u32)i); } }
+    if (!n386) plat_puts(" none");
+    else { plat_puts(" ("); snprintf(num, sizeof(num), "%d", n386); plat_puts(num); plat_puts(" total)"); }
+    plat_putc('\n');
+    plat_puts("IFUZZ DONE\n");
+    return 0;
 }
