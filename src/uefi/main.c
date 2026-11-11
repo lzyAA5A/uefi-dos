@@ -13,6 +13,7 @@ EFI_GUID gEfiLoadedImageProtocolGuid     = { 0x5B1B31A1, 0x9562, 0x11d2, {0x8E,0
 EFI_GUID gEfiSimpleFileSystemProtocolGuid= { 0x964E5B22, 0x6459, 0x11d2, {0x8E,0x39,0x00,0xA0,0xC9,0x69,0x72,0x3B} };
 EFI_GUID gEfiBlockIoProtocolGuid         = { 0x964E5B21, 0x6459, 0x11d2, {0x8E,0x39,0x00,0xA0,0xC9,0x69,0x72,0x3B} };
 EFI_GUID gEfiSerialIoProtocolGuid        = { 0xBB25CF6F, 0xF1D4, 0x11D2, {0x9A,0x0C,0x00,0x90,0x27,0x3F,0xC1,0xFD} };
+EFI_GUID gEfiGraphicsOutputProtocolGuid      = { 0x9042A9DE, 0x23DC, 0x4A38, {0x96,0xFB,0x7A,0xDE,0xD0,0x80,0x51,0x6A} };
 EFI_GUID gEfiDevicePathProtocolGuid      = { 0x09576E91, 0x6D3F, 0x11D2, {0x8E,0x39,0x00,0xA0,0xC9,0x69,0x72,0x3B} };
 
 /* Configuration table entry published for external EFI apps: the value is a
@@ -64,6 +65,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
 
     dos_init();
     int rc = dos_mount_boot();
+    if (rc == 0) dos_mount_all();   /* D:, E:, ... for every other UEFI volume */
     if (rc != 0) {
         plat_puts("UEFI-DOS: fatal: cannot mount the boot volume");
         plat_puts(" (rc=");
@@ -89,6 +91,17 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
     plat_puts("), volume ");
     plat_puts(g_dos.drives[2].label);
     plat_puts("\n");
+    for (int d = 3; d < DOS_MAX_DRIVES; d++) {
+        if (!g_dos.drives[d].mounted) continue;
+        plat_puts("Drive ");
+        plat_putc((char)('A' + d));
+        plat_puts(": mounted (FAT");
+        int t = dos_fs_type(d);
+        plat_puts(t == 32 ? "32" : t == 16 ? "16" : "12");
+        plat_puts("), volume ");
+        plat_puts(g_dos.drives[d].label);
+        plat_puts(g_dos.drives[d].vol.read_only ? " (read-only)\n" : "\n");
+    }
 
     /* Publish the native 32/64-bit DOS API (UEFIDOS_API_GUID). */
     gBS->InstallConfigurationTable(&gEfiUefiDosApiGuid, (void *)&g_dosapi_exports);

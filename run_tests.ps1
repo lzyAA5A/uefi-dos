@@ -51,7 +51,7 @@ Run-Check 'FAT32 read/write/create/mkdir/rename/delete selftest' {
 
 Run-Check 'host shell: DIR/TYPE/VER/external COM/EXE/EXEC/VRAM/native API/upcall' {
     & $HostExe --shell (Join-Path $Build 't_shell.img') "DIR" "TYPE HELLO.TXT" "VER" "HELLO" "TELETYPE" "MZEXE" "RUNNER" "VRAM" "APITEST" "UPCALL" "DTATEST" "I2FTEST" "DPMITEST"
-} @('EFI', '<DIR>', 'Hello UEFI-DOS!', 'UEFI-DOS Version', 'Hello from 8086 code!', 'TELETYPE OK!', 'Hello from MZ EXE!', 'RUNNER DONE!', 'VIDEO-OK!', 'APITEST: size', 'API-OK', 'UEFI-DOS native API v1.00', 'UPCALL-OK','DTA-OK','INT2F-OK','DPMI-HOST-OK','PM16-OK','PM32-DOS-OK','RMREFLECT-OK','DOSMEM-OK','REFLECTED-21H-OK','TICKS-OK', 'SHELLDONE')
+} @('EFI', '<DIR>', 'Hello UEFI-DOS!', 'UEFI-DOS Version', 'Hello from 8086 code!', 'TELETYPE OK!', 'Hello from MZ EXE!', 'RUNNER DONE!', 'VIDEO-OK!', 'APITEST: size', 'API-OK', 'UEFI-DOS native API v1.01', 'UPCALL-OK','DTA-OK','INT2F-OK','DPMI-HOST-OK','PM16-OK','PM32-DOS-OK','RMREFLECT-OK','DOSMEM-OK','REFLECTED-21H-OK','TICKS-OK', 'SHELLDONE')
 
 Run-Check 'host shell: MD/COPY/TYPE/DEL/RD write path' {
     & $HostExe --shell (Join-Path $Build 't_shell.img') "MD T2" "COPY HELLO.TXT T2\A.TXT" "TYPE T2\A.TXT" "DEL T2\A.TXT" "RD T2"
@@ -151,6 +151,50 @@ Run-Check 'keyboard: arrow keys arrive as BIOS scan codes (INT 16h)' {
 Remove-Item Env:UEFIDOS_KBD -ErrorAction SilentlyContinue
 Remove-Item Env:UEFIDOS_KBD_MAX_POLLS -ErrorAction SilentlyContinue
 
+
+# Multi-volume support: every block device the platform reports becomes a drive
+# letter, so a second disk (or a USB stick) shows up as D:.  The host platform
+# fakes that with UEFIDOS_EXTRA_DRIVES; QEMU proves it against real firmware.
+$env:UEFIDOS_EXTRA_DRIVES = (Resolve-Path (Join-Path $Build 'SECOND.img')).Path
+Run-Check 'drives: a second UEFI volume is mounted as D:' {
+    & $HostExe --shell (Join-Path $Build 't_tools.img') 'DRIVES' 'VOL D:' 'TYPE D:\SECOND.TXT'
+} @('C: >FAT32', 'D:  FAT32', 'Volume in drive D is', 'this volume is D:, not C:')
+Remove-Item Env:UEFIDOS_EXTRA_DRIVES -ErrorAction SilentlyContinue
+
+# Long file names: the 64-bit native API creates "Long Name Report.txt" (VFAT LFN
+# + generated 8.3 alias), DIR shows the long name, TYPE opens it by that name,
+# and the longname() call maps the alias back.
+Run-Check 'FAT: long file names (create via native API, DIR/TYPE by long name)' {
+    & $HostExe --shell (Join-Path $Build 'UEFIDOS.img') 'RUN64 HELLO64.EXE' 'DIR *.TXT' 'TYPE Long Name Report.txt'
+} @('long name    : created "Long Name Report.txt"', 'long read    : this file has a VFAT long name',
+    '8.3 alias    : LONGNA~1.TXT -> Long Name Report.txt', 'Long Name Report.txt',
+    'this file has a VFAT long name')
+
+# Graphics: INT 10h mode 13h and the VESA VBE calls must switch the display to a
+# pixel framebuffer whose contents we can dump (the host platform writes a PPM;
+# under QEMU the same code writes the GOP framebuffer directly).
+$env:UEFIDOS_KBD = 'SPACE'
+$env:UEFIDOS_HARD_STEPS = '80000000'
+Run-Check 'graphics: INT 10h mode 13h paints the 320x200 framebuffer' {
+    $env:UEFIDOS_GFX_DUMP = (Join-Path $Build 't_gfx13.ppm')
+    Remove-Item $env:UEFIDOS_GFX_DUMP -ErrorAction SilentlyContinue
+    & $HostExe --shell (Join-Path $Build 'UEFIDOS.img') 'GFXTEST'
+    $sz = 0
+    if (Test-Path $env:UEFIDOS_GFX_DUMP) { $sz = (Get-Item $env:UEFIDOS_GFX_DUMP).Length }
+    Write-Host "framebuffer dump: $sz bytes"
+} @('gfx: mode set 320x200x8', 'gfx: 320x200 framebuffer ->', 'GFX-OK 320x200x256', 'GFX-TEXT-OK')
+
+Run-Check 'graphics: VESA VBE 4F00/4F01/4F02 sets 640x480x256' {
+    $env:UEFIDOS_GFX_DUMP = (Join-Path $Build 't_vesa.ppm')
+    Remove-Item $env:UEFIDOS_GFX_DUMP -ErrorAction SilentlyContinue
+    & $HostExe --shell (Join-Path $Build 'UEFIDOS.img') 'VESATEST'
+    $sz = 0
+    if (Test-Path $env:UEFIDOS_GFX_DUMP) { $sz = (Get-Item $env:UEFIDOS_GFX_DUMP).Length }
+    Write-Host "framebuffer dump: $sz bytes"
+} @('VESA-OK', 'gfx: mode set 640x480x8', 'gfx: 640x480 framebuffer ->', 'VESA-MODE-OK 640x480x256', 'VESA-TEXT-OK')
+Remove-Item Env:UEFIDOS_GFX_DUMP -ErrorAction SilentlyContinue
+Remove-Item Env:UEFIDOS_KBD -ErrorAction SilentlyContinue
+Remove-Item Env:UEFIDOS_HARD_STEPS -ErrorAction SilentlyContinue
 
 # AH=3Ch on an existing file must truncate it, not corrupt its chain: create a
 # file, write it, delete the content by recreating it, write again, read back.

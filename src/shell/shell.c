@@ -114,10 +114,14 @@ static void say_rc(int rc, const char *what)
 /* ------------------------------------------------------------------ */
 static void dir_print_entry(const char *name, u8 attr, u32 size, u16 t, u16 d)
 {
-    char line[64];
+    char line[96];
     int n = 0;
-    for (const char *p = name; *p && n < 12; p++) line[n++] = *p;
-    while (n < 13) line[n++] = ' ';
+    /* 8.3 names keep the classic 13-column layout; a long name gets the room it
+     * needs (up to 32 columns) so DIR stays readable with VFAT names */
+    int nlen = (int)strlen(name);
+    int width = nlen > 12 ? (nlen > 32 ? 32 : nlen) : 12;
+    for (const char *p = name; *p && n < width; p++) line[n++] = *p;
+    while (n < width + 1) line[n++] = ' ';
     if (attr & 0x10) {
         for (int i = 0; i < 5; i++) line[n++] = ' ';
         const char *dir = "<DIR>";
@@ -210,16 +214,19 @@ static int cmd_dir(const char *spec)
 
     dos_find f;
     char name[13];
+    char lname[FAT_LFN_MAX];
     u8 attr;
     u32 size;
     u16 t, d;
-    int rc = dos_find_first(pattern, 0x3F, &f, name, &attr, &size, &t, &d);
+    int rc = dos_find_first_ex(pattern, 0x3F, &f, name, &attr, &size, &t, &d,
+                               lname, (int)sizeof(lname));
     u32 nfiles = 0, ndirs = 0;
     u64 total = 0;
     while (rc == FAT_OK) {
-        dir_print_entry(name, attr, size, t, d);
+        /* long name when the entry has one, otherwise the 8.3 name */
+        dir_print_entry(lname[0] ? lname : name, attr, size, t, d);
         if (attr & 0x10) ndirs++; else { nfiles++; total += size; }
-        rc = dos_find_next(&f, name, &attr, &size, &t, &d);
+        rc = dos_find_next_ex(&f, name, &attr, &size, &t, &d, lname, (int)sizeof(lname));
     }
     char tail[96];
     /* "  N file(s)  M bytes" */
@@ -675,12 +682,42 @@ static int dispatch(char *line)
     }
     if (ci_equal(cmd, "VOL")) {
         int d = dos_current_drive();
+        if (arg[0] && arg[1] == ':' && up(arg[0]) >= 'A' && up(arg[0]) <= 'Z')
+            d = up(arg[0]) - 'A';
+        if (d < 0 || d >= DOS_MAX_DRIVES || !g_dos.drives[d].mounted) {
+            say_rc(FAT_ENOENT, "VOL");
+            return FAT_OK;
+        }
         plat_puts(" Volume in drive ");
         char dv[2] = { (char)('A' + d), 0 };
         plat_puts(dv);
         plat_puts(" is ");
         plat_puts(g_dos.drives[d].label[0] ? g_dos.drives[d].label : "NO NAME");
         plat_putc('\n');
+        return FAT_OK;
+    }
+    /* DRIVES: every mounted drive letter -- the rescue-tool view */
+    if (ci_equal(cmd, "DRIVES")) {
+        for (int d = 0; d < DOS_MAX_DRIVES; d++) {
+            if (!g_dos.drives[d].mounted) continue;
+            char line[64];
+            int n = 0;
+            line[n++] = (char)('A' + d);
+            line[n++] = ':';
+            line[n++] = ' ';
+            line[n++] = d == dos_current_drive() ? '>' : ' ';
+            int t = dos_fs_type(d);
+            const char *fs = t == 32 ? "FAT32 " : t == 16 ? "FAT16 " : t == 12 ? "FAT12 " : "?     ";
+            for (int i = 0; fs[i] && n < (int)sizeof(line) - 2; i++) line[n++] = fs[i];
+            if (g_dos.drives[d].vol.read_only) {
+                const char *ro = "ro ";
+                for (int i = 0; ro[i] && n < (int)sizeof(line) - 2; i++) line[n++] = ro[i];
+            }
+            line[n] = 0;
+            plat_puts(line);
+            plat_puts(g_dos.drives[d].label);
+            plat_putc('\n');
+        }
         return FAT_OK;
     }
     if (ci_equal(cmd, "DATE")) {
@@ -814,7 +851,7 @@ static int dispatch(char *line)
         say("UEFI-DOS built-in commands:");
         say("  DIR   CD   MD   RD   DEL   REN   TYPE   COPY");
         say("  CLS   ECHO VER  VOL   DATE  TIME  PROMPT PATH");
-        say("  SET   MEM  HELP EXIT  SHUTDOWN  MOUNT  UNMOUNT");
+        say("  SET   MEM  HELP EXIT  SHUTDOWN  MOUNT  UNMOUNT  DRIVES");
         say("  APITEST: native 32/64-bit DOS API demo (prints API-OK)");
         say("  RUN64 <file.exe>: run a native 32/64-bit PE program (sdk/)");
         say("External programs: .COM and .EXE files on the current drive.");

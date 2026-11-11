@@ -22,19 +22,22 @@
 
 #include "uefidos.h"
 
-#define DOSAPI_VERSION 0x0100u      /* 1.00 */
+#define DOSAPI_VERSION 0x0101u      /* 1.00 */
 
 /* UEFI configuration table GUID -> dosapi_exports */
 #define UEFIDOS_API_GUID { 0x55454449u, 0x2D44, 0x4F53, \
                            { 0x41, 0x50, 0x49, 0x00, 0x00, 0x00, 0x00, 0x01 } }
 
-/* INT 21h AH=4Eh/4Fh result record. */
+#define DOSAPI_LFN_MAX 64
+
+/* INT 21h AH=4Eh/4Fh result record, plus the VFAT long name. */
 typedef struct dosapi_findinfo {
     char name[13];      /* 8.3 name, NUL padded */
     u8   attr;          /* directory-entry attributes */
     u32  size;          /* file size in bytes */
     u16  time;          /* packed DOS time (HHHHHMM MMMSSSSS) */
     u16  date;          /* packed DOS date (YYYYYYYM MMMDDDDD) */
+    char long_name[DOSAPI_LFN_MAX]; /* VFAT long name, "" when there is none */
 } dosapi_findinfo;
 
 typedef struct dosapi_services {
@@ -66,6 +69,9 @@ typedef struct dosapi_services {
     /* AH=4Eh/4Fh -- one find state per process, do not nest */
     u16  (*find_first)(const char *pattern, u8 attr_mask, dosapi_findinfo *out);
     u16  (*find_next)(dosapi_findinfo *out);
+    /* resolve an 8.3 path to its long name: out = "" when the entry only has an
+     * 8.3 name, 0x02 when the path does not exist */
+    u16  (*longname)(const char *path, char *out, u32 max);
     /* AH=2Ah (year_dos = year-1980) / AH=2Ch / INTERRUPT 1Ah AH=00h */
     void (*get_date)(u8 *year_dos, u8 *month, u8 *day);
     void (*get_time)(u8 *hour, u8 *minute, u8 *second, u8 *centisecond);

@@ -89,6 +89,7 @@ extern struct dos_state g_dos;
 
 void dos_init(void);
 int  dos_mount_boot(void);    /* mount the volume the OS booted from as C: */
+int  dos_mount_all(void);     /* C: = boot volume, then D:/E:/... for every other device */
 int  dos_mount_image_drive(int letter, const char *path); /* mount image file as A:/B: */
 int  dos_unmount_drive(int letter);
 
@@ -122,7 +123,16 @@ int  dos_find_first(const char *pattern, u8 attr_mask, dos_find *f,
                     u16 *time_out, u16 *date_out);
 int  dos_find_next(dos_find *f, char name_out[13], u8 *attr_out, u32 *size_out,
                    u16 *time_out, u16 *date_out);
+/* same walk, but also hands back the VFAT long name ("" when the entry has only
+ * an 8.3 name) -- the "old DOS sees 8.3, new code sees LFN" split */
+int  dos_find_first_ex(const char *pattern, u8 attr_mask, dos_find *f,
+                       char name_out[13], u8 *attr_out, u32 *size_out,
+                       u16 *time_out, u16 *date_out, char *long_out, int long_max);
+int  dos_find_next_ex(dos_find *f, char name_out[13], u8 *attr_out, u32 *size_out,
+                      u16 *time_out, u16 *date_out, char *long_out, int long_max);
 
+/* long name of an existing file; empty when it only has an 8.3 name */
+int  dos_longname(const char *path, char *out, int max);
 void dos_get_cwd(char *out, int max);      /* "C:\\SUB" or "C:" at root */
 void dos_get_prompt(char *out, int max);
 int  dos_current_drive(void);

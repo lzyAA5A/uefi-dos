@@ -172,23 +172,71 @@ static u32 find_part_lba(blockdev *bd)
     return 0;
 }
 
-int dos_mount_boot(void)
+/* mount one block device on one drive letter: try each MBR partition, then the
+ * superfloppy layout (whole device = one volume). */
+static int mount_device(int drive, blockdev *bd, const char *hint)
 {
-    dos_drive *dr = &g_dos.drives[2];
-    if (plat_boot_blockdev(&dr->bd)) return FAT_EIO;
+    dos_drive *dr = &g_dos.drives[drive];
+    dr->bd = *bd;
     u32 part = find_part_lba(&dr->bd);
-    int rc = fat_mount(&dr->vol, &dr->bd, part, 0);
+    int ro = dr->bd.read_only ? 1 : 0;
+    /* a volume can live in an MBR partition or start at sector 0 (superfloppy);
+     * both layouts must be attempted, so rc starts pessimistic. */
+    int rc = FAT_EINVAL;
+    if (part) rc = fat_mount(&dr->vol, &dr->bd, part, ro);
+    if (rc != FAT_OK) rc = fat_mount(&dr->vol, &dr->bd, 0, ro);
     if (rc != FAT_OK) {
-        /* maybe a superfloppy (no partition table) */
-        rc = fat_mount(&dr->vol, &dr->bd, 0, 0);
-        if (rc != FAT_OK) return rc;
+        memset(dr, 0, sizeof(*dr));
+        return rc;
     }
     dr->mounted = 1;
-    dr->cwd_cluster = root_cluster_of(2);
+    dr->cwd_cluster = root_cluster_of(drive);
     dr->cwd[0] = 0;
     fat_volume_label(&dr->vol, dr->label, sizeof(dr->label));
-    if (!dr->label[0]) strcpy(dr->label, "NO NAME");
+    if (!dr->label[0]) {
+        if (hint && hint[0]) {
+            int i = 0;
+            for (; hint[i] && i < (int)sizeof(dr->label) - 1; i++) dr->label[i] = hint[i];
+            dr->label[i] = 0;
+        } else {
+            strcpy(dr->label, "NO NAME");
+        }
+    }
     return FAT_OK;
+}
+
+int dos_mount_boot(void)
+{
+    blockdev bd;
+    if (plat_boot_blockdev(&bd)) return FAT_EIO;
+    int rc = mount_device(2, &bd, "BOOT");
+    return rc;
+}
+
+/* Mount every volume the platform can see: the boot volume is C:, the others
+ * take the next free letters (D:, E:, ...).  That is what turns "one drive
+ * called C:" into "plug in a USB stick and it shows up as D:". */
+int dos_mount_all(void)
+{
+    blockdev bds[DOS_MAX_DRIVES];
+    static char labels[DOS_MAX_DRIVES][12];
+    int n = plat_enum_blockdevs(bds, DOS_MAX_DRIVES, labels);
+    int mounted = 0;
+
+    if (n <= 0) return 0;
+    for (int i = 0; i < n; i++) {
+        int drive = -1;
+        if (i == 0) {
+            drive = 2;                                  /* boot volume -> C: */
+        } else {
+            for (int d = 3; d < DOS_MAX_DRIVES; d++) {
+                if (!g_dos.drives[d].mounted) { drive = d; break; }
+            }
+        }
+        if (drive < 0) break;                           /* no free letters left */
+        if (mount_device(drive, &bds[i], labels[i]) == FAT_OK) mounted++;
+    }
+    return mounted;
 }
 
 /* mount a file image as A: or B: (e.g. a floppy image); writes go back
@@ -290,7 +338,7 @@ int dos_fs_type(int drive)
 /* path parsing                                                        */
 /* ------------------------------------------------------------------ */
 /* normalize a raw path (relative to base) into "A\\B" form (no drive) */
-static int normalize(const char *raw, char comps[][13], int maxc, int *ncomp)
+static int normalize(const char *raw, char comps[][FAT_LFN_MAX], int maxc, int *ncomp)
 {
     int n = 0;
     const char *p = raw;
@@ -305,9 +353,11 @@ static int normalize(const char *raw, char comps[][13], int maxc, int *ncomp)
             if (n > 0) n--;
             continue;
         }
-        if (len > 12) return -1;
+        if (len > FAT_LFN_MAX - 1) return -1;
         if (n >= maxc) return -1;
-        for (int i = 0; i < len; i++) comps[n][i] = up(start[i]);
+        /* case is preserved here: the 8.3 conversion upper-cases on its own, and
+         * long names keep whatever the user typed */
+        for (int i = 0; i < len; i++) comps[n][i] = start[i];
         comps[n][len] = 0;
         n++;
     }
@@ -315,7 +365,7 @@ static int normalize(const char *raw, char comps[][13], int maxc, int *ncomp)
     return 0;
 }
 
-static void join_comps(const char comps[][13], int n, char *out, int max)
+static void join_comps(const char comps[][FAT_LFN_MAX], int n, char *out, int max)
 {
     int o = 0;
     out[0] = 0;
@@ -344,7 +394,7 @@ int dos_parse_path(const char *path, int *drive, char *abs, int absmax)
         if (d < 0 || d >= DOS_MAX_DRIVES || !mounted(d)) return FAT_EINVAL;
         p += 2;
     }
-    char comps[16][13];
+    char comps[16][FAT_LFN_MAX];
     int n = 0;
     char raw[DOS_MAX_PATH];
     if (*p == '\\' || *p == '/') {
@@ -368,7 +418,7 @@ int dos_parse_path(const char *path, int *drive, char *abs, int absmax)
 /* resolve an absolute relative path to a directory cluster */
 static int resolve_dir(int drive, const char *abs, u32 *out_cluster)
 {
-    char comps[16][13];
+    char comps[16][FAT_LFN_MAX];
     int n = 0;
     if (normalize(abs, comps, 16, &n)) return FAT_ENOPATH;
     u32 cur = root_cluster_of(drive);
@@ -376,10 +426,11 @@ static int resolve_dir(int drive, const char *abs, u32 *out_cluster)
         u8 name11[11];
         int ok;
         dos_fat_name(comps[i], name11, &ok);
-        if (!ok) return FAT_ENOENT;
         fat_dirent d;
-        u32 cl2;
-        int rc = fat_find(vol_of(drive), cur, name11, &d, &cl2, NULL, NULL);
+        u32 cl2 = 0;
+        int rc = FAT_ENOENT;
+        if (ok) rc = fat_find(vol_of(drive), cur, name11, &d, &cl2, NULL, NULL);
+        if (rc != FAT_OK) rc = fat_find_long(vol_of(drive), cur, comps[i], &d, &cl2, NULL, NULL);
         if (rc != FAT_OK) return rc;
         if (!(d.raw[11] & 0x10)) return FAT_ENOTDIR;
         cur = cl2;
@@ -393,7 +444,7 @@ static int resolve_dir(int drive, const char *abs, u32 *out_cluster)
 static int resolve_entry(int drive, const char *abs, fat_dirent *out, u32 *parent,
                          u8 name11_out[11], int *is_root)
 {
-    char comps[16][13];
+    char comps[16][FAT_LFN_MAX];
     int n = 0;
     if (normalize(abs, comps, 16, &n)) return FAT_ENOPATH;
     *is_root = (n == 0);
@@ -408,10 +459,11 @@ static int resolve_entry(int drive, const char *abs, fat_dirent *out, u32 *paren
         u8 nm[11];
         int ok;
         dos_fat_name(comps[i], nm, &ok);
-        if (!ok) return FAT_ENOENT;
         fat_dirent d;
-        u32 cl2;
-        int rc = fat_find(vol_of(drive), cur, nm, &d, &cl2, NULL, NULL);
+        u32 cl2 = 0;
+        int rc = FAT_ENOENT;
+        if (ok) rc = fat_find(vol_of(drive), cur, nm, &d, &cl2, NULL, NULL);
+        if (rc != FAT_OK) rc = fat_find_long(vol_of(drive), cur, comps[i], &d, &cl2, NULL, NULL);
         if (rc != FAT_OK) return rc;
         if (!(d.raw[11] & 0x10)) return FAT_ENOTDIR;
         cur = cl2;
@@ -419,10 +471,11 @@ static int resolve_entry(int drive, const char *abs, fat_dirent *out, u32 *paren
     u8 nm[11];
     int ok;
     dos_fat_name(comps[n - 1], nm, &ok);
-    if (!ok) return FAT_ENOENT;
     fat_dirent d;
     u32 cl = 0;
-    int rc = fat_find(vol_of(drive), cur, nm, &d, &cl, NULL, NULL);
+    int rc = FAT_ENOENT;
+    if (ok) rc = fat_find(vol_of(drive), cur, nm, &d, &cl, NULL, NULL);
+    if (rc != FAT_OK) rc = fat_find_long(vol_of(drive), cur, comps[n - 1], &d, &cl, NULL, NULL);
     /* fill parent/name even if the entry was not found (create paths need it) */
     if (parent) *parent = cur;
     if (name11_out) memcpy(name11_out, nm, 11);
@@ -456,7 +509,7 @@ int dos_mkdir(const char *path)
     rc = dos_parse_path(path, &drive, abs, sizeof(abs));
     if (rc != FAT_OK) return rc;
     if (vol_of(drive)->read_only) return FAT_EROFS;
-    char comps[16][13];
+    char comps[16][FAT_LFN_MAX];
     int n = 0;
     if (normalize(abs, comps, 16, &n)) return FAT_ENOPATH;
     if (n == 0) return FAT_EINVAL; /* cannot create root */
@@ -465,7 +518,7 @@ int dos_mkdir(const char *path)
     dos_fat_name(comps[n - 1], nm, &ok);
     if (!ok) return FAT_EINVAL;
     char parent_abs[DOS_MAX_PATH];
-    join_comps((const char (*)[13])comps, n - 1, parent_abs, sizeof(parent_abs));
+    join_comps((const char (*)[FAT_LFN_MAX])comps, n - 1, parent_abs, sizeof(parent_abs));
     u32 parent;
     rc = resolve_dir(drive, parent_abs, &parent);
     if (rc != FAT_OK) return rc;
@@ -539,13 +592,13 @@ int dos_rename(const char *oldp, const char *newp)
         strcpy(abs2 + n, newp);
     }
 
-    char c1[16][13], c2[16][13];
+    char c1[16][FAT_LFN_MAX], c2[16][FAT_LFN_MAX];
     int n1 = 0, n2 = 0;
     if (normalize(abs1, c1, 16, &n1) || normalize(abs2, c2, 16, &n2)) return FAT_ENOPATH;
     if (n2 == 0) return FAT_EINVAL;
     char p1[DOS_MAX_PATH], p2[DOS_MAX_PATH];
-    join_comps((const char (*)[13])c1, n1 - 1, p1, sizeof(p1));
-    join_comps((const char (*)[13])c2, n2 - 1, p2, sizeof(p2));
+    join_comps((const char (*)[FAT_LFN_MAX])c1, n1 - 1, p1, sizeof(p1));
+    join_comps((const char (*)[FAT_LFN_MAX])c2, n2 - 1, p2, sizeof(p2));
     if (strcmp(p1, p2) != 0) return FAT_EACCES; /* rename across dirs unsupported */
 
     u8 nnm[11];
@@ -662,6 +715,58 @@ int dos_creat(const char *path, int *out)
     return dos_creat_ex(path, 0x20, DOS_SHARE_COMPAT, 2, out);
 }
 
+/* last component of an absolute relative path ("SUB\Name.txt" -> "Name.txt") */
+static void leaf_of(const char *abs, char *out, int max)
+{
+    const char *start = abs;
+    for (const char *p = abs; *p; p++)
+        if (*p == '\\' || *p == '/') start = p + 1;
+    int i = 0;
+    for (; start[i] && i < max - 1; i++) out[i] = start[i];
+    out[i] = 0;
+}
+
+/* Build the 8.3 alias VFAT pairs with a long name: up to six usable characters
+ * of the base name, "~1".."~9", and the first three characters of the extension. */
+static int make_alias(int drive, u32 parent, const char *longname, u8 out11[11])
+{
+    char base[9];
+    char ext[4];
+    int b = 0, e = 0;
+    const char *p = longname;
+    while (*p && *p != '.') {
+        char c = up(*p);
+        if (c > ' ' && c != '\\' && c != '/' && c != '+' && c != ',' && c != ';' &&
+            c != '=' && c != '[' && c != ']' && b < 6)
+            base[b++] = c;
+        p++;
+    }
+    if (b == 0) { base[b++] = 'F'; base[b++] = 'I'; base[b++] = 'L'; base[b++] = 'E'; }
+    while (*p && *p != '.') p++;
+    if (*p == '.') {
+        p++;
+        while (*p && e < 3) {
+            char c = up(*p);
+            if (c > ' ' && c != '.') ext[e++] = c;
+            p++;
+        }
+    }
+    for (int n = 1; n <= 9; n++) {
+        u8 cand[11];
+        memset(cand, ' ', 11);
+        for (int i = 0; i < b; i++) cand[i] = (u8)base[i];
+        cand[b] = '~';
+        cand[b + 1] = (u8)('0' + n);
+        for (int i = 0; i < e; i++) cand[8 + i] = (u8)ext[i];
+        fat_dirent d;
+        if (fat_find(vol_of(drive), parent, cand, &d, NULL, NULL, NULL) == FAT_ENOENT) {
+            memcpy(out11, cand, 11);
+            return 0;
+        }
+    }
+    return -1;   /* every alias taken */
+}
+
 int dos_creat_ex(const char *path, int attr, int share, int open_mode, int *out)
 {
     int drive, rc;
@@ -698,15 +803,32 @@ int dos_creat_ex(const char *path, int attr, int share, int open_mode, int *out)
             if (rc != FAT_OK) return rc;
         }
     } else if (rc == FAT_ENOENT) {
-        rc = fat_create_file(vol_of(drive), parent, nm, NULL);
+        /* a name that cannot be expressed in 8.3 gets an LFN chain plus a
+         * generated alias, so DOS programs still see a legal short name */
+        char leaf[FAT_LFN_MAX];
+        leaf_of(abs, leaf, sizeof(leaf));
+        u8 cn[11];
+        int cok = 0;
+        dos_fat_name(leaf, cn, &cok);
+        const char *lname = NULL;
+        if (!cok) {
+            if (make_alias(drive, parent, leaf, cn) != 0) return FAT_EACCES;
+            lname = leaf;
+        } else {
+            memcpy(cn, nm, 11);
+        }
+        rc = fat_create_file_long(vol_of(drive), parent, cn, lname, 0x20);
         if (rc == FAT_OK && attr && attr != 0x20)
-            fat_set_attr(vol_of(drive), parent, nm, (u8)attr);
+            fat_set_attr(vol_of(drive), parent, cn, (u8)attr);
         if (rc != FAT_OK) return rc;
         fat_dirent d2;
         u32 p2;
         rc = resolve_entry(drive, abs, &d2, &p2, nm, &root);
         if (rc != FAT_OK) return rc;
         d = d2;
+        /* an LFN-created file is tracked by its generated 8.3 alias: writes and
+         * the final size update look the entry up by that short name */
+        if (lname) memcpy(nm, cn, 11);
     } else {
         return rc;
     }
@@ -926,12 +1048,11 @@ struct find_pass {
     u32 count;
     int found;
     fat_dirent d;
+    char lname[FAT_LFN_MAX];
 };
 
-static int find_pass_cb(fat_vol *v, const fat_dirent *d, void *arg)
+static int find_pass_take(struct find_pass *f, const fat_dirent *d, const char *longname)
 {
-    struct find_pass *f = (struct find_pass *)arg;
-    UFD_UNUSED(v);
     u8 attr = d->raw[11];
     if (attr & 0x08) return 0;          /* volume label */
     if (d->raw[0] == '.') return 0;     /* . and .. */
@@ -940,6 +1061,13 @@ static int find_pass_cb(fat_vol *v, const fat_dirent *d, void *arg)
     if (!name_match(f->pat, d->raw)) return 0;
     if (f->count == f->want) {
         f->d = *d;
+        if (longname) {
+            int i = 0;
+            for (; longname[i] && i < FAT_LFN_MAX - 1; i++) f->lname[i] = longname[i];
+            f->lname[i] = 0;
+        } else {
+            f->lname[0] = 0;
+        }
         f->found = 1;
         return 1;
     }
@@ -947,22 +1075,37 @@ static int find_pass_cb(fat_vol *v, const fat_dirent *d, void *arg)
     return 0;
 }
 
+static int find_pass_cb_ex(fat_vol *v, const fat_dirent *d, u32 lba, u32 off,
+                           const char *longname, void *arg)
+{
+    UFD_UNUSED(v); UFD_UNUSED(lba); UFD_UNUSED(off);
+    return find_pass_take((struct find_pass *)arg, d, longname);
+}
+
 int dos_find_first(const char *pattern, u8 attr_mask, dos_find *f,
                    char name_out[13], u8 *attr_out, u32 *size_out,
                    u16 *time_out, u16 *date_out)
+{
+    return dos_find_first_ex(pattern, attr_mask, f, name_out, attr_out, size_out,
+                             time_out, date_out, NULL, 0);
+}
+
+int dos_find_first_ex(const char *pattern, u8 attr_mask, dos_find *f,
+                      char name_out[13], u8 *attr_out, u32 *size_out,
+                      u16 *time_out, u16 *date_out, char *long_out, int long_max)
 {
     int drive, rc;
     char abs[DOS_MAX_PATH];
     rc = dos_parse_path(pattern, &drive, abs, sizeof(abs));
     if (rc != FAT_OK) return rc;
-    char comps[16][13];
+    char comps[16][FAT_LFN_MAX];
     int n = 0;
     if (normalize(abs, comps, 16, &n)) return FAT_ENOPATH;
     if (n == 0) return FAT_EINVAL;
     u8 nm[11];
     if (pattern_to_11(comps[n - 1], nm)) return FAT_EINVAL;
     char parent_abs[DOS_MAX_PATH];
-    join_comps((const char (*)[13])comps, n - 1, parent_abs, sizeof(parent_abs));
+    join_comps((const char (*)[FAT_LFN_MAX])comps, n - 1, parent_abs, sizeof(parent_abs));
     u32 dir;
     rc = resolve_dir(drive, parent_abs, &dir);
     if (rc != FAT_OK) return rc;
@@ -971,23 +1114,87 @@ int dos_find_first(const char *pattern, u8 attr_mask, dos_find *f,
     memcpy(f->pat, nm, 11);
     f->attr_mask = attr_mask;
     f->index = 0;
-    return dos_find_next(f, name_out, attr_out, size_out, time_out, date_out);
+    return dos_find_next_ex(f, name_out, attr_out, size_out, time_out, date_out,
+                            long_out, long_max);
 }
 
 int dos_find_next(dos_find *f, char name_out[13], u8 *attr_out, u32 *size_out,
                   u16 *time_out, u16 *date_out)
+{
+    return dos_find_next_ex(f, name_out, attr_out, size_out, time_out, date_out, NULL, 0);
+}
+
+int dos_find_next_ex(dos_find *f, char name_out[13], u8 *attr_out, u32 *size_out,
+                     u16 *time_out, u16 *date_out, char *long_out, int long_max)
 {
     struct find_pass fp;
     memset(&fp, 0, sizeof(fp));
     fp.pat = f->pat;
     fp.attr_mask = f->attr_mask;
     fp.want = f->index;
-    int src = fat_dir_scan(vol_of(f->drive), f->dir_cluster, find_pass_cb, &fp);
+    int src = fat_dir_scan_ex(vol_of(f->drive), f->dir_cluster, find_pass_cb_ex, &fp);
     if (src != FAT_OK) return src;
     if (!fp.found) return FAT_ENOENT;
     f->index++;
     fill_find_out(&fp.d, name_out, attr_out, size_out, time_out, date_out);
+    if (long_out && long_max > 0) {
+        int i = 0;
+        for (; fp.lname[i] && i < long_max - 1; i++) long_out[i] = fp.lname[i];
+        long_out[i] = 0;
+    }
     return FAT_OK;
+}
+
+/* long name of an existing entry; out is "" when it only has an 8.3 name */
+struct lname_ctx {
+    const u8 *nm;
+    char *out;
+    int max;
+    int found;
+};
+
+static int lname_cb(fat_vol *v, const fat_dirent *d, u32 lba, u32 off,
+                    const char *longname, void *arg)
+{
+    struct lname_ctx *c = (struct lname_ctx *)arg;
+    UFD_UNUSED(v); UFD_UNUSED(lba); UFD_UNUSED(off);
+    if (memcmp(d->raw, c->nm, 11) != 0) return 0;
+    int i = 0;
+    if (longname) for (; longname[i] && i < c->max - 1; i++) c->out[i] = longname[i];
+    c->out[i] = 0;
+    c->found = 1;
+    return 1;
+}
+
+int dos_longname(const char *path, char *out, int max)
+{
+    if (!out || max <= 0) return FAT_EINVAL;
+    out[0] = 0;
+    int drive, rc;
+    char abs[DOS_MAX_PATH];
+    rc = dos_parse_path(path, &drive, abs, sizeof(abs));
+    if (rc != FAT_OK) return rc;
+    char comps[16][FAT_LFN_MAX];
+    int n = 0;
+    if (normalize(abs, comps, 16, &n)) return FAT_ENOPATH;
+    if (n == 0) return FAT_EINVAL;
+    char parent_abs[DOS_MAX_PATH];
+    join_comps((const char (*)[FAT_LFN_MAX])comps, n - 1, parent_abs, sizeof(parent_abs));
+    u32 dir = root_cluster_of(drive);
+    rc = resolve_dir(drive, parent_abs, &dir);
+    if (rc != FAT_OK) return rc;
+    u8 nm[11];
+    int ok = 0;
+    dos_fat_name(comps[n - 1], nm, &ok);
+    if (!ok) return FAT_ENOENT;         /* caller has to use the long name directly */
+    struct lname_ctx c;
+    memset(&c, 0, sizeof(c));
+    c.nm = nm;
+    c.out = out;
+    c.max = max;
+    rc = fat_dir_scan_ex(vol_of(drive), dir, lname_cb, &c);
+    if (rc != FAT_OK) return rc;
+    return c.found ? FAT_OK : FAT_ENOENT;
 }
 
 /* ------------------------------------------------------------------ */

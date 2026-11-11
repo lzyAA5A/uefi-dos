@@ -3,7 +3,7 @@
 #define UEFIDOS_CONFIG_H
 
 #define UEFIDOS_NAME       "UEFI-DOS"
-#define UEFIDOS_VERSION    "0.7.0"
+#define UEFIDOS_VERSION    "0.8.0"
 /* DOS 2.11 semantics.  INT 21h AH=30h reports COMPAT_MINOR instead: the
  * 2.11-era SYS and several tools reject a minor revision above 10. */
 #define UEFIDOS_DOSVER_MAJOR 2

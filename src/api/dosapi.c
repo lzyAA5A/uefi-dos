@@ -134,18 +134,30 @@ static void fill_findinfo(dosapi_findinfo *out, const char name[13], u8 attr,
 static u16 dapi_find_first(const char *pattern, u8 attr_mask, dosapi_findinfo *out)
 {
     char name[13]; u8 attr = 0; u32 size = 0; u16 tm = 0, dt = 0;
-    int rc = dos_find_first(pattern, attr_mask, &g_api_find, name, &attr, &size, &tm, &dt);
+    int rc = dos_find_first_ex(pattern, attr_mask, &g_api_find, name, &attr, &size, &tm, &dt,
+                               out ? out->long_name : NULL, DOSAPI_LFN_MAX);
     if (rc != FAT_OK) return err_of(rc);
     fill_findinfo(out, name, attr, size, tm, dt);
+    if (out && !out->long_name[0]) out->long_name[0] = 0;
     return 0;
 }
 
 static u16 dapi_find_next(dosapi_findinfo *out)
 {
     char name[13]; u8 attr = 0; u32 size = 0; u16 tm = 0, dt = 0;
-    int rc = dos_find_next(&g_api_find, name, &attr, &size, &tm, &dt);
+    int rc = dos_find_next_ex(&g_api_find, name, &attr, &size, &tm, &dt,
+                              out ? out->long_name : NULL, DOSAPI_LFN_MAX);
     if (rc != FAT_OK) return err_of(rc);
     fill_findinfo(out, name, attr, size, tm, dt);
+    if (out && !out->long_name[0]) out->long_name[0] = 0;
+    return 0;
+}
+
+static u16 dapi_longname(const char *path, char *out, u32 max)
+{
+    if (!out || max == 0) return 0x0B;
+    int rc = dos_longname(path, out, (int)max);
+    if (rc != FAT_OK) return err_of(rc);
     return 0;
 }
 
@@ -229,6 +241,7 @@ const dosapi_services g_dosapi = {
     dapi_set_drive,
     dapi_find_first,
     dapi_find_next,
+    dapi_longname,
     dapi_get_date,
     dapi_get_time,
     dapi_get_ticks,

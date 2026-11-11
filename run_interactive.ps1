@@ -67,7 +67,9 @@ $makeArgs = @($Img, '--size-mb', '64',
     '--file',    ((Join-Path $Build 'HELLO64.EXE') + '=HELLO64.EXE'),
     '--file',    ((Join-Path $Build 'HEX.COM')     + '=HEX.COM'),
     '--file',    ((Join-Path $Build 'SUM.COM')     + '=SUM.COM'),
-    '--file',    ((Join-Path $Build 'CAL.COM')     + '=CAL.COM'))
+    '--file',    ((Join-Path $Build 'CAL.COM')     + '=CAL.COM'),
+    '--file',    ((Join-Path $Build 'GFXTEST.COM')  + '=GFXTEST.COM'),
+    '--file',    ((Join-Path $Build 'VESATEST.COM') + '=VESATEST.COM'))
 # the curated third-party games/tools that build.ps1 may have extracted from your
 # own DOS disk images (nothing of that kind ships with this repository)
 $imported = Join-Path $Build 'imported'

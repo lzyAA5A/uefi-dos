@@ -33,13 +33,19 @@ static unsigned long g_io_ticks = 0;
 
 u16 emu_in_port(Emu *e, u16 port)
 {
-    (void)e;
     g_io_ticks++;
     switch (port) {
     case 0x3DA:     /* VGA/EGA input status 1: alternate retrace bits */
         return (u16)((g_io_ticks & 1) ? 0x09 : 0x00);
     case 0x3D4: return g_crtc_idx;
     case 0x3D5: return g_crtc_reg[g_crtc_idx & 31];
+    case 0x3C8: return e->pal_index;
+    case 0x3C9: {
+        u16 idx = (u16)(e->pal_read_index + e->pal_read_phase / 3);
+        u8 v = e->dac[(idx & 0xFF) * 3 + (e->pal_read_phase % 3)];
+        e->pal_read_phase = (u8)((e->pal_read_phase + 1) % 768);
+        return v;
+    }
     case 0x61: return 0x20;     /* timer gate / speaker off */
     default: return 0;
     }
@@ -47,10 +53,16 @@ u16 emu_in_port(Emu *e, u16 port)
 
 void emu_out_port(Emu *e, u16 port, u16 val)
 {
-    (void)e;
     switch (port) {
     case 0x3D4: g_crtc_idx = (u16)(val & 0x1F); break;
     case 0x3D5: g_crtc_reg[g_crtc_idx & 31] = (u8)val; break;
+    case 0x3C7: e->pal_read_index = (u16)(val & 0xFF); e->pal_read_phase = 0; break;
+    case 0x3C8: e->pal_index = (u16)(val & 0xFF); e->pal_phase = 0; break;
+    case 0x3C9:
+        e->dac[(e->pal_index & 0xFF) * 3 + (e->pal_phase % 3)] = (u8)(val & 0x3F);
+        e->pal_phase = (u8)((e->pal_phase + 1) % 3);
+        if (e->pal_phase == 0) e->pal_index = (u16)((e->pal_index + 1) & 0xFF);
+        break;
     default: break;
     }
 }
@@ -175,6 +187,10 @@ int emu_kbd_get_full(Emu *e, int *scan, int *ascii)
 #ifdef UEFIDOS_HOST
     u32 start = plat_ticks_ms();    /* automated tests must not block forever */
 #endif
+    /* repaint before blocking: a program that has just finished drawing and
+     * then waits for a key would otherwise leave a half-painted frame on
+     * screen (the flush used to happen only from do_int / the step loop) */
+    emu_video_flush(e);
     while (!kbd_pop(e, scan, ascii)) {
         emu_kbd_pump(e);
 #ifdef UEFIDOS_HOST
@@ -287,8 +303,11 @@ void emu_wb32(Emu *e, u16 seg, u32 off, u8 v)
     u32 a = lin_of(e, seg, off, 1);
     if (e->pm_fault) return;
     e->mem[a] = v;
-    if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) {
+    if (e->gfx_w && a >= 0xA0000u && a < 0xA0000u + (u32)e->gfx_w * e->gfx_h) {
         g_video_dirty = 1;
+    }
+    if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) {
+        if (!e->gfx_w) g_video_dirty = 1;
         trace_vw(e, a - 0xB8000u, v);
     }
 }
@@ -338,8 +357,11 @@ void emu_wb(Emu *e, u16 seg, u16 off, u8 v)
     u32 a = lin_of(e, seg, off, 1);
     if (e->pm_fault) return;
     e->mem[a] = v;
-    if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) {
+    if (e->gfx_w && a >= 0xA0000u && a < 0xA0000u + (u32)e->gfx_w * e->gfx_h) {
         g_video_dirty = 1;
+    }
+    if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) {
+        if (!e->gfx_w) g_video_dirty = 1;
         trace_vw(e, a - 0xB8000u, v);
     }
 }
@@ -368,6 +390,16 @@ void emu_wd(Emu *e, u16 seg, u16 off, u32 v)
  * mirror is throttled; the force flush at the end of emu_run catches up. */
 static u32 g_last_flush_ms = 0;
 
+void emu_video_flush(Emu *e)
+{
+    if (e->gfx_w) {
+        /* graphics: the whole A0000 window is the framebuffer */
+        plat_video_gfx_show(e->mem + 0xA0000, (int)e->gfx_w, (int)e->gfx_h, e->dac);
+        return;
+    }
+    plat_video_show(e->mem + 0xB8000);
+}
+
 static void video_flush(Emu *e)
 {
     if (!g_video_dirty) return;
@@ -375,7 +407,7 @@ static void video_flush(Emu *e)
     if (g_last_flush_ms && (now - g_last_flush_ms) < 30) return;
     g_last_flush_ms = now;
     g_video_dirty = 0;
-    plat_video_show(e->mem + 0xB8000);
+    emu_video_flush(e);
 }
 
 static void video_flush_force(Emu *e)
@@ -383,7 +415,95 @@ static void video_flush_force(Emu *e)
     if (!g_video_dirty) return;
     g_last_flush_ms = plat_ticks_ms();
     g_video_dirty = 0;
-    plat_video_show(e->mem + 0xB8000);
+    emu_video_flush(e);
+}
+
+/* ------------------------------------------------------------------ */
+/* graphics modes                                                      */
+/* ------------------------------------------------------------------ */
+
+/* the DAC starts as a plain 16-colour CGA set followed by a grey ramp: mode 13h
+ * programs are expected to load their own palette (INT 10h AX=1012h or the
+ * 3C8h/3C9h ports), which every game and paint program does */
+static const u8 g_vga_default[16][3] = {
+    { 0, 0, 0 }, { 0, 0, 42 }, { 0, 42, 0 }, { 0, 42, 42 },
+    { 42, 0, 0 }, { 42, 0, 42 }, { 42, 21, 0 }, { 42, 42, 42 },
+    { 21, 21, 21 }, { 21, 21, 63 }, { 21, 63, 21 }, { 21, 63, 63 },
+    { 63, 21, 21 }, { 63, 21, 63 }, { 63, 63, 21 }, { 63, 63, 63 }
+};
+
+void emu_dac_reset(Emu *e)
+{
+    memset(e->dac, 0, sizeof(e->dac));
+    for (int i = 0; i < 16; i++) {
+        e->dac[i * 3 + 0] = g_vga_default[i][0];
+        e->dac[i * 3 + 1] = g_vga_default[i][1];
+        e->dac[i * 3 + 2] = g_vga_default[i][2];
+    }
+    for (int i = 16; i < 256; i++) {
+        u8 v = (u8)((i - 16) * 63 / 239);
+        e->dac[i * 3 + 0] = v;
+        e->dac[i * 3 + 1] = v;
+        e->dac[i * 3 + 2] = v;
+    }
+}
+
+void emu_dac_read(Emu *e, u8 index, u8 out[3])
+{
+    out[0] = e->dac[index * 3 + 0];
+    out[1] = e->dac[index * 3 + 1];
+    out[2] = e->dac[index * 3 + 2];
+}
+
+void emu_dac_write(Emu *e, u8 index, u8 r, u8 g, u8 b)
+{
+    e->dac[index * 3 + 0] = (u8)(r & 0x3F);
+    e->dac[index * 3 + 1] = (u8)(g & 0x3F);
+    e->dac[index * 3 + 2] = (u8)(b & 0x3F);
+}
+
+/* geometry of the modes we emulate; 0 means "not available" */
+int emu_gfx_geometry(u16 mode, int *w, int *h)
+{
+    switch (mode) {
+    case 0x13:  *w = 320; *h = 200; return 1;   /* VGA mode 13h */
+    case 0x100: *w = 640; *h = 400; return 1;   /* VESA 640x400x8 */
+    case 0x101: *w = 640; *h = 480; return 1;   /* VESA 640x480x8 */
+    case 0x103: *w = 800; *h = 600; return 1;   /* VESA 800x600x8 */
+    default: return 0;
+    }
+}
+
+/* program-visible mode set (INT 10h AH=00); mode 3/7/0 fall back to text */
+void emu_set_video_mode(Emu *e, u16 mode)
+{
+    int w = 0, h = 0;
+    e->video_mode = mode;
+    e->curx = 0;
+    e->cury = 0;
+    if (emu_gfx_geometry(mode, &w, &h) && plat_video_gfx_begin(w, h) == 0) {
+        e->gfx_w = (u16)w;
+        e->gfx_h = (u16)h;
+        if (e->video_mode != 0x13) emu_dac_reset(e);
+        memset(e->mem + 0xA0000, 0, (u32)w * (u32)h);
+        e->mem[0x450] = 0;
+        e->mem[0x451] = 0;
+        g_video_dirty = 1;
+        video_flush_force(e);
+        return;
+    }
+    /* text mode: reset the hardware cursor and blank the 80x25 buffer */
+    e->gfx_w = 0;
+    e->gfx_h = 0;
+    plat_video_text();
+    e->mem[0x450] = 0;                    /* 0040:0050 = cursor position */
+    e->mem[0x451] = 0;
+    for (int i = 0; i < 80 * 25; i++) {
+        e->mem[0xB8000 + i * 2] = ' ';
+        e->mem[0xB8000 + i * 2 + 1] = 0x07;
+    }
+    g_video_dirty = 1;
+    video_flush_force(e);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2279,6 +2399,7 @@ int emu_init(Emu *e)
     if (!e->mem) return 1;
     memset(e->mem, 0, EMU_RAM_SIZE);
     e->ram_size = EMU_RAM_SIZE;
+    emu_dac_reset(e);
     e->eflags = 0x0202;
     e->video_mode = 3;
     e->cr0 = 0;

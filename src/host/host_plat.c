@@ -209,23 +209,27 @@ void plat_free_code(void *p, u32 size) { (void)size; if (p) VirtualFree(p, 0, ME
 /* ---- file-backed block device ---- */
 static int hbd_read(blockdev *bd, u64 lba, void *buf, u32 count)
 {
+    HANDLE f = (HANDLE)bd->ctx;
     LARGE_INTEGER off;
     off.QuadPart = (LONGLONG)lba * bd->blk_size;
-    if (!SetFilePointerEx(g_img, off, NULL, FILE_BEGIN)) return 1;
+    if (f == INVALID_HANDLE_VALUE || f == NULL) return 1;
+    if (!SetFilePointerEx(f, off, NULL, FILE_BEGIN)) return 1;
     DWORD want = count * bd->blk_size;
     DWORD got = 0;
-    if (!ReadFile(g_img, buf, want, &got, NULL)) return 1;
+    if (!ReadFile(f, buf, want, &got, NULL)) return 1;
     return got == want ? 0 : 1;
 }
 
 static int hbd_write(blockdev *bd, u64 lba, const void *buf, u32 count)
 {
+    HANDLE f = (HANDLE)bd->ctx;
     LARGE_INTEGER off;
     off.QuadPart = (LONGLONG)lba * bd->blk_size;
-    if (!SetFilePointerEx(g_img, off, NULL, FILE_BEGIN)) return 1;
+    if (bd->read_only || f == INVALID_HANDLE_VALUE || f == NULL) return 1;
+    if (!SetFilePointerEx(f, off, NULL, FILE_BEGIN)) return 1;
     DWORD want = count * bd->blk_size;
     DWORD put = 0;
-    if (!WriteFile(g_img, buf, want, &put, NULL)) return 1;
+    if (!WriteFile(f, buf, want, &put, NULL)) return 1;
     return put == want ? 0 : 1;
 }
 
@@ -236,15 +240,123 @@ int plat_open_image(const char *path)
     return g_img == INVALID_HANDLE_VALUE ? 1 : 0;
 }
 
+static int hbd_setup(blockdev *bd, HANDLE f)
+{
+    LARGE_INTEGER size;
+    if (f == INVALID_HANDLE_VALUE || !GetFileSizeEx(f, &size)) return 1;
+    bd->blk_size = 512;
+    bd->nblocks = (u64)size.QuadPart / 512;
+    bd->read_only = 0;
+    bd->read = hbd_read;
+    bd->write = hbd_write;
+    bd->ctx = (void *)f;
+    return 0;
+}
+
 int plat_boot_blockdev(blockdev *bd)
 {
     if (g_img == INVALID_HANDLE_VALUE) return 1;
-    LARGE_INTEGER size;
-    if (!GetFileSizeEx(g_img, &size)) return 1;
-    bd->blk_size = 512;
-    bd->nblocks = (u64)size.QuadPart / 512;
-    bd->read = hbd_read;
-    bd->write = hbd_write;
-    bd->ctx = NULL;
+    return hbd_setup(bd, g_img);
+}
+
+/* Host stand-in for firmware device enumeration: the image passed on the
+ * command line is device 0, and every image listed in UEFIDOS_EXTRA_DRIVES
+ * (semicolon separated) becomes another drive.  That is how the multi-drive
+ * mount path is exercised without QEMU. */
+/* ---- graphics modes ------------------------------------------------ */
+static int g_gfx_on = 0;
+static int g_gfx_w = 0, g_gfx_h = 0;
+static const char *g_gfx_dump = NULL;
+static int g_gfx_frames = 0;
+
+void plat_serial_puts(const char *s) { fputs(s, stdout); fflush(stdout); }
+void plat_serial_hex(const char *tag, u64 v) { printf("%s%016llx\n", tag, (unsigned long long)v); }
+
+int plat_video_gfx_begin(int w, int h)
+{
+    g_gfx_w = w;
+    g_gfx_h = h;
+    g_gfx_on = 1;
+    if (!g_gfx_dump) g_gfx_dump = getenv("UEFIDOS_GFX_DUMP");
+    printf("gfx: mode set %dx%dx8%s\n", w, h, g_gfx_dump ? " (frames go to UEFIDOS_GFX_DUMP)" : "");
+    fflush(stdout);
     return 0;
+}
+
+/* dump the 8bpp framebuffer as a P6 PPM (the tests convert it to PNG) */
+void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
+{
+    if (!g_gfx_dump) return;
+    FILE *f = fopen(g_gfx_dump, "wb");
+    if (!f) return;
+    char hdr[32];
+    int n = snprintf(hdr, sizeof(hdr), "P6\n%d %d\n255\n", w, h);
+    fwrite(hdr, 1, (size_t)n, f);
+    for (int i = 0; i < w * h; i++) {
+        u8 idx = fb[i];
+        u8 rgb[3];
+        rgb[0] = (u8)(dac[idx * 3 + 0] << 2);
+        rgb[1] = (u8)(dac[idx * 3 + 1] << 2);
+        rgb[2] = (u8)(dac[idx * 3 + 2] << 2);
+        fwrite(rgb, 1, 3, f);
+    }
+    fclose(f);
+    if (g_gfx_frames == 0) {
+        printf("gfx: %dx%d framebuffer -> %s (first pixel index %u = %u,%u,%u)\n",
+               w, h, g_gfx_dump, (unsigned)fb[0],
+               (unsigned)(dac[fb[0] * 3] << 2), (unsigned)(dac[fb[0] * 3 + 1] << 2),
+               (unsigned)(dac[fb[0] * 3 + 2] << 2));
+        fflush(stdout);
+    }
+    g_gfx_frames++;
+}
+
+void plat_video_text(void)
+{
+    if (!g_gfx_on) return;
+    g_gfx_on = 0;
+    printf("gfx: back to 80x25 text mode\n");
+    fflush(stdout);
+}
+
+int plat_enum_blockdevs(blockdev *out, int max, char labels[][12])
+{
+    int n = 0;
+    if (max <= 0) return 0;
+    if (g_img != INVALID_HANDLE_VALUE && n < max) {
+        if (!hbd_setup(&out[n], g_img)) {
+            if (labels) strcpy(labels[n], "BOOT");
+            n++;
+        }
+    }
+    const char *extra = getenv("UEFIDOS_EXTRA_DRIVES");
+    while (extra && *extra && n < max) {
+        char path[MAX_PATH];
+        int k = 0;
+        while (*extra && *extra != ';' && k < (int)sizeof(path) - 1) path[k++] = *extra++;
+        path[k] = 0;
+        if (*extra == ';') extra++;
+        if (!path[0]) continue;
+        HANDLE f = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        int ro = 0;
+        if (f == INVALID_HANDLE_VALUE) {
+            f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            ro = 1;
+        }
+        if (f == INVALID_HANDLE_VALUE) continue;   /* unreadable: skip the device */
+        if (hbd_setup(&out[n], f)) { CloseHandle(f); continue; }
+        out[n].read_only = ro;
+        if (labels) {
+            const char *base = path;
+            for (const char *p = path; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
+            int i = 0;
+            while (*base && *base != '.' && i < 11) labels[n][i++] = *base++;
+            labels[n][i] = 0;
+            if (!labels[n][0]) strcpy(labels[n], "IMG");
+        }
+        n++;
+    }
+    return n;
 }

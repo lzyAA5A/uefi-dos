@@ -13,15 +13,15 @@ programs see) and then adds the things DOS 2.11 never had: FAT32, 64-bit UEFI
 boot, FAT16 large volumes, DOS 4.0 file-sharing/locking/FCB semantics, a native
 32/64-bit DOS API, and 386 protected mode with a DPMI 0.9 host.
 
-Version 0.7.0 — 20 of 20 automated checks pass on the Windows host harness and
-on QEMU + OVMF (x86_64 and IA32). 0.7.0 adds a one-command build for Linux
-(`Makefile` + `Dockerfile`), a native 32/64-bit **SDK** that compiles freestanding
-PE programs against the DOS API (`RUN64 HELLO64.EXE` runs one on the real CPU),
-and an **instruction-level test framework** for the 8086 interpreter.
+Version 0.8.0 — 24 of 24 automated checks pass on the Windows host harness and
+on QEMU + OVMF (x86_64 and IA32). 0.8.0 adds **graphics** (INT 10h mode 13h and
+VESA VBE on the UEFI framebuffer), **every UEFI volume as a drive** (a plugged-in
+USB stick becomes `D:`), and **long file names** (VFAT LFNs, readable and
+creatable, with the DOS side still seeing 8.3).
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-0.7.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.7.0.zip)
+[**Download `UEFI-DOS-0.8.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.8.0.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -43,13 +43,16 @@ both inside. `make_release.ps1` rebuilds that package from source.
 | FAT32 | read + write (create/delete/rename/mkdir/rmdir, cluster alloc/free) |
 | FAT12 / FAT16 | read + write |
 | Floppy/disk image mount | `MOUNT A: IMAGE.IMG` exposes a file on `C:` as a read-write drive |
-| Shell | `DIR CD MD RD DEL REN TYPE COPY CLS ECHO VER VOL DATE TIME PROMPT PATH SET MEM HELP APITEST MOUNT UNMOUNT CONFIG FCB EXIT SHUTDOWN`, batch files, `AUTOEXEC.BAT` |
-| DOS kernel | 8.3 names, per-drive current directory, DOS error codes, **DOS 4.0 semantics** (see below) |
+| Shell | `DIR CD MD RD DEL REN TYPE COPY CLS ECHO VER VOL DATE TIME PROMPT PATH SET MEM HELP APITEST MOUNT UNMOUNT CONFIG FCB DRIVES EXIT SHUTDOWN`, batch files, `AUTOEXEC.BAT` |
+| DOS kernel | 8.3 names (+ VFAT long names), per-drive current directory, DOS error codes, **DOS 4.0 semantics** (see below) |
 | 8086 emulator | 8086/80186 real-mode interpreter, 16 MiB emulated RAM, PSP, IVT, `.COM` + MZ `.EXE` loader with relocations, 8087 escapes treated as 8086 no-ops |
 | INT 21h | console, file I/O, find first/next + DTA, dirs, date/time, version, vector get/set, IOCTL, dup, PSP, memory stubs, **EXEC (AH=4Bh)**, **AH=67h**, **AH=5Ch** byte locks, **SHARE modes** |
 | FCB family | AH=0Fh 10h 11h 12h 13h 14h 15h 16h 17h 21h 22h 23h 27h 28h (`src/emu/fcb.c`) |
 | INT 10h / 16h / 1Ah / 13h | text services (mode set, cursor, read/write char+attr, teletype, window scroll) on the emulated screen, blocking keyboard with extended keys, BIOS tick counter, disk read/write/geometry |
-| Video | an 80×25 colour-text screen at `B800:0000` inside emulated RAM; both direct VRAM writes and `INT 10h` output land there and are mirrored to the console (only changed rows are redrawn) |
+| Video (text) | an 80×25 colour-text screen at `B800:0000` inside emulated RAM; both direct VRAM writes and `INT 10h` output land there and are mirrored to the console (only changed rows are redrawn) |
+| Video (graphics) | `INT 10h AL=13h` (320×200×256) and VESA VBE `4F00/4F01/4F02/4F03/4F05` (640×400, 640×480, 800×600, 8 bpp); DAC palette through `INT 10h AX=1000h/1012h/1015h` and ports `3C7/3C8/3C9`; frames are converted to the GOP format and written straight into the firmware framebuffer with integer upscaling — see [`docs/graphics.md`](docs/graphics.md) |
+| Drives | every volume the firmware publishes is mounted: boot volume → `C:`, then `D:`, `E:`… (`DRIVES` lists them, read-only media are flagged) |
+| Long file names | VFAT LFN chains are parsed for lookup, `DIR` and the native API, and files created with a long name get an LFN chain plus a generated 8.3 alias; DOS programs still see only the alias |
 | Native 32/64-bit API | `g_dosapi` table — same operations and error codes as INT 21h, native pointers, one source for both firmware widths |
 | 16-bit bridge | `exec16()` downcall (native → real mode) and `INT 2Fh AX=5544h` upcall (real mode → native) |
 | 386 protected mode | real → protected transition, GDT/LDT parsing, hidden segment caches with limit checks, `MOV CRn`/`LGDT`/`LIDT`/`LLDT`/`CLTS`, 32-bit addressing (SIB), `0F xx` opcode set, protected-mode IDT delivery |
@@ -141,7 +144,7 @@ INT 21h; `find_first`/`find_next` return the fields the DTA would carry.
   code. The caller's state is snapshotted and restored, so native code can use
   DOS programs as subroutines.
 - **Falling up from 16-bit into native code**: the compatibility layer routes
-  `INT 2Fh AX=5544h` into `src/emu/int2f.c` — `DX=1` returns `AX=0100h` and
+  `INT 2Fh AX=5544h` into `src/emu/int2f.c` — `DX=1` returns `AX=0101h` and
   `BX` = native pointer size (4 or 8), `DX=2` prints the native banner, `DX=3`
   fetches the RTC into `ES:BX`, anything else returns `AX=FFFFh`.
 - External EFI applications can obtain the table at runtime: the image installs
@@ -360,9 +363,50 @@ Adding a case is a five-line table edit; see [`docs/itest.md`](docs/itest.md) fo
 the format, the traps (macro commas, `lodsb` preserving `AH`) and what is still
 uncovered.
 
+## Graphics, extra drives, long names
+
+**Graphics.** `GFXTEST.COM` switches to `INT 10h` mode 13h, loads the whole DAC
+through `AX=1012h`, paints 320x200 pixels and reports `GFX-OK 320x200x256`;
+`VESATEST.COM` walks the VESA calls (`4F00`, `4F01`, `4F02` with the linear
+framebuffer bit) into 640x480x256 and paints the screen in five 64 KB passes.
+Under UEFI the emulated framebuffer is converted to the GOP pixel format and
+written straight into `Mode->FrameBufferBase` with an integer upscale (a 320x200
+mode fills a 640x480 display at 2x, letterboxed). While a graphics mode owns the
+screen, text output is redirected to the serial port so the console cannot
+repaint its text grid over the picture. Details, including the two firmware
+`Blt` paths that had to be abandoned, are in [`docs/graphics.md`](docs/graphics.md).
+
+**Every volume is a drive.** `plat_enum_blockdevs()` asks the firmware for all
+`BlockIo` handles, keeps the boot volume first (`C:`), skips whole disks when
+logical partitions exist (so `D:` never aliases `C:`), labels each device from
+its device path (`USB`, `SATA`, `NVME`, `SD`) and mounts them as `D:`, `E:`…
+Read-only media mount read-only. `DRIVES` prints the table:
+
+```
+C: >FAT32 UEFIDOS
+D:  FAT32 USBSTICK
+```
+
+**Long file names.** LFN chains are validated against the 8.3 checksum, resolved
+case-insensitively for `open`, listed by `DIR` and reported by the native API.
+Creating a name that 8.3 cannot express (`Long Name Report.txt`) writes the LFN
+chain plus a generated alias (`LONGNA~1.TXT`), and the native API resolves an
+alias back with `longname()`. DOS programs keep seeing only 8.3 names, which is
+the point: the old side stays old, the new side gets the real name.
+
+```
+C:\> RUN64 HELLO64.EXE
+long name    : created "Long Name Report.txt"
+long read    : this file has a VFAT long name
+8.3 alias    : LONGNA~1.TXT -> Long Name Report.txt
+...
+C:\> DIR *.TXT
+Long Name Report.txt         31 13:12  11-11-26
+```
+
 ## Regression suite
 
-`run_tests.ps1` builds everything and runs 20 checks: FAT32 read/write selftest;
+`run_tests.ps1` builds everything and runs 24 checks: FAT32 read/write selftest;
 host shell DIR/TYPE/VER/COM/EXE/EXEC/video plus native-API and upcall demos;
 host shell write path; floppy-image `A:` mount; FAT12 write on a 2.11 image;
 FAT12 read of 2.11 and MS-DOS 5 images; two QEMU/OVMF boot smoke tests (x86_64
@@ -373,7 +417,11 @@ cross-checked against the host clock); and `KEYTEST.COM`, which reads five keys 
 instruction-level emulator test vectors (`--itest`, 49 cases); and `RUN64
 HELLO64.EXE`, a native 64-bit program built by the SDK, which prints the DOS
 version, reads and writes files, lists `*.TXT`, then runs a 16-bit `.COM` through
-the interpreter and reports its exit code.
+the interpreter and reports its exit code; a second UEFI volume mounted as
+`D:` (`DRIVES`, `VOL D:`, `TYPE D:\SECOND.TXT`); long file names (the native
+demo creates `Long Name Report.txt`, `DIR` shows it, `TYPE` opens it by that
+name and `longname()` maps `LONGNA~1.TXT` back to it); `INT 10h` mode 13h and
+the VESA VBE calls painting a dumpable framebuffer.
 
 Checks that need a Microsoft DOS floppy image are skipped (reported as
 `[SKIP]`) when `UEFIDOS_DOS211` / `UEFIDOS_DOS5` are unset.
@@ -430,18 +478,22 @@ Also worth knowing: `INT 21h AH=30h` reports DOS **2.10** (`AX=0x0A02`) because
 ```
 src/
   uefi/main.c        entry point, boot banner, mount C:, publish the API table, run shell
-  uefi/efi_plat.c    UEFI platform: ConOut/ConIn, BlockIo, RTC, timer, shutdown
+  uefi/efi_plat.c    UEFI platform: ConOut/ConIn, BlockIo (all volumes), GOP
+                     framebuffer, RTC, timer, serial diagnostics, shutdown
   plat.h             platform abstraction (also implemented for the Windows host)
   common/util.c      freestanding mem/str routines (no libc)
   common/divdi3.c    64-bit division helpers (needed for -m32 -nostdlib)
   common/cp437.c     CP437 -> Unicode table for the console mirror
-  fs/fat.c|h         FAT12/16/32 driver over a block device (write paths for all three)
-  kernel/dos.c|h     drives, path resolution, file handles, find/DTA, CONFIG.SYS,
-                     SHARE modes, byte-range locks, read-only delete protection
+  fs/fat.c|h         FAT12/16/32 driver over a block device (write paths for all
+                     three) plus VFAT long-name parsing and creation
+  kernel/dos.c|h     drives (multi-volume), path resolution incl. long names,
+                     file handles, find/DTA, CONFIG.SYS, SHARE modes,
+                     byte-range locks, read-only delete protection
   api/dosapi.c|h     native 32/64-bit DOS API (INT 21h parity table + exports)
   api/native.c|h     native PE loader: map, relocate, call uefidos_main() on the real CPU
   shell/shell.c|h    COMMAND.COM-like interpreter and batch execution
-  emu/emu.c          8086 real-mode interpreter, PSP/IVT, .COM/.EXE loader, video mirror
+  emu/emu.c          8086 real-mode interpreter, PSP/IVT, .COM/.EXE loader, text
+                     video mirror + graphics modes and the VGA DAC
   emu/int21.c        INT 21h / INT 10h / INT 13h / INT 16h / INT 1Ah services
   emu/fcb.c          DOS 4.0 FCB call family (AH=0Fh..28h)
   emu/int2f.c        INT 2Fh native multiplex (16-bit -> native upcall)
@@ -455,6 +507,9 @@ sdk/
   build_sdk.ps1      the same build for Windows
 tools/
   fat32.py           FAT32 formatter (no dependencies)
+  make_gfx_test.py   assembles GFXTEST.COM / VESATEST.COM (graphics probes)
+  gfx_shot.ps1       boot an image in QEMU and screenshot the framebuffer
+  fat_extract.py     read-only FAT12/16/32 extractor for raw disk images
   make_image.py      image builder (boot files, text files, AUTOEXEC.BAT)
   make_hello.py      generates HELLO.COM / TELETYPE.COM / MZEXE.EXE / RUNNER.COM /
                      VRAM.COM / UPCALL.COM
@@ -462,7 +517,6 @@ tools/
   make_fcb_test.py   hand-assembles FCBTEST.COM (FCB create/write/read/delete)
   make_tools.py      generates the bundled utilities INFO/CAL/SUM/HEX/CLOCK
   mkfat16.py         sparse FAT16 formatter (32 MB .. 1.9 GB test volumes)
-  fat_extract.py     read-only FAT12/16/32 extractor (list/get/extract)
   extract_dos_file.py  pull one file out of a raw FAT image by cluster chain
   qemu_probe.py      drive the UEFI shell through the QEMU monitor
   qmon.py qtype.py screenshot.py ppm2png.py   QEMU monitor/keyboard/screenshot helpers
@@ -573,8 +627,14 @@ is calibrated before the interpreter is blamed.
 - **No ring 3 yet**: DPMI clients still run at ring 0. No TSS, no `CR3` page
   tables or `#PF` dispatch; `AX=0600h` (paging) and `AX=0B00h` (hardware
   interrupts) are stubs.
-- 8.3 names only (no LFN creation); text mode only (`INT 10h` graphics modes are
-  not emulated).
+- Long names: read, create, list and resolve are implemented; *renaming to* a
+  long name and Unicode (non-ASCII) names are not (they degrade to `_`).
+- Graphics: 8 bpp packed-pixel modes only (`13h`, `100h`, `101h`, `103h`). No
+  16/24/32 bpp VESA modes, no 4-bit planar modes, no real vblank pacing, no
+  hardware page flipping (`4F07h` is accepted and ignored). 320x200 is shown
+  with square pixels rather than the classic 4:3 stretch.
+- Drives: up to four (`DOS_MAX_DRIVES`), FAT only — no NTFS/exFAT, no optical
+  media, and a 4096-byte-native-sector device is skipped (`BlockSize != 512`).
 - `REN` works inside one directory; `COPY` has no wildcards; mounted `A:`/`B:`
   images have a fixed size.
 - FAT32 `FSInfo` free-cluster count is not written back (the kernel keeps
@@ -582,9 +642,9 @@ is calibrated before the interpreter is blamed.
 - TSR residency is not implemented (`INT 27h` only terminates).
 - One file is limited to 32 MB per DOS 4.0 semantics (see
   `docs/dos4-semantics.md` §4.6 for the rationale).
-- Roadmap: ring 3 + TSS/gates → `CR3` paging + `#PF` → DPMI 0600/0B00 → LFN
-  reads → graphics modes → rebuild tools from DOS 2.11-era sources → a wider
-  compatibility matrix.
+- Roadmap: ring 3 + TSS/gates → `CR3` paging + `#PF` → DPMI 0600/0B00 → higher
+  colour depths and VESA bank switching → rebuild tools from DOS 2.11-era
+  sources → a wider compatibility matrix.
 
 ## License
 

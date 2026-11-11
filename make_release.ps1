@@ -34,7 +34,7 @@ Write-Host "== release $Version -> $Stage"
 & (Join-Path $Root 'build.ps1') | Out-Null
 foreach ($f in 'BOOTX64.EFI','BOOTIA32.EFI','INFO.COM','CAL.COM','SUM.COM','HEX.COM','CLOCK.COM',
                'HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM','UPCALL.COM',
-               'HELLO64.EXE','HELLO32.EXE') {
+               'GFXTEST.COM','VESATEST.COM','HELLO64.EXE','HELLO32.EXE') {
     if (-not (Test-Path (Join-Path $Build $f))) { throw "missing build artifact: $f (run build.ps1)" }
 }
 
@@ -52,7 +52,7 @@ $makeArgs = @($img, '--size-mb', "$SizeMB",
     '--text',      'README.TXT=UEFI-DOS release image. Type HELP for commands.')
 foreach ($p in 'HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM','UPCALL.COM',
                'INFO.COM','CAL.COM','SUM.COM','HEX.COM','CLOCK.COM',
-               'HELLO64.EXE','HELLO32.EXE') {
+               'GFXTEST.COM','VESATEST.COM','HELLO64.EXE','HELLO32.EXE') {
     $makeArgs += @('--file', "$Build/$p=$p")
 }
 # No SHUTDOWN here: the user gets a shell prompt to play with.

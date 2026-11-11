@@ -11,6 +11,7 @@
 #include "plat.h"
 
 #define FAT_SEC 512
+#define FAT_LFN_MAX 64   /* longest long name we accept (63 chars + NUL) */
 
 /* result codes -- mapped to DOS error codes by the kernel layer */
 enum fat_err {
@@ -91,11 +92,22 @@ static inline u8 fat_entry_attr(const fat_dirent *d) { return d->raw[11]; }
 
 /* scan callback: return nonzero to stop scanning */
 typedef int (*fat_scan_cb)(fat_vol *v, const fat_dirent *d, void *arg);
+/* long-file-name aware scan: longname is NULL for entries stored only as 8.3 */
+typedef int (*fat_scan_ex_cb)(fat_vol *v, const fat_dirent *d, u32 lba, u32 off,
+                              const char *longname, void *arg);
 
 int  fat_mount(fat_vol *v, blockdev *dev, u32 part_lba, int read_only);
 int  fat_unmount(fat_vol *v);
 
 int  fat_dir_scan(fat_vol *v, u32 start_cluster, fat_scan_cb cb, void *arg);
+int  fat_dir_scan_ex(fat_vol *v, u32 start_cluster, fat_scan_ex_cb cb, void *arg);
+/* resolve a long name (case-insensitive) in a directory */
+int  fat_find_long(fat_vol *v, u32 dir_cluster, const char *longname,
+                   fat_dirent *out, u32 *out_cluster, u32 *out_ent_lba, u32 *out_ent_idx);
+/* create a file with an LFN chain in front of its 8.3 entry; falls back to a
+ * plain 8.3 entry when the directory has no room for the chain */
+int  fat_create_file_long(fat_vol *v, u32 dir_cluster, const u8 name11[11],
+                          const char *longname, u8 attr);
 int  fat_find(fat_vol *v, u32 dir_cluster, const u8 name11[11],
               fat_dirent *out, u32 *out_cluster, u32 *out_ent_lba, u32 *out_ent_idx);
 /* find a free entry slot; creates a new directory cluster when needed */

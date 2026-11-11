@@ -147,6 +147,7 @@ int main(int argc, char **argv)
         if (plat_open_image(argv[2])) return 1;
         dos_init();
         int mrc = dos_mount_boot();
+        if (mrc == 0) dos_mount_all();
         printf("mount rc=%d\n", mrc);
         if (mrc) return 1;
         dos_read_config_sys();
@@ -217,6 +218,7 @@ int main(int argc, char **argv)
         }
         dos_init();
         int mrc = dos_mount_boot();
+        if (mrc == 0) dos_mount_all();   /* D:, E:, ... from UEFIDOS_EXTRA_DRIVES */
         printf("mount C: rc=%d\n", mrc);
         if (mrc != 0) return 1;
         dos_read_config_sys();

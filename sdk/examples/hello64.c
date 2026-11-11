@@ -96,13 +96,51 @@ int uefidos_main(const uefidos_exports *api, const char *args)
         rt_puts(")\n");
     }
 
+    /* ---- long file names: create one, then read it back by its long name ---- */
+    err = api->svc->create("Long Name Report.txt", DOS_ATTR_ARCHIVE, &h);
+    if (err == 0) {
+        const char *m2 = "this file has a VFAT long name\n";
+        u32 put2 = 0;
+        api->svc->write(h, m2, rt_strlen(m2), &put2);
+        api->svc->close(h);
+        rt_puts("long name    : created \"Long Name Report.txt\"\n");
+        err = api->svc->open("Long Name Report.txt", DOS_OPEN_READ, &h);
+        if (err == 0) {
+            char lbuf[64];
+            u32 got2 = 0;
+            api->svc->read(h, lbuf, 60, &got2);
+            api->svc->close(h);
+            rt_puts("long read    : ");
+            for (u32 i = 0; i < got2; i++) {
+                if (lbuf[i] == '\n') break;
+                rt_putc((char)lbuf[i]);
+            }
+            rt_puts("\n");
+        } else {
+            rt_puts("long read    : open by long name failed (DOS error ");
+            rt_putu(err);
+            rt_puts(")\n");
+        }
+        /* the 8.3 alias the DOS side sees, resolved back to the long name */
+        char ln[DOSAPI_LFN_MAX];
+        if (api->svc->longname("LONGNA~1.TXT", ln, sizeof(ln)) == 0 && ln[0]) {
+            rt_puts("8.3 alias    : LONGNA~1.TXT -> ");
+            rt_puts(ln);
+            rt_puts("\n");
+        }
+    } else {
+        rt_puts("long name    : create failed (DOS error ");
+        rt_putu(err);
+        rt_puts(")\n");
+    }
+
     /* ---- directory search ---- */
     dosapi_findinfo fi;
     u16 found = 0;
     err = api->svc->find_first("*.TXT", DOS_ATTR_ARCHIVE | DOS_ATTR_DIR, &fi);
     while (err == 0 && found < 6) {
         rt_puts(found ? "               " : "found        : ");
-        rt_puts(fi.name);
+        rt_puts(fi.long_name[0] ? fi.long_name : fi.name);
         rt_puts("\n");
         found++;
         err = api->svc->find_next(&fi);

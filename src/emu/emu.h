@@ -73,6 +73,14 @@ typedef struct Emu {
     u16 last_exit_code;
     u16 video_mode;
     int curx, cury;
+    /* graphics modes (INT 10h AH=00 mode 13h / VESA 4F02h): the framebuffer
+     * lives at A0000 in emulated RAM, 8 bits per pixel */
+    u16 gfx_w, gfx_h;
+    u8  dac[256 * 3];       /* 6-bit VGA DAC, R,G,B */
+    u16 pal_index;          /* 3C8h write index */
+    u8  pal_phase;          /* 0..2 within a 3C9h triple (write) */
+    u8  pal_read_phase;
+    u16 pal_read_index;     /* 3C7h read index */
 } Emu;
 
 /* flags */
@@ -139,6 +147,13 @@ u32  emu_rd32(Emu *e, u16 seg, u32 off);
 void emu_wd32(Emu *e, u16 seg, u32 off, u32 v);
 
 /* machine-state helpers shared with emu/dpmi.c */
+/* graphics / DAC services (INT 10h modes 13h, 100h, 101h, 103h) */
+void emu_set_video_mode(Emu *e, u16 mode);
+int  emu_gfx_geometry(u16 mode, int *w, int *h);
+void emu_dac_reset(Emu *e);
+void emu_dac_read(Emu *e, u8 index, u8 out[3]);
+void emu_dac_write(Emu *e, u8 index, u8 r, u8 g, u8 b);
+void emu_video_flush(Emu *e);          /* repaint now (text mirror or framebuffer) */
 void emu_seg_cache_sync(Emu *e);
 void emu_set_seg(Emu *e, int idx, u16 sel);
 void emu_push16(Emu *e, u16 v);

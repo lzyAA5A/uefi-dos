@@ -36,6 +36,12 @@ typedef struct {
     UINT8  Pad2;
 } EFI_TIME_LOCAL;
 
+/* set while a graphics mode owns the display (see plat_video_gfx_begin) */
+static int g_gfx_on;
+
+static void ser_init(void);
+void plat_serial_puts(const char *s);
+
 static void con_char(UINT16 ch)
 {
     CHAR16 s[3];
@@ -49,6 +55,18 @@ static void con_char(UINT16 ch)
  * and mirroring made every character appear twice in the serial log. */
 void plat_putc(char c)
 {
+    /* While a graphics mode owns the display, the console would repaint its
+     * whole text screen over the framebuffer (that is how a game screen ended
+     * up black as soon as the program printed anything).  Text output goes to
+     * the serial port instead. */
+    if (g_gfx_on) {
+        char b[3];
+        b[0] = c;
+        b[1] = 0;
+        if (c != '\n') plat_serial_puts(b);
+        else plat_serial_puts("\r\n");
+        return;
+    }
     if (c == '\n') {
         con_char('\r');
         con_char('\n');
@@ -333,21 +351,41 @@ void plat_free_code(void *p, u32 size)
     g_code_base = NULL;
 }
 
+/* One blockdevice shim for every volume: the protocol pointer rides in
+ * bd->ctx, so the same two functions serve C:, D:, a USB stick and a second
+ * disk.  (It used to read the single global gBlk, which is why only the boot
+ * volume could ever be mounted.) */
 static int ubd_read(blockdev *bd, u64 lba, void *buf, u32 count)
 {
-    (void)bd;
-    UINTN size = (UINTN)count * 512u;
-    EFI_STATUS s = gBlk->ReadBlocks(gBlk, gBlk->Media->MediaId, lba, size, buf);
+    EFI_BLOCK_IO *bio = (EFI_BLOCK_IO *)bd->ctx;
+    if (!bio || !bio->Media) return 1;
+    UINTN size = (UINTN)count * (UINTN)bd->blk_size;
+    EFI_STATUS s = bio->ReadBlocks(bio, bio->Media->MediaId, lba, size, buf);
     return EFI_ERROR(s) ? 1 : 0;
 }
 
 static int ubd_write(blockdev *bd, u64 lba, const void *buf, u32 count)
 {
-    (void)bd;
-    if (gBlk->Media->ReadOnly) return 1;
-    UINTN size = (UINTN)count * 512u;
-    EFI_STATUS s = gBlk->WriteBlocks(gBlk, gBlk->Media->MediaId, lba, size, (void *)buf);
+    EFI_BLOCK_IO *bio = (EFI_BLOCK_IO *)bd->ctx;
+    if (!bio || !bio->Media || bio->Media->ReadOnly) return 1;
+    UINTN size = (UINTN)count * (UINTN)bd->blk_size;
+    EFI_STATUS s = bio->WriteBlocks(bio, bio->Media->MediaId, lba, size, (void *)buf);
     return EFI_ERROR(s) ? 1 : 0;
+}
+
+static int ubd_init(blockdev *bd, EFI_BLOCK_IO *bio)
+{
+    if (!bio || !bio->Media) return 1;
+    /* FAT needs 512-byte sectors; a 4096-byte-native medium is not usable yet */
+    if (bio->Media->BlockSize != 512) return 1;
+    if (!bio->Media->LastBlock) return 1;
+    bd->blk_size = 512;
+    bd->nblocks = (u64)bio->Media->LastBlock + 1;
+    bd->read_only = bio->Media->ReadOnly ? 1 : 0;
+    bd->read = ubd_read;
+    bd->write = ubd_write;
+    bd->ctx = bio;
+    return 0;
 }
 
 int plat_boot_blockdev(blockdev *bd)
@@ -362,11 +400,254 @@ int plat_boot_blockdev(blockdev *bd)
         if (EFI_ERROR(s) || !blk) return 1;
     }
     gBlk = (EFI_BLOCK_IO *)blk;
-    if (!gBlk->Media || gBlk->Media->BlockSize != 512) return 1;
-    bd->blk_size = 512;
-    bd->nblocks = gBlk->Media->LastBlock + 1;
-    bd->read = ubd_read;
-    bd->write = ubd_write;
-    bd->ctx = gBlk;
+    if (ubd_init(bd, gBlk)) return 1;
     return 0;
+}
+
+/* ---- graphics modes ------------------------------------------------ */
+static EFI_GRAPHICS_OUTPUT *g_gop;
+static UINT32 g_gfx_scale = 1;
+static UINTN g_gfx_dx, g_gfx_dy;
+static unsigned g_show_count;
+
+/* ---- serial diagnostics ------------------------------------------ */
+/* ConOut stops being readable once the display is a raw framebuffer, so
+ * anything the graphics path wants to say goes straight to the serial port. */
+static EFI_SERIAL_IO *g_ser;
+static int g_ser_tried;
+
+static void ser_init(void)
+{
+    if (g_ser_tried) return;
+    g_ser_tried = 1;
+    void *p = NULL;
+    if (gBS && gBS->LocateProtocol &&
+        !EFI_ERROR(gBS->LocateProtocol(&gEfiSerialIoProtocolGuid, NULL, &p)) && p) {
+        g_ser = (EFI_SERIAL_IO *)p;
+        /* leave the firmware's line settings alone: OVMF already mirrors
+         * ConOut to serial, so the port is configured for the console */
+    }
+}
+
+void plat_serial_puts(const char *s)
+{
+    ser_init();
+    if (!g_ser || !g_ser->Write) return;
+    while (*s) {
+        const char *start = s;
+        while (*s) s++;
+        UINTN n = (UINTN)(s - start);
+        UINTN sent = n;
+        g_ser->Write(g_ser, &sent, (void *)start);
+    }
+}
+
+void plat_serial_hex(const char *tag, u64 v)
+{
+    char b[24];
+    int n = 0;
+    plat_serial_puts(tag);
+    for (int sh = 60; sh >= 0; sh -= 4) {
+        int d = (int)((v >> sh) & 0xF);
+        b[n++] = (char)(d < 10 ? '0' + d : 'a' + d - 10);
+    }
+    b[n++] = '\n';
+    b[n] = 0;
+    plat_serial_puts(b);
+}
+
+/* diagnostics for the framebuffer path (OVMF mirrors ConOut to serial) */
+
+static int gop_find(void)
+{
+    if (g_gop) return 0;
+    if (!gBS || !gBS->LocateHandleBuffer) return 1;
+    EFI_HANDLE *handles = NULL;
+    UINTN n = 0;
+    if (EFI_ERROR(gBS->LocateHandleBuffer(2, &gEfiGraphicsOutputProtocolGuid, NULL, &n, &handles)) || !handles)
+        return 1;
+    for (UINTN i = 0; i < n; i++) {
+        void *p = NULL;
+        if (!EFI_ERROR(gBS->HandleProtocol(handles[i], &gEfiGraphicsOutputProtocolGuid, &p)) && p) {
+            g_gop = (EFI_GRAPHICS_OUTPUT *)p;
+            break;
+        }
+    }
+    if (gBS->FreePool) gBS->FreePool(handles);
+    return g_gop ? 0 : 1;
+}
+
+int plat_video_gfx_begin(int w, int h)
+{
+    if (!g_gop->Mode || !g_gop->Mode->Info) return 1;
+
+    UINT32 best = 0xFFFFFFFFu;
+    UINT32 best_px = 0xFFFFFFFFu;
+    for (UINT32 m = 0; m < g_gop->Mode->MaxMode; m++) {
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
+        UINTN size = 0;
+        if (EFI_ERROR(g_gop->QueryMode(g_gop, m, &size, &info)) || !info) continue;
+        if (info->PixelFormat == PixelBltOnly) continue;
+        if (info->HorizontalResolution < (UINT32)w || info->VerticalResolution < (UINT32)h) continue;
+        UINT32 px = info->HorizontalResolution * info->VerticalResolution;
+        if (px < best_px) { best_px = px; best = m; }
+    }
+    if (!g_gop->Mode->Info) return 1;
+
+    UINTN gw = g_gop->Mode->Info->HorizontalResolution;
+    UINTN gh = g_gop->Mode->Info->VerticalResolution;
+    /* integer upscale so a 320x200 game fills the screen without blurring */
+    UINTN sc = gw / (UINTN)w;
+    UINTN sc2 = gh / (UINTN)h;
+    if (sc2 < sc) sc = sc2;
+    if (sc < 1) sc = 1;
+    if (sc > 4) sc = 4;
+    g_gfx_scale = (UINT32)sc;
+    g_gfx_dx = (gw - (UINTN)w * sc) / 2;
+    g_gfx_dy = (gh - (UINTN)h * sc) / 2;
+    g_gfx_on = 1;
+    g_show_count = 0;
+    plat_serial_puts("gfx: linear framebuffer ");
+    plat_serial_puts(g_gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor ? "BGR" : "RGB");
+    return 0;
+}
+
+/* Frames are written straight into the linear framebuffer: the firmware Blt
+ * (EfiBltVideoFill in particular) stalls on some implementations, and a plain
+ * pixel loop is both simpler and predictable. */
+void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
+{
+    if (!g_gfx_on || !g_gop || !g_gop->Mode || !g_gop->Mode->Info) return;
+    if (!g_gop->Mode->FrameBufferBase || !g_gop->Mode->FrameBufferSize) return;
+    g_show_count++;
+
+    UINTN gw = g_gop->Mode->Info->HorizontalResolution;
+    UINTN stride = g_gop->Mode->Info->PixelsPerScanLine;
+    if (!stride) stride = gw;
+    UINTN sc = g_gfx_scale;
+    int bgr = (g_gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor);
+    u8 *base = (u8 *)(UINTN)g_gop->Mode->FrameBufferBase;
+
+
+    for (int y = 0; y < h; y++) {
+        const u8 *row = fb + (UINTN)y * (UINTN)w;
+        for (UINTN ry = 0; ry < sc; ry++) {
+            u8 *dst = base + ((g_gfx_dy + (UINTN)y * sc + ry) * stride + g_gfx_dx) * 4;
+            for (int x = 0; x < w; x++) {
+                u8 idx = row[x];
+                u8 r = (u8)((dac[idx * 3 + 0] << 2) | (dac[idx * 3 + 0] >> 4));
+                u8 g = (u8)((dac[idx * 3 + 1] << 2) | (dac[idx * 3 + 1] >> 4));
+                u8 b = (u8)((dac[idx * 3 + 2] << 2) | (dac[idx * 3 + 2] >> 4));
+                for (UINTN rx = 0; rx < sc; rx++) {
+                    if (bgr) { dst[0] = b; dst[1] = g; dst[2] = r; }
+                    else { dst[0] = r; dst[1] = g; dst[2] = b; }
+                    dst[3] = 0;
+                    dst += 4;
+                }
+            }
+        }
+    }
+}
+
+void plat_video_text(void)
+{
+    if (!g_gfx_on) return;
+    g_gfx_on = 0;
+    /* repaint every text row from scratch when console output resumes */
+    memset(g_vid_shadow, 0xFF, sizeof(g_vid_shadow));
+}
+
+/* ---- device path sniffing: what kind of port is this volume on? ---------- */
+#define DP_TYPE_MESSAGING 0x03
+#define DP_MSG_USB        0x05
+#define DP_MSG_SATA       0x12
+#define DP_MSG_NVME       0x17
+#define DP_MSG_SD         0x1Au
+
+static void udp_label(EFI_HANDLE handle, char out[12])
+{
+    EFI_DEVICE_PATH_PROTOCOL *dp = NULL;
+    const char *name = "BLOCK";
+    if (gBS->HandleProtocol(handle, &gEfiDevicePathProtocolGuid, (void **)&dp) == EFI_SUCCESS && dp) {
+        const u8 *p = (const u8 *)dp;
+        for (int guard = 0; guard < 64; guard++) {
+            u8 type = p[0], sub = p[1];
+            u16 len = (u16)(p[2] | ((u16)p[3] << 8));
+            if (!len) break;
+            if (type == DP_TYPE_MESSAGING) {
+                if (sub == DP_MSG_USB) { name = "USB"; break; }
+                if (sub == DP_MSG_SATA) { name = "SATA"; break; }
+                if (sub == DP_MSG_NVME) { name = "NVME"; break; }
+                if (sub == DP_MSG_SD) { name = "SD"; break; }
+            }
+            if (type == 0x7F /* end of path */) break;
+            p += len;
+        }
+    }
+    int i = 0;
+    while (name[i] && i < 11) { out[i] = name[i]; i++; }
+    out[i] = 0;
+}
+
+/* Every volume the firmware knows about.  Ordering rules:
+ *   - the boot volume is always first (it becomes C:),
+ *   - logical partitions are used when the firmware publishes them, and whole
+ *     disks only when nothing else was found (a superfloppy, or firmware that
+ *     does not split partitions).  Without that filter the same bytes show up
+ *     twice (whole disk + partition) and D: would alias C:. */
+int plat_enum_blockdevs(blockdev *out, int max, char labels[][12])
+{
+    int n = 0;
+    if (!gBS || !gBS->LocateHandleBuffer || max <= 0) return 0;
+
+    EFI_BLOCK_IO *boot = NULL;
+    if (gLoadedImage) {
+        void *blk = NULL;
+        EFI_HANDLE dev = gLoadedImage->DeviceHandle;
+        if (!EFI_ERROR(gBS->HandleProtocol(dev, &gEfiBlockIoProtocolGuid, &blk))) boot = (EFI_BLOCK_IO *)blk;
+        else if (!EFI_ERROR(gBS->HandleProtocol(gLoadedImage->ParentHandle, &gEfiBlockIoProtocolGuid, &blk)))
+            boot = (EFI_BLOCK_IO *)blk;
+    }
+
+    EFI_HANDLE *handles = NULL;
+    UINTN count = 0;
+    /* ByProtocol = 2 */
+    if (EFI_ERROR(gBS->LocateHandleBuffer(2, &gEfiBlockIoProtocolGuid, NULL, &count, &handles)) || !handles)
+        return 0;
+
+    int have_partitions = 0;
+    for (UINTN i = 0; i < count; i++) {
+        void *blk = NULL;
+        if (EFI_ERROR(gBS->HandleProtocol(handles[i], &gEfiBlockIoProtocolGuid, &blk)) || !blk) continue;
+        EFI_BLOCK_IO *bio = (EFI_BLOCK_IO *)blk;
+        if (bio->Media && bio->Media->LogicalPartition) have_partitions = 1;
+    }
+
+    /* pass 1: the boot volume, so it always lands on C: */
+    if (boot) {
+        if (!ubd_init(&out[n], boot)) {
+            if (labels) strcpy(labels[n], "BOOT");
+            n++;
+        }
+    }
+
+    /* pass 2: everything else */
+    for (UINTN i = 0; i < count && n < max; i++) {
+        void *blk = NULL;
+        if (EFI_ERROR(gBS->HandleProtocol(handles[i], &gEfiBlockIoProtocolGuid, &blk)) || !blk) continue;
+        EFI_BLOCK_IO *bio = (EFI_BLOCK_IO *)blk;
+        if (bio == boot) continue;
+        if (have_partitions && bio->Media && !bio->Media->LogicalPartition) continue;
+        if (ubd_init(&out[n], bio)) continue;
+        /* avoid handing out the same media twice */
+        int dup = 0;
+        for (int k = 0; k < n; k++)
+            if (out[k].ctx == bio) { dup = 1; break; }
+        if (dup) continue;
+        if (labels) udp_label(handles[i], labels[n]);
+        n++;
+    }
+
+    if (gBS->FreePool) gBS->FreePool(handles);
+    return n;
 }

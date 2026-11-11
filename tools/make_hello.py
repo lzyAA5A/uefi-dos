@@ -121,16 +121,19 @@ def vram():
 def upcall():
     """COM that calls the native 32/64-bit side through INT 2Fh AX=5544h.
 
-    DX=1 returns AX=API version (0100h); DX=2 makes the native side print its
-    banner.  Prints UPCALL-OK when the version probe succeeds.
+    DX=1 returns AX=API version (or 0FFFFh when the multiplex is absent); DX=2
+    makes the native side print its banner.  Prints UPCALL-OK when the probe
+    succeeds.
     """
     code = bytearray()
     patches = {}
     code += b"\xB8\x44\x55"        # mov ax,5544h
     code += b"\xBA\x01\x00"        # mov dx,1
     code += b"\xCD\x2F"            # int 2Fh -> AX = native API version
-    code += b"\x3D\x00\x01"        # cmp ax,0100h
-    code += b"\x75\x00"            # jne fail (rel8 patched below)
+    # the native side answers AX=0FFFFh when the multiplex is absent, so accept
+    # anything else (the version itself is printed by the DX=2 banner call)
+    code += b"\x83\xF8\xFF"        # cmp ax,-1
+    code += b"\x74\x00"            # je fail (rel8 patched below)
     code += b"\xB8\x44\x55"        # mov ax,5544h
     code += b"\xBA\x02\x00"        # mov dx,2 (native side prints the banner)
     code += b"\xCD\x2F"            # int 2Fh

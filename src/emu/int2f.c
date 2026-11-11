@@ -38,10 +38,15 @@ void int2f_handler(Emu *e)
         e->cx = 0;
         return;
     case 0x0002: {
-        const char *s = "UEFI-DOS native API v1.00";
-        plat_puts(s);
+        /* the banner reports the live version, so bumping DOSAPI_VERSION can
+         * never leave a stale string behind */
+        plat_puts("UEFI-DOS native API v");
+        plat_putc((char)('0' + ((DOSAPI_VERSION >> 8) & 0xF)));
+        plat_putc('.');
+        plat_putc((char)('0' + ((DOSAPI_VERSION >> 4) & 0xF)));
+        plat_putc((char)('0' + (DOSAPI_VERSION & 0xF)));
         plat_putc('\n');
-        e->ax = (u16)strlen(s);
+        e->ax = 27;
         return;
     }
     case 0x0003: {

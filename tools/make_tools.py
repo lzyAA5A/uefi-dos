@@ -391,9 +391,10 @@ def build_info():
     imm16(a, 0xB8, 0x5544)                      # mov ax, 5544h
     imm16(a, 0xBA, 0x0001)                      # mov dx, 1
     a.raw(b'\xCD\x2F')                          # int 2Fh
-    imm16(a, 0xB9, 0x0100)                      # mov cx, 0100h
+    # AX = 0FFFFh means "no native multiplex"; any other value is a version
+    imm16(a, 0xB9, 0xFFFF)                      # mov cx, 0FFFFh
     a.raw(b'\x39\xC8')                          # cmp ax, cx
-    jcc16(a, 0x4, 'api_yes')           # jz api_yes
+    jcc16(a, 0x5, 'api_yes')           # jne api_yes
     puts(a, 's_apino')
     call16(a, 'newline')
     jmp16(a, 'info_end')

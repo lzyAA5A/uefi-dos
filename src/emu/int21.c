@@ -739,17 +739,152 @@ static void con_put(Emu *e, char c)
     plat_putc(c);
 }
 
+/* ---- VESA VBE (INT 10h AH=4Fh) ------------------------------------ */
+static void fb_put(Emu *e, u16 seg, u16 off, const u8 *src, int n)
+{
+    for (int i = 0; i < n; i++) emu_wb(e, seg, (u16)(off + i), src[i]);
+}
+
+static void fb_w16(Emu *e, u16 seg, u16 off, u16 v)
+{
+    emu_wb(e, seg, off, (u8)(v & 0xFF));
+    emu_wb(e, seg, (u16)(off + 1), (u8)(v >> 8));
+}
+
+static void vesa_info(Emu *e, u16 seg, u16 off)
+{
+    /* 256-byte VbeInfoBlock */
+    for (int i = 0; i < 256; i++) emu_wb(e, seg, (u16)(off + i), 0);
+    fb_put(e, seg, off, (const u8 *)"VESA", 4);      /* signature */
+    fb_w16(e, seg, (u16)(off + 4), 0x0200);          /* VBE 2.0 */
+    /* OEM string pointer: point at an empty string in the same buffer */
+    fb_w16(e, seg, (u16)(off + 6), (u16)(off + 0xF0));
+    fb_w16(e, seg, (u16)(off + 8), seg);
+    /* capabilities: DAC is programmable to 8 bits per primary */
+    fb_w16(e, seg, (u16)(off + 10), 0x0001);
+    fb_w16(e, seg, (u16)(off + 12), 0x0000);
+    /* video mode list: an 8bpp mode then 0xFFFF */
+    static const u16 modes[] = { 0x100, 0x101, 0x103, 0xFFFF };
+    for (int i = 0; i < 4; i++) fb_w16(e, seg, (u16)(off + 14 + i * 2), modes[i]);
+    /* 0xF0: OEM vendor name */
+    fb_put(e, seg, (u16)(off + 0xF0), (const u8 *)"UEFI-DOS\0", 9);
+    e->ax = 0x004F;
+}
+
+static void vesa_mode_info(Emu *e, u16 mode, u16 seg, u16 off)
+{
+    int w = 0, h = 0;
+    if (!emu_gfx_geometry(mode, &w, &h)) {
+        e->ax = 0x014F;
+        return;
+    }
+    for (int i = 0; i < 256; i++) emu_wb(e, seg, (u16)(off + i), 0);
+    fb_w16(e, seg, (u16)(off + 0), 0x001B);  /* supported|graphics|colour|LFB */
+    fb_w16(e, seg, (u16)(off + 2), (u16)(off + 0xE0));   /* window A attrs ptr */
+    fb_w16(e, seg, (u16)(off + 4), seg);
+    fb_w16(e, seg, (u16)(off + 6), (u16)(off + 0xE0));   /* window B */
+    fb_w16(e, seg, (u16)(off + 8), seg);
+    fb_w16(e, seg, (u16)(off + 10), 0);       /* granularity (not pageable) */
+    fb_w16(e, seg, (u16)(off + 12), 64);      /* window size in KB */
+    fb_w16(e, seg, (u16)(off + 14), 0xA000);  /* window A segment */
+    fb_w16(e, seg, (u16)(off + 16), 0);       /* window B segment */
+    fb_w16(e, seg, (u16)(off + 18), w);       /* bytes per scan line */
+    fb_w16(e, seg, (u16)(off + 20), (u16)w);
+    fb_w16(e, seg, (u16)(off + 22), (u16)h);
+    emu_wb(e, seg, (u16)(off + 24), 8);       /* char width */
+    emu_wb(e, seg, (u16)(off + 25), 16);      /* char height */
+    emu_wb(e, seg, (u16)(off + 26), 1);       /* planes */
+    emu_wb(e, seg, (u16)(off + 27), 8);       /* bits per pixel */
+    emu_wb(e, seg, (u16)(off + 28), 1);       /* banks */
+    emu_wb(e, seg, (u16)(off + 29), 4);       /* memory model: packed pixel */
+    emu_wb(e, seg, (u16)(off + 30), 0);       /* bank size */
+    emu_wb(e, seg, (u16)(off + 31), 1);       /* images */
+    /* Linear framebuffer: we expose emulated VRAM at A0000 for every mode */
+    emu_wb(e, seg, (u16)(off + 0x71), 0x00);  /* phys address low */
+    emu_wb(e, seg, (u16)(off + 0x72), 0x00);
+    emu_wb(e, seg, (u16)(off + 0x73), 0x0A);
+    emu_wb(e, seg, (u16)(off + 0x74), 0x00);
+    fb_w16(e, seg, (u16)(off + 0xE0), 0x0007);  /* window attrs: usable/rw */
+    e->ax = 0x004F;
+}
+
+static void vesa_handler(Emu *e)
+{
+    u8 sub = (u8)(e->ax & 0xFF);
+    u16 seg = e->es, off = e->di;
+    switch (sub) {
+    case 0x00: vesa_info(e, seg, off); break;
+    case 0x01: vesa_mode_info(e, e->cx, seg, off); break;
+    case 0x02:                                  /* set mode (BX) */
+        emu_set_video_mode(e, (u16)(e->bx & 0x3FFF));
+        e->ax = (u16)(e->gfx_w ? 0x004F : 0x014F);
+        break;
+    case 0x03:                                  /* get current mode */
+        e->bx = e->video_mode;
+        e->ax = 0x004F;
+        break;
+    case 0x05:                                  /* bank switch: no-op (LFB) */
+    case 0x06:                                  /* logical scan line length */
+    case 0x07:                                  /* display start */
+        e->ax = 0x004F;
+        break;
+    case 0x08:                                  /* set/get DAC palette format */
+        if ((e->bx & 0xFF) == 1) e->bx = 1;     /* 8-bit per primary */
+        e->ax = 0x004F;
+        break;
+    case 0x0A:                                  /* protected-mode interface */
+        e->ax = 0x014F;
+        break;
+    default:
+        e->ax = 0x014F;
+        break;
+    }
+}
+
 void int10_handler(Emu *e)
 {
     trace_call(e, 0x10);
     u8 ah = (u8)(e->ax >> 8);
     switch (ah) {
-    case 0x00:
-        e->video_mode = (u16)(e->ax & 0xFF);
+    case 0x00: {
+        u16 want = (u16)(e->ax & 0xFF);
+        int gw = 0, gh = 0;
+        /* mode 13h / VESA modes switch the display to a pixel framebuffer, and
+         * coming back from one has to restore the text mirror, so both
+         * directions go through emu_set_video_mode() */
+        if (emu_gfx_geometry(want, &gw, &gh) || e->gfx_w) {
+            emu_set_video_mode(e, want);
+            break;
+        }
+        e->video_mode = want;
         e->curx = 0; e->cury = 0;
         cur_sync(e);
-        if ((e->ax & 0xFF) == 3 || (e->ax & 0xFF) == 7 || (e->ax & 0xFF) == 0)
-            clear_screen(e);
+        if (want == 3 || want == 7 || want == 0) clear_screen(e);
+        break;
+    }
+    case 0x10: {                     /* palette (DAC) programming */
+        u8 sub = (u8)(e->ax & 0xFF);
+        if (sub == 0x00 || sub == 0x10) {
+            emu_dac_write(e, (u8)(e->bx & 0xFF), (u8)(e->dx >> 8),
+                          (u8)(e->cx >> 8), (u8)(e->cx & 0xFF));
+        } else if (sub == 0x12) {    /* set block of DAC registers: ES:DX */
+            int n = e->cx;
+            for (int i = 0; i < n; i++) {
+                u8 r = emu_rb(e, e->es, (u16)(e->dx + i * 3));
+                u8 g = emu_rb(e, e->es, (u16)(e->dx + i * 3 + 1));
+                u8 b = emu_rb(e, e->es, (u16)(e->dx + i * 3 + 2));
+                emu_dac_write(e, (u8)((e->bx + i) & 0xFF), r, g, b);
+            }
+        } else if (sub == 0x15) {    /* read one DAC register -> DH=R CL=B CH=G? */
+            u8 rgb[3];
+            emu_dac_read(e, (u8)(e->bx & 0xFF), rgb);
+            e->dx = (u16)((rgb[0] << 8) | rgb[2]);
+            e->cx = (u16)(rgb[1] << 8);
+        }
+        break;
+    }
+    case 0x4F:                       /* VESA VBE */
+        vesa_handler(e);
         break;
     case 0x01: /* set cursor shape: ignore */
         break;

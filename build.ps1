@@ -112,6 +112,7 @@ try {
             @{ script = 'tools/make_fcb_test.py'; what = 'FCB test program' },
             @{ script = 'tools/make_tools.py';    what = 'bundled utility set' }
     @{ script = 'tools/make_keytest.py';  what = 'keyboard scan-code probe' }
+        @{ script = 'tools/make_gfx_test.py'; what = 'graphics mode probes (mode 13h + VESA)' }
         )
         foreach ($g in $generators) {
             $gp = Join-Path $Root $g.script
@@ -138,7 +139,8 @@ try {
 
         $programs = @('HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM',
                       'UPCALL.COM','DTATEST.COM','I2FTEST.COM','DPMITEST.COM','FCBTEST.COM',
-                      'INFO.COM','CLOCK.COM','HEX.COM','SUM.COM','CAL.COM','KEYTEST.COM')
+                      'INFO.COM','CLOCK.COM','HEX.COM','SUM.COM','CAL.COM','KEYTEST.COM',
+                            'GFXTEST.COM','VESATEST.COM')
         # the native SDK examples are PE images, not DOS programs: optional
         $nativePrograms = @()
         foreach ($p in @('HELLO64.EXE','HELLO32.EXE')) {
@@ -167,7 +169,10 @@ try {
         }
         if ($nativePrograms -contains 'HELLO64.EXE') { $autoexecLines += @('RUN64 HELLO64.EXE') }
         if ($nativePrograms -contains 'HELLO32.EXE') { $autoexecLines += @('RUN64 HELLO32.EXE') }
-        $autoexecLines += @('CONFIG','FCBTEST','INFO','CAL','SUM HELLO.TXT','HEX HELLO.TXT','SHUTDOWN')
+        if (Test-Path (Join-Path $Build 'SECOND.img')) {
+            $autoexecLines += @('DRIVES','DIR D:','TYPE D:\SECOND.TXT','ECHO SECOND-DRIVE-OK')
+        }
+        $autoexecLines += @('DIR *.TXT','CONFIG','FCBTEST','INFO','CAL','SUM HELLO.TXT','HEX HELLO.TXT','SHUTDOWN')
 
         $imported = Join-Path $Build 'imported'
         if (Test-Path $imported) {
@@ -175,6 +180,14 @@ try {
                 $extraFiles += @('--file', "$($f.FullName)=$($f.Name)")
             }
         }
+        # a second disk: proves D: enumeration (attached as a second IDE disk by
+        # run_uefi.ps1 / run_tests.ps1 and mounted by dos_mount_all())
+        $img2 = Join-Path $Build 'SECOND.img'
+        & $Python (Join-Path $Root 'tools/make_image.py') $img2 --size-mb 48 --noboot `
+            --text 'SECOND.TXT=this volume is D:, not C:' --autoexec 'REM second disk' | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'second image build failed' }
+        Write-Host "built: $img2"
+
         & $Python (Join-Path $Root 'tools/make_image.py') $img --boot $efi --boot-ia32 $efi32 --size-mb 64 `
             --text "HELLO.TXT=Hello UEFI-DOS!`n" --dir 'TESTDIR' --text 'TESTDIR/INNER.TXT=inner file' `
             --text 'CONFIG.SYS=FILES=20\nFCBS=4\nLASTDRIVE=D\nDEVICE=NONE\n' `

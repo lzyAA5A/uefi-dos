@@ -34,14 +34,20 @@ Copy-Item $VarsSrc $Vars -Force
 $Serial = Join-Path $Build 'serial.log'
 if (Test-Path $Serial) { Remove-Item $Serial -Force }
 
-$args = @(
+$qargs = @(
     '-m','256','-smp','1','-machine','pc',
     '-drive',"if=pflash,format=raw,readonly=on,file=$Fw",
     '-drive',"if=pflash,format=raw,file=$Vars",
-    '-drive',"file=$Image,format=raw,if=ide,index=0,media=disk",
-    '-display','none','-serial',"file:$Serial",'-no-reboot','-net','none'
+    '-drive',"file=$Image,format=raw,if=ide,index=0,media=disk"
 )
-$argStr = ($args | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+# second disk (D:) -- proves multi-volume enumeration under real firmware
+$second = Join-Path $Build 'SECOND.img'
+if (Test-Path $second) {
+    $qargs += @('-drive', "file=$second,format=raw,if=ide,index=1,media=disk")
+}
+$qargs += @('-display','none','-serial',"file:$Serial",'-no-reboot','-net','none')
+
+$argStr = ($qargs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
 $p = Start-Process -FilePath $Qemu -ArgumentList $argStr -PassThru -NoNewWindow
 $deadline = (Get-Date).AddSeconds($TimeoutSec)
 while (-not $p.HasExited -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
@@ -61,13 +67,16 @@ if (Test-Path $Serial) {
 # assertions
 $text = if (Test-Path $Serial) { Get-Content $Serial -Raw } else { '' }
 $ok = $true
-$markers = @('UEFI-DOS', 'BOOT OK', 'Hello from 8086 code!', 'TELETYPE OK!', 'Hello from MZ EXE!', 'RUNNER DONE!', 'VIDEO-OK!', 'API-OK', 'UPCALL-OK','DTA-OK','INT2F-OK','DPMI-HOST-OK','PM16-OK','PM32-DOS-OK','RMREFLECT-OK','DOSMEM-OK','REFLECTED-21H-OK','ABI-OK','TICKS-OK', 'UEFI-DOS native API v1.00', 'WRITE-OK', 'FCB-OK', 'FILES=20', '=== UEFI-DOS system info ===', 'Su Mo Tu We Th Fr Sa', 'bytes, checksum', 'Hello UEFI-DOS!.', 'RUN64: loading HELLO64.EXE', 'NATIVE-OK')
+$markers = @('UEFI-DOS', 'BOOT OK', 'Hello from 8086 code!', 'TELETYPE OK!', 'Hello from MZ EXE!', 'RUNNER DONE!', 'VIDEO-OK!', 'API-OK', 'UPCALL-OK','DTA-OK','INT2F-OK','DPMI-HOST-OK','PM16-OK','PM32-DOS-OK','RMREFLECT-OK','DOSMEM-OK','REFLECTED-21H-OK','ABI-OK','TICKS-OK', 'UEFI-DOS native API v1.01', 'WRITE-OK', 'FCB-OK', 'FILES=20', '=== UEFI-DOS system info ===', 'Su Mo Tu We Th Fr Sa', 'bytes, checksum', 'Hello UEFI-DOS!.', 'RUN64: loading HELLO64.EXE', 'NATIVE-OK', 'long name    : created "Long Name Report.txt"', '8.3 alias    : LONGNA~1.TXT -> Long Name Report.txt')
 if ($Firmware -eq 'ia32') {
     $markers += @('pointer size : 32 bit')   # HELLO32.EXE is the one that runs
 } else {
     $markers += @('pointer size : 64 bit')   # HELLO64.EXE is the one that runs
 }
 if (-not $SkipFloppy) { $markers += @('FLOPPY-WRITE-OK', 'FLOPPY-OK', 'IBMBIO') }
+if (Test-Path (Join-Path $Build 'SECOND.img')) {
+    $markers += @('Drive D: mounted', 'SECOND-DRIVE-OK', 'this volume is D:, not C:')
+}
 foreach ($m in $markers) {
     if ($text -notmatch [regex]::Escape($m)) { Write-Host "MISSING marker: $m"; $ok = $false }
 }

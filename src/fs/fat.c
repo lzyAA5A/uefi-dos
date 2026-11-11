@@ -55,6 +55,286 @@ void fat_volume_label(fat_vol *v, char *out, int maxlen)
     }
 }
 
+
+/* ------------------------------------------------------------------ */
+/* long file names (VFAT 0x0F entries)                                 */
+/* ------------------------------------------------------------------ */
+
+/* the 8.3 checksum every LFN entry of a chain carries in byte 13 */
+static u8 lfn_checksum(const u8 *name11)
+{
+    u8 sum = 0;
+    for (int i = 0; i < 11; i++)
+        sum = (u8)(((sum & 1) ? 0x80 : 0) + (sum >> 1) + name11[i]);
+    return sum;
+}
+
+struct lfn_state {
+    u16 ch[FAT_LFN_MAX];
+    int max_order;   /* highest sequence number seen in this chain */
+    int have;
+    u8 sum;
+};
+
+static void lfn_reset(struct lfn_state *st)
+{
+    memset(st->ch, 0, sizeof(st->ch));
+    st->max_order = 0;
+    st->have = 0;
+    st->sum = 0;
+}
+
+/* 13 UTF-16 code units live at these offsets of an LFN entry */
+static const u8 g_lfn_off[13] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
+
+static void lfn_take(struct lfn_state *st, const u8 *raw)
+{
+    int order = raw[0] & 0x1F;
+    if ((raw[0] & 0x40) || order <= 0 || order > FAT_LFN_MAX / 13) {
+        lfn_reset(st);              /* first (0x40) entry starts a new chain */
+        if (order <= 0 || order > FAT_LFN_MAX / 13) return;
+    }
+    st->sum = raw[13];
+    int base = (order - 1) * 13;
+    for (int i = 0; i < 13; i++) {
+        u16 c = (u16)(raw[g_lfn_off[i]] | ((u16)raw[g_lfn_off[i] + 1] << 8));
+        if (base + i < FAT_LFN_MAX) st->ch[base + i] = c;
+    }
+    if (order > st->max_order) st->max_order = order;
+    st->have = 1;
+}
+
+/* assemble the collected chain; non-ASCII code units become '_' (the DOS side
+ * of this system is CP437, so a full Unicode round trip is out of scope) */
+static void lfn_build(const struct lfn_state *st, char *out, int maxlen)
+{
+    int n = 0, total = st->max_order * 13;
+    for (int i = 0; i < total && n < maxlen - 1; i++) {
+        u16 c = st->ch[i];
+        if (c == 0) break;
+        out[n++] = (c < 0x80) ? (char)c : '_';
+    }
+    out[n] = 0;
+}
+
+/* enumerate directory sectors: cb returns non-zero to stop early */
+typedef int (*dir_sec_cb)(fat_vol *v, u32 lba, void *arg);
+
+static int dir_foreach_sector(fat_vol *v, u32 start_cluster, dir_sec_cb cb, void *arg)
+{
+    if (v->fs_type != 32 && start_cluster == 0) {
+        u32 nsec = (v->root_entries * 32 + FAT_SEC - 1) / FAT_SEC;
+        for (u32 sec = 0; sec < nsec; sec++)
+            if (cb(v, v->root_lba + sec, arg)) return FAT_OK;
+        return FAT_OK;
+    }
+    u32 cl = start_cluster, guard = 0;
+    while (cl >= 2 && cl < v->cluster_count + 2 && guard++ < 65536) {
+        u32 lba;
+        if (fat_get_cluster_lba(v, cl, &lba)) return FAT_EIO;
+        for (u32 sec = 0; sec < v->spc; sec++)
+            if (cb(v, lba + sec, arg)) return FAT_OK;
+        u32 nxt;
+        if (fat_next_cluster(v, cl, &nxt)) return FAT_EIO;
+        if (nxt >= CHAIN_FREE) break;
+        cl = nxt;
+    }
+    return FAT_OK;
+}
+
+struct scan_ex_ctx {
+    fat_scan_ex_cb cb;
+    void *arg;
+    struct lfn_state lfn;
+};
+
+static int scan_ex_sector(fat_vol *v, u32 lba, void *arg)
+{
+    struct scan_ex_ctx *c = (struct scan_ex_ctx *)arg;
+    u8 buf[FAT_SEC];
+    if (read_sec(v, lba, buf)) return 1;
+    for (u32 e = 0; e + 32 <= FAT_SEC; e += 32) {
+        fat_dirent d;
+        memcpy(d.raw, buf + e, 32);
+        if (d.raw[0] == 0x00) return 1;                     /* end of directory */
+        if (d.raw[0] == 0xE5) { lfn_reset(&c->lfn); continue; }
+        if ((d.raw[11] & 0x3F) == 0x0F) { lfn_take(&c->lfn, d.raw); continue; }
+        char longname[FAT_LFN_MAX];
+        const char *lp = NULL;
+        if (c->lfn.have && lfn_checksum(d.raw) == c->lfn.sum) {
+            lfn_build(&c->lfn, longname, sizeof(longname));
+            if (longname[0]) lp = longname;
+        }
+        lfn_reset(&c->lfn);
+        if (c->cb(v, &d, lba, e, lp, c->arg)) return 1;
+    }
+    return 0;
+}
+
+int fat_dir_scan_ex(fat_vol *v, u32 start_cluster, fat_scan_ex_cb cb, void *arg)
+{
+    struct scan_ex_ctx c;
+    memset(&c, 0, sizeof(c));
+    c.cb = cb;
+    c.arg = arg;
+    lfn_reset(&c.lfn);
+    return dir_foreach_sector(v, start_cluster, scan_ex_sector, &c);
+}
+
+/* case-insensitive ASCII compare (DOS long names are matched that way) */
+static int lfn_ieq(const char *a, const char *b)
+{
+    for (;; a++, b++) {
+        int ca = (u8)*a, cb2 = (u8)*b;
+        if (ca >= 'a' && ca <= 'z') ca -= 32;
+        if (cb2 >= 'a' && cb2 <= 'z') cb2 -= 32;
+        if (ca != cb2) return 0;
+        if (!ca) return 1;
+    }
+}
+
+struct find_long_ctx {
+    const char *name;
+    fat_dirent *out;
+    u32 cl, lba, idx;
+    int found;
+};
+
+static int find_long_trampoline(fat_vol *v, const fat_dirent *d, u32 lba, u32 off,
+                                const char *longname, void *arg)
+{
+    struct find_long_ctx *f = (struct find_long_ctx *)arg;
+    UFD_UNUSED(v);
+    if (!longname) return 0;
+    if (!lfn_ieq(longname, f->name)) return 0;
+    memcpy(f->out, d, sizeof(fat_dirent));
+    f->cl = fat_entry_cluster(d);
+    f->lba = lba;
+    f->idx = off / 32;
+    f->found = 1;
+    return 1;
+}
+
+int fat_find_long(fat_vol *v, u32 dir_cluster, const char *longname, fat_dirent *out,
+                  u32 *out_cluster, u32 *out_ent_lba, u32 *out_ent_idx)
+{
+    struct find_long_ctx f;
+    memset(&f, 0, sizeof(f));
+    f.name = longname;
+    f.out = out;
+    int rc = fat_dir_scan_ex(v, dir_cluster, find_long_trampoline, &f);
+    if (rc != FAT_OK) return rc;
+    if (!f.found) return FAT_ENOENT;
+    if (out_cluster) *out_cluster = f.cl;
+    if (out_ent_lba) *out_ent_lba = f.lba;
+    if (out_ent_idx) *out_ent_idx = f.idx;
+    return FAT_OK;
+}
+
+struct run_ctx {
+    int need;
+    u32 lba, idx;
+    int found;
+};
+
+static int run_sector(fat_vol *v, u32 lba, void *arg)
+{
+    struct run_ctx *r = (struct run_ctx *)arg;
+    u8 buf[FAT_SEC];
+    if (read_sec(v, lba, buf)) return 1;
+    int run = 0, start = -1;
+    for (int e = 0; e + 32 <= FAT_SEC; e += 32) {
+        int free_slot = (buf[e] == 0x00 || buf[e] == 0xE5);
+        if (free_slot) {
+            if (run == 0) start = e;
+            run++;
+            if (run >= r->need) {
+                r->lba = lba;
+                r->idx = (u32)(start / 32);
+                r->found = 1;
+                return 1;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    return 0;
+}
+
+/* need consecutive free slots (a whole LFN chain plus its 8.3 entry) */
+static int fat_find_free_run(fat_vol *v, u32 dir_cluster, int need, u32 *out_lba, u32 *out_idx)
+{
+    if (need <= 0) return FAT_EINVAL;
+    if (need > (int)(FAT_SEC / 32)) return FAT_EDIRFULL;
+    struct run_ctx r;
+    memset(&r, 0, sizeof(r));
+    r.need = need;
+    int rc = dir_foreach_sector(v, dir_cluster, run_sector, &r);
+    if (rc != FAT_OK) return rc;
+    if (r.found) {
+        if (out_lba) *out_lba = r.lba;
+        if (out_idx) *out_idx = r.idx;
+        return FAT_OK;
+    }
+    /* grow the directory once (FAT32 only) and use the fresh cluster */
+    if (v->fs_type != 32 || dir_cluster == 0) return FAT_EDIRFULL;
+    u32 lba = 0, idx = 0, newcl = 0;
+    rc = fat_find_free(v, dir_cluster, &lba, &idx, &newcl);
+    if (rc != FAT_OK) return rc;
+    if (!newcl) return FAT_EDIRFULL;   /* last sector was tight; caller falls back */
+    if (out_lba) *out_lba = lba;
+    if (out_idx) *out_idx = 0;
+    return FAT_OK;
+}
+
+int fat_create_file_long(fat_vol *v, u32 dir_cluster, const u8 name11[11],
+                         const char *longname, u8 attr)
+{
+    if (v->read_only) return FAT_EROFS;
+    if (!longname || !longname[0]) return fat_create_file(v, dir_cluster, name11, NULL);
+    int len = (int)strlen(longname);
+    if (len > FAT_LFN_MAX - 1) len = FAT_LFN_MAX - 1;
+    int slots = (len + 12) / 13;
+    fat_dirent chk;
+    int rc = fat_find(v, dir_cluster, name11, &chk, NULL, NULL, NULL);
+    if (rc == FAT_OK) return FAT_EEXIST;
+    if (rc != FAT_ENOENT) return rc;
+
+    u32 lba = 0, idx = 0;
+    rc = fat_find_free_run(v, dir_cluster, slots + 1, &lba, &idx);
+    if (rc != FAT_OK) {
+        /* no room for the chain: store the short name only */
+        return fat_add_entry(v, dir_cluster, name11, attr, 0, 0);
+    }
+    u8 sum = lfn_checksum(name11);
+    for (int k = 0; k < slots; k++) {
+        int order = slots - k;              /* VFAT stores the chain backwards */
+        u8 raw[32];
+        memset(raw, 0xFF, 32);
+        raw[0] = (u8)order;
+        if (order == slots) raw[0] |= 0x40;
+        raw[11] = 0x0F;
+        raw[12] = 0;
+        raw[13] = sum;
+        raw[26] = raw[27] = 0;              /* first cluster must be zero */
+        for (int i = 0; i < 13; i++) {
+            int ci = (order - 1) * 13 + i;
+            u16 c = 0xFFFF;
+            if (ci < len) c = (u16)(u8)longname[ci];
+            else if (ci == len) c = 0;      /* terminator */
+            raw[g_lfn_off[i]] = (u8)(c & 0xFF);
+            raw[g_lfn_off[i] + 1] = (u8)(c >> 8);
+        }
+        fat_dirent d;
+        memcpy(d.raw, raw, 32);
+        rc = fat_write_entry_at(v, lba, idx + (u32)k, &d);
+        if (rc != FAT_OK) return rc;
+    }
+    fat_dirent sd;
+    fat_make_entry(&sd, (const char *)name11, attr, 0, 0);
+    return fat_write_entry_at(v, lba, idx + (u32)slots, &sd);
+}
+
 /* ------------------------------------------------------------------ */
 /* mount / unmount                                                     */
 /* ------------------------------------------------------------------ */

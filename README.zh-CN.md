@@ -11,14 +11,14 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 有过的东西：FAT32、64 位 UEFI 启动、FAT16 大容量卷、DOS 4.0 的文件共享/加锁/FCB
 语义、原生 32/64 位 DOS API，以及 386 保护模式与 DPMI 0.9 宿主。
 
-当前版本 0.7.0 —— 19 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
-的 x86_64 与 IA32 实机启动）。0.7.0 新增：Linux 上一条 `make` 就能构建（附带
-`Dockerfile`）、**原生 32/64 位程序 SDK**（编译出的自由式 PE 程序用 `RUN64` 直接
-在真 CPU 上跑），以及针对 8086 解释器的**指令级测试框架**。
+当前版本 0.8.0 —— 24 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+的 x86_64 与 IA32 实机启动）。0.8.0 新增：**图形模式**（INT 10h mode 13h 与
+VESA VBE，直接写 UEFI GOP 帧缓冲）、**每个 UEFI 卷都变成盘符**（插上 U 盘就是 `D:`）、
+以及**长文件名**（VFAT LFN 可读可建，老 DOS 程序仍只见 8.3）。
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-0.7.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.7.0.zip)
+[**下载 `UEFI-DOS-0.8.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.8.0.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -39,13 +39,16 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 | FAT32 | 读 + 写（建/删/改名/建目录/删目录，簇分配与回收） |
 | FAT12 / FAT16 | 读 + 写 |
 | 软盘/磁盘镜像挂载 | `MOUNT A: IMAGE.IMG` 把 `C:` 上的镜像文件变成可读写驱动器 |
-| 命令解释器 | `DIR CD MD RD DEL REN TYPE COPY CLS ECHO VER VOL DATE TIME PROMPT PATH SET MEM HELP APITEST MOUNT UNMOUNT CONFIG FCB EXIT SHUTDOWN`、批处理、`AUTOEXEC.BAT` |
-| DOS 内核 | 8.3 文件名、按驱动器维护当前目录、DOS 错误码、**DOS 4.0 语义**（见下） |
+| 命令解释器 | `DIR CD MD RD DEL REN TYPE COPY CLS ECHO VER VOL DATE TIME PROMPT PATH SET MEM HELP APITEST MOUNT UNMOUNT CONFIG FCB DRIVES EXIT SHUTDOWN`、批处理、`AUTOEXEC.BAT` |
+| DOS 内核 | 8.3 文件名（+ VFAT 长文件名）、按驱动器维护当前目录、DOS 错误码、**DOS 4.0 语义**（见下） |
 | 8086 模拟器 | 8086/80186 实模式解释器、16 MiB 模拟内存、PSP、IVT、带重定位的 `.COM` 与 MZ `.EXE` 加载器、8087 转义按 8086 空转处理 |
 | INT 21h | 控制台、文件 I/O、查找首/次 + DTA、目录、日期时间、版本、中断向量读写、IOCTL、句柄复制、PSP、内存桩、**EXEC（AH=4Bh）**、**AH=67h**、**AH=5Ch** 字节锁、**SHARE 模式** |
 | FCB 调用族 | AH=0Fh 10h 11h 12h 13h 14h 15h 16h 17h 21h 22h 23h 27h 28h（`src/emu/fcb.c`） |
 | INT 10h / 16h / 1Ah / 13h | 文本服务（置模式、光标、读写字符+属性、电传、窗口滚动）作用于模拟屏幕、支持扩展键的阻塞键盘、BIOS 计时、磁盘读/写/几何参数 |
-| 显示 | 模拟内存里的 80×25 彩色文本屏（`B800:0000`）：直接写显存和 `INT 10h` 输出都落在同一块屏上，再镜像到控制台（只重画变化的行） |
+| 显示（文本） | 模拟内存里的 80×25 彩色文本屏（`B800:0000`）：直接写显存和 `INT 10h` 输出都落在同一块屏上，再镜像到控制台（只重画变化的行） |
+| 显示（图形） | `INT 10h AL=13h`（320×200×256）与 VESA VBE `4F00/4F01/4F02/4F03/4F05`（640×400、640×480、800×600，8 bpp）；调色板走 `INT 10h AX=1000h/1012h/1015h` 与端口 `3C7/3C8/3C9`；画面转成 GOP 像素格式后直接写固件帧缓冲，并按整数倍放大 —— 见 [`docs/graphics.md`](docs/graphics.md) |
+| 盘符 | 固件发布的每个卷都会被挂载：启动卷 → `C:`，其余依次 `D:`、`E:`…（`DRIVES` 列出，只读介质会标注） |
+| 长文件名 | 打开、`DIR` 与原生 API 都会解析 VFAT LFN 链；用长名建文件会写入 LFN 链并生成 8.3 别名，DOS 程序依旧只见别名 |
 | 原生 32/64 位 API | `g_dosapi` 服务表 —— 操作与错误码与 INT 21h 完全一致，原生指针，同一份源码产出两种位宽的固件 |
 | 16 位桥 | `exec16()` 下行调用（原生 → 实模式）与 `INT 2Fh AX=5544h` 上行调用（实模式 → 原生） |
 | 386 保护模式 | 实模式 → 保护模式切换、GDT/LDT 解析、带限长检查的隐藏段缓存、`MOV CRn`/`LGDT`/`LIDT`/`LLDT`/`CLTS`、32 位寻址（SIB）、`0F xx` 指令族、保护模式 IDT 分发 |
@@ -344,9 +347,44 @@ ITEST PASSED
 加一条用例就是改五行表格；格式、坑（宏里的逗号、`lodsb` 不动 `AH`）以及尚未覆盖的
 部分见 [`docs/itest.md`](docs/itest.md)。
 
+## 图形、额外盘符与长文件名
+
+**图形。** `GFXTEST.COM` 用 `INT 10h` 切到 mode 13h，通过 `AX=1012h` 装载整张
+DAC 调色板，画出 320×200 并打印 `GFX-OK 320x200x256`；`VESATEST.COM` 走完 VESA
+调用（`4F00`、`4F01`、带线性帧缓冲位的 `4F02`）进入 640×480×256，然后分五个
+64KB 窗口把整屏画满。在 UEFI 下，模拟帧缓冲会转成 GOP 像素格式直接写进
+`Mode->FrameBufferBase`，并按整数倍放大（320×200 在 640×480 屏上放大 2 倍、四周
+留黑边）。图形模式下文本输出改走串口，否则控制台会把自己的文本网格重新画到画面
+上。两条被放弃的固件 `Blt` 路径与细节见 [`docs/graphics.md`](docs/graphics.md)。
+
+**每个卷都是一个盘符。** `plat_enum_blockdevs()` 向固件枚举所有 `BlockIo` 句柄：
+启动卷排第一（`C:`），若存在逻辑分区就跳过整盘句柄（`D:` 不会与 `C:` 指向同一片
+扇区），再按设备路径标注 `USB`/`SATA`/`NVME`/`SD`，依次挂成 `D:`、`E:`……只读介质
+自动只读挂载。`DRIVES` 打印这张表：
+
+```
+C: >FAT32 UEFIDOS
+D:  FAT32 USBSTICK
+```
+
+**长文件名。** LFN 链按 8.3 校验和验证，`open` 时大小写不敏感地解析，`DIR` 显示，
+原生 API 一并返回。给一个 8.3 表达不了的名字（`Long Name Report.txt`）建文件时，
+会写入 LFN 链并生成别名（`LONGNA~1.TXT`），原生 API 可用 `longname()` 把别名反查
+回长名；DOS 程序依旧只见 8.3 —— 这正是设计：老的一侧保持老，新的一侧拿到真名。
+
+```
+C:\> RUN64 HELLO64.EXE
+long name    : created "Long Name Report.txt"
+long read    : this file has a VFAT long name
+8.3 alias    : LONGNA~1.TXT -> Long Name Report.txt
+...
+C:\> DIR *.TXT
+Long Name Report.txt         31 13:12  11-11-26
+```
+
 ## 回归测试
 
-`run_tests.ps1` 会先完整构建，再跑 20 项检查：FAT32 读/写自检；宿主命令解释器
+`run_tests.ps1` 会先完整构建，再跑 24 项检查：FAT32 读/写自检；宿主命令解释器
 DIR/TYPE/VER/COM/EXE/EXEC/显示 + 原生 API 与上行调用演示；宿主写路径；软盘镜像挂载
 为 `A:`；在 2.11 镜像上写 FAT12；读取 2.11 与 MS-DOS 5 镜像；两项 QEMU/OVMF 启动
 冒烟测试（x86_64 与 IA32）；阶段 4/6 语义与双路径对比；32 MB 与 1.9 GB FAT16 卷写入；
@@ -402,24 +440,36 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 ```
 src/
   uefi/main.c        入口、启动横幅、挂载 C:、发布 API 表、跑命令解释器
-  uefi/efi_plat.c    UEFI 平台层：ConOut/ConIn、BlockIo、RTC、计时、关机
+  uefi/efi_plat.c    UEFI 平台层：ConOut/ConIn、BlockIo（全部卷）、GOP 帧缓冲、
+                     RTC、计时、串口诊断、关机
   plat.h             平台抽象（Windows 宿主也有实现）
   common/util.c      自立 mem/str 例程（不用 libc）
   common/divdi3.c    64 位除法助手（-m32 -nostdlib 需要）
   common/cp437.c     CP437 → Unicode 表，供控制台镜像使用
   fs/fat.c|h         块设备上的 FAT12/16/32 驱动（三者都有写路径）
-  kernel/dos.c|h     驱动器、路径解析、文件句柄、find/DTA、CONFIG.SYS、
-                     SHARE 模式、字节区间锁、只读删除保护
+                     含 VFAT 长文件名的解析与写入
+  kernel/dos.c|h     驱动器（多卷）、含长文件名的路径解析、文件句柄、find/DTA、
+                     CONFIG.SYS、SHARE 模式、字节区间锁、只读删除保护
   api/dosapi.c|h     原生 32/64 位 DOS API（与 INT 21h 对齐的服务表 + 导出）
+  api/native.c|h     原生 PE 加载器：映射、重定位，在真 CPU 上调用 uefidos_main()
   shell/shell.c|h    类 COMMAND.COM 解释器与批处理执行
-  emu/emu.c          8086 实模式解释器、PSP/IVT、.COM/.EXE 加载器、显示镜像
+  emu/emu.c          8086 实模式解释器、PSP/IVT、.COM/.EXE 加载器、
+                     文本显存镜像 + 图形模式与 VGA DAC
   emu/int21.c        INT 21h / INT 10h / INT 13h / INT 16h / INT 1Ah 服务
   emu/fcb.c          DOS 4.0 FCB 调用族（AH=0Fh..28h）
   emu/int2f.c        INT 2Fh 原生命令复用（16 位 → 原生上行调用）
   emu/dpmi.c         DPMI 0.9 宿主：INT 2Fh/1687h、INT 31h、INT 60h 入口
+  emu/itest.c        指令级测试向量（hosttest --itest）
   host/              Windows 平台 + 自检/命令解释器/fatlist/phase46/fat16 测试器
+sdk/
+  include/uefidos/   dosapi.h（公开 ABI）、runtime.h（自立辅助函数）
+  examples/hello64.c 原生演示程序（文件 I/O、查找、时钟、exec16）
+  Makefile           用 mingw 交叉编译器构建 HELLO64.EXE / HELLO32.EXE
+  build_sdk.ps1      Windows 上的同一套构建
 tools/
   fat32.py           FAT32 格式化器（无依赖）
+  make_gfx_test.py   生成 GFXTEST.COM / VESATEST.COM（图形探针）
+  gfx_shot.ps1       在 QEMU 里启动镜像并给帧缓冲截图
   make_image.py      镜像生成器（启动文件、文本文件、AUTOEXEC.BAT）
   make_hello.py      生成 HELLO.COM / TELETYPE.COM / MZEXE.EXE / RUNNER.COM /
                      VRAM.COM / UPCALL.COM

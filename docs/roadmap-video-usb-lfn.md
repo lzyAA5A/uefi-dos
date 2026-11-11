@@ -1,10 +1,34 @@
 # Roadmap: VESA linear framebuffer, UEFI drive enumeration, long file names
 
-Three requests that are each a self-contained subsystem. This document is the
-*design* — the interfaces, the data structures, the traps, and the order to build
-them in — so the next session can implement without re-deriving anything. None of
-it is implemented in 0.7.0; the state of 0.7.0 is: text mode only, one drive
-(`C:`), 8.3 names only.
+**Status in 0.8.0: all three are implemented and covered by the regression
+suite.** This document is kept as the design record — it is what the
+implementation was built against, and it explains *why* each trap exists, which
+the final code no longer shows once it works around them. What shipped:
+
+| Section | Shipped in 0.8.0 | Where the result is documented |
+| --- | --- | --- |
+| 1. VESA on GOP | `INT 10h` modes `13h`, `100h`, `101h`, `103h` + `AX=4F00h/4F01h/4F02h/4F03h/4F05h-4F08h`, DAC palette via ports `3C7h-3C9h` and `AX=1010h/1012h/1015h` | `docs/graphics.md` |
+| 2. Extra drives | `plat_enum_blockdevs()` enumerates every `EFI_BLOCK_IO` handle, `dos_mount_all()` mounts them as `D:`, `E:`, …; `DRIVES` shell command | README "Graphics, extra drives, long names" |
+| 3. Long file names | VFAT LFN read + create + delete, `DIR`/`TYPE`/`COPY` by long name, `dosapi findinfo.long_name`, `dosapi.longname()`, `AX=0101h` | README, `sdk/examples/hello64.c` |
+
+Deviations from this design, decided during implementation:
+
+- Section 1 proposed `Blt()` as the frame path. Measured on OVMF/QEMU:
+  `EfiBltVideoFill` **hangs** the guest inside firmware and
+  `EfiBltBufferToVideo` completes without drawing anything. The shipped path
+  writes pixels straight into `Mode->FrameBufferBase`; see `docs/graphics.md`.
+- Section 1 also proposed dirty rectangles. Shipped instead: a full-frame blit
+  throttled to 30 ms plus a forced flush at the points where the guest can
+  observe the screen (blocking key read, `INT 10h` mode set, program exit).
+  Correctness first; a 640x480 frame copy is cheap enough here.
+- Section 2 anticipated `SimpleFileSystem`. Shipped on top of
+  `EFI_BLOCK_IO` instead, so a stick is mounted as a *DOS disk* (FAT12/16/32
+  with an MBR or a superfloppy BPB) rather than as a host-filesystem mirror.
+  That is the semantics a rescue tool needs.
+- Section 3 proposed `find_first_ex`/`find_next_ex`. Shipped under those names
+  in the kernel plus public `findinfo.long_name` and `longname()` in the native
+  API, so a 64-bit program can ask for the long name of a file that a 16-bit
+  program only knows as `LONGNA~1.TXT`.
 
 ---
 

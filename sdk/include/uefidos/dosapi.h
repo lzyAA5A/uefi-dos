@@ -32,7 +32,7 @@ typedef signed int         i32;
 typedef signed short       i16;
 typedef unsigned long long u64;
 
-#define DOSAPI_VERSION 0x0100u      /* 1.00 */
+#define DOSAPI_VERSION 0x0101u      /* 1.01: long names in find records */
 
 /* UEFI configuration-table GUID -> dosapi_exports
  * 55454449-2D44-4F53-4150-4900-000000000001 */
@@ -55,13 +55,16 @@ typedef unsigned long long u64;
 #define DOS_SEEK_CUR  1
 #define DOS_SEEK_END  2   /* also returns the file size in *newpos */
 
-/* INT 21h AH=4Eh/4Fh result record. */
+#define DOSAPI_LFN_MAX 64   /* room for the VFAT long name */
+
+/* INT 21h AH=4Eh/4Fh result record, plus the VFAT long name. */
 typedef struct dosapi_findinfo {
     char name[13];      /* 8.3 name, NUL padded */
     u8   attr;          /* directory-entry attributes */
     u32  size;          /* file size in bytes */
     u16  time;          /* packed DOS time */
     u16  date;          /* packed DOS date */
+    char long_name[DOSAPI_LFN_MAX]; /* VFAT long name, "" when the entry has none */
 } dosapi_findinfo;
 
 typedef struct dosapi_services {
@@ -93,6 +96,8 @@ typedef struct dosapi_services {
     /* AH=4Eh/4Fh -- one find state per process, do not nest */
     u16  (*find_first)(const char *pattern, u8 attr_mask, dosapi_findinfo *out);
     u16  (*find_next)(dosapi_findinfo *out);
+    /* 1.01: resolve an 8.3 path to its long name ("" if the entry has none) */
+    u16  (*longname)(const char *path, char *out, u32 max);
     /* AH=2Ah (year_dos = year-1980) / AH=2Ch / INTERRUPT 1Ah AH=00h */
     void (*get_date)(u8 *year_dos, u8 *month, u8 *day);
     void (*get_time)(u8 *hour, u8 *minute, u8 *second, u8 *centisecond);
