@@ -66,6 +66,7 @@ typedef struct Emu {
     int iopl;
     int pm_fault;            /* protection check failed: run loop reports it */
     u32 pm_fault_addr;
+    int a20_on;              /* A20 gate: 0 = real-mode addresses wrap at 1 MB */
 
     u16 psp_seg;
     int halted;

@@ -91,6 +91,11 @@ struct dos_state {
     int  last_drive;          /* LASTDRIVE= (0-based), clamped to DOS_MAX_DRIVES-1 */
     char path_env[DOS_MAX_PATH];
     char prompt[48];
+    /* DOS memory arena (INT 21h AH=48h/49h/4Ah).  The loaded program owns
+     * [psp_seg, mem_top); mem_base is the segment of the first MCB, i.e. the
+     * free block that starts right after the program image. */
+    u16 mem_base;
+    u16 mem_top;
 };
 
 extern struct dos_state g_dos;

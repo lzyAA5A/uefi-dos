@@ -120,8 +120,22 @@ static const u8 c_outsb[]     = { 0x6E };                    /* outsb */
 static const u8 c_add_imm[]   = { 0x05, 0x10, 0x27 };        /* add ax,2710h */
 static const u8 c_mov_imm[]   = { 0xB8, 0x34, 0x12 };        /* mov ax,1234h */
 static const u8 c_jmp_far[]   = { 0xEA, 0x00, 0x02, 0x00, 0x90 }; /* jmp 9000:0200 */
+static const u8 c_repnz_scasb[] = { 0xF3, 0xAE };             /* repz scasb */
+static const u8 c_rep_movsb_df1[] = { 0xF3, 0xA4 };           /* rep movsb (DF=1) */
+static const u8 c_lodsb_df1[]  = { 0xAC };                    /* lodsb (DF=1) */
+static const u8 c_mov_bp_neg[]  = { 0x8B, 0x46, 0xF8 };        /* mov ax,[bp-08h] */
+static const u8 c_mov_bp_neg_w[] = { 0x89, 0x46, 0xFC };       /* mov [bp-04h],ax */
+static const u8 c_mov_bx_si_neg[] = { 0x8B, 0x40, 0xFE };      /* mov ax,[bx+si-02h] */
+static const u8 c_mov_bp_pos[]  = { 0x8B, 0x46, 0x04 };        /* mov ax,[bp+04h] */
+static const u8 c_rep_stosb_df1[] = { 0xF3, 0xAA };           /* rep stosb (DF=1) */
 
 /* ---- memory fixtures (8 bytes each) ---- */
+static const u8 m_ff_tail[]      = { 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00 };
+static const u8 m_ff_b0[]        = { 0xFF, 0xFF, 0xFF, 0xB0, 0x00, 0x00, 0x00, 0x00 };
+static const u8 m_ff_b0_fwd[]    = { 0xFF, 0xFF, 0xB0, 0xFF, 0x00, 0x00, 0x00, 0x00 };
+static const u8 m_df1_mov_src[]  = { 0x11, 0x22, 0x33, 0x44, 0x00, 0x00, 0x00, 0x00 };
+static const u8 m_df1_mov_dst[]  = { 0x00, 0x00, 0x00, 0x44, 0x33, 0x22, 0x11, 0x00 };
+
 static const u8 m_words[]        = { 0x78, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00 };
 static const u8 m_mov_rm_expect[] = { 0x78, 0x56, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00 };
 static const u8 m_mov_mr_expect[] = { 0xBB, 0xAA, 0x34, 0x12, 0x00, 0x00, 0x00, 0x00 };
@@ -177,6 +191,25 @@ static const it_case g_cases[] = {
     /* --- string ops (DF clear) --- */
     CASE("rep stosw (3 words, 2 store units)", c_rep_stosw, ((it_regs){.ax = 0xAAAA, .cx = 3, .di = IT_DATA_OFF}), ((it_regs){.cx = 0, .di = IT_DATA_OFF + 6}), IT_C_CX | IT_C_DI | IT_C_MEM, 1, m_words, m_stos_expect, IT_SEG, IT_DATA_OFF, 6),
     CASE("rep movsw (2 words)", c_rep_movsw, ((it_regs){.cx = 2, .si = IT_DATA_OFF, .di = IT_DATA_OFF + 4}), ((it_regs){.cx = 0, .si = IT_DATA_OFF + 4, .di = IT_DATA_OFF + 8}), IT_C_CX | IT_C_SI | IT_C_DI | IT_C_MEM, 1, m_words, m_movsw_expect, IT_SEG, IT_DATA_OFF, 8),
+
+    /* --- string ops with DF=1 (backwards).  EXEPACK's loader stub walks its
+     * compressed stream downwards, so every one of these must work in both
+     * directions.  Real bug found with SimEarth's INSTALL.EXE: repz scasb
+     * stopped on the FIRST compare even though the byte matched AL. --- */
+    CASE("repz scasb DF=1 all match", c_repnz_scasb, ((it_regs){.ax = 0x00FF, .cx = 4, .di = IT_DATA_OFF + 3, .flags = 0x0400}), ((it_regs){.cx = 0, .di = IT_DATA_OFF - 1}), IT_C_CX | IT_C_DI, 1, m_ff_tail, 0, IT_SEG, IT_DATA_OFF, 4),
+    CASE("repz scasb DF=1 stops at B0", c_repnz_scasb, ((it_regs){.ax = 0x00FF, .cx = 4, .di = IT_DATA_OFF + 3, .flags = 0x0400}), ((it_regs){.cx = 3, .di = IT_DATA_OFF + 2}), IT_C_CX | IT_C_DI, 1, m_ff_b0, 0, IT_SEG, IT_DATA_OFF, 4),
+    CASE("repz scasb DF=0 stops at B0", c_repnz_scasb, ((it_regs){.ax = 0x00FF, .cx = 4, .di = IT_DATA_OFF, .flags = 0x0002}), ((it_regs){.cx = 1, .di = IT_DATA_OFF + 3}), IT_C_CX | IT_C_DI, 1, m_ff_b0_fwd, 0, IT_SEG, IT_DATA_OFF, 4),
+    /* --- signed 8-bit displacement.  Real bug: the 16-bit address decoder
+     * zero-extended disp8, so `mov [bp-4],ax` stored to [bp+0FCh] and every
+     * Microsoft/Turbo C stack frame quietly corrupted its caller. --- */
+    CASE("mov ax,[bp-8] (disp8 negative)", c_mov_bp_neg, ((it_regs){.bp = IT_DATA_OFF + 8}), ((it_regs){.ax = 0x5678}), IT_C_AX, 1, m_words, 0, IT_SEG, IT_DATA_OFF, 4),
+    CASE("mov [bp-4],ax (disp8 negative)", c_mov_bp_neg_w, ((it_regs){.ax = 0xAABB, .bp = IT_DATA_OFF + 4}), ((it_regs){}), IT_C_MEM, 1, m_words, m_mov_mr_expect, IT_SEG, IT_DATA_OFF, 4),
+    CASE("mov ax,[bx+si-2] (disp8 negative)", c_mov_bx_si_neg, ((it_regs){.bx = IT_DATA_OFF + 2, .si = 0}), ((it_regs){.ax = 0x5678}), IT_C_AX, 1, m_words, 0, IT_SEG, IT_DATA_OFF, 4),
+    CASE("mov ax,[bp+4] (disp8 positive)", c_mov_bp_pos, ((it_regs){.bp = IT_DATA_OFF - 4}), ((it_regs){.ax = 0x5678}), IT_C_AX, 1, m_words, 0, IT_SEG, IT_DATA_OFF, 4),
+
+    CASE("rep movsb DF=1 (4 bytes)", c_rep_movsb_df1, ((it_regs){.cx = 4, .si = IT_DATA_OFF + 3, .di = IT_DATA_OFF + 7, .flags = 0x0400}), ((it_regs){.cx = 0, .si = IT_DATA_OFF - 1, .di = IT_DATA_OFF + 3}), IT_C_CX | IT_C_SI | IT_C_DI, 1, m_df1_mov_src, m_df1_mov_dst, IT_SEG, IT_DATA_OFF, 8),
+    CASE("lodsb DF=1", c_lodsb_df1, ((it_regs){.si = IT_DATA_OFF + 2, .flags = 0x0400}), ((it_regs){.ax = 0x0033, .si = IT_DATA_OFF + 1}), IT_C_AX | IT_C_SI, 1, m_df1_mov_src, 0, IT_SEG, IT_DATA_OFF, 4),
+    CASE("rep stosb DF=1 (2 bytes)", c_rep_stosb_df1, ((it_regs){.ax = 0x00AA, .cx = 2, .di = IT_DATA_OFF + 3, .flags = 0x0400}), ((it_regs){.cx = 0, .di = IT_DATA_OFF + 1}), IT_C_CX | IT_C_DI, 1, m_ff_tail, 0, IT_SEG, IT_DATA_OFF, 4),
 
     /* --- control flow --- */
     CASE("jz taken", c_jz, ((it_regs){.flags = 0x0246}), ((it_regs){.ip = IT_CODE_OFF + 4}), IT_C_IP, 1, 0, 0, 0, 0, 0),

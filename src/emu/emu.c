@@ -30,6 +30,8 @@ static int hooked_int(int n);
 static u16 g_crtc_idx = 0;
 static u8  g_crtc_reg[32];
 static unsigned long g_io_ticks = 0;
+/* keyboard-controller state for the A20 gate (port 64h command D1h) */
+static int g_kbc_pending_out = 0;
 
 u16 emu_in_port(Emu *e, u16 port)
 {
@@ -47,6 +49,8 @@ u16 emu_in_port(Emu *e, u16 port)
         return v;
     }
     case 0x61: return 0x20;     /* timer gate / speaker off */
+    case 0x92: return (u16)(e->a20_on ? 0x02 : 0x00); /* system control port A */
+    case 0x64: return 0x14;     /* keyboard controller status: input buffer empty */
     default: return 0;
     }
 }
@@ -63,9 +67,54 @@ void emu_out_port(Emu *e, u16 port, u16 val)
         e->pal_phase = (u8)((e->pal_phase + 1) % 3);
         if (e->pal_phase == 0) e->pal_index = (u16)((e->pal_index + 1) & 0xFF);
         break;
+    case 0x92:      /* System Control Port A: bit 1 = A20 enable */
+        e->a20_on = (val & 0x02) ? 1 : 0;
+        break;
+    case 0x64:      /* keyboard controller command port */
+        if (val == 0xDD) e->a20_on = 1;
+        else if (val == 0xDF) e->a20_on = 0;
+        else if (val == 0xD1) g_kbc_pending_out = 1;
+        break;
+    case 0x60:      /* keyboard controller data port (output-port byte) */
+        if (g_kbc_pending_out) {
+            g_kbc_pending_out = 0;
+            e->a20_on = (val & 0x02) ? 1 : 0;
+        }
+        break;
     default: break;
     }
 }
+
+#ifdef UEFIDOS_HOST
+/* UEFIDOS_WATCH=<linear addr in hex>: log every byte write there together with
+ * the instruction that did it.  Invaluable when a program dies on a corrupted
+ * return address and you need the store that wrecked it. */
+static long g_watch_lo = -2, g_watch_hi = -2;
+static void watch_write(Emu *e, u32 a, u8 v)
+{
+    if (g_watch_lo == -2) {
+        const char *w = getenv("UEFIDOS_WATCH");
+        g_watch_lo = -1;
+        g_watch_hi = -1;
+        if (w && *w) {
+            unsigned long lo = 0, hi = 0;
+            if (sscanf(w, "%lx-%lx", &lo, &hi) == 2) { g_watch_lo = (long)lo; g_watch_hi = (long)hi; }
+            else if (sscanf(w, "%lx", &lo) == 1) { g_watch_lo = (long)lo; g_watch_hi = (long)lo; }
+        }
+    }
+    if (g_watch_lo < 0 || (long)a < g_watch_lo || (long)a > g_watch_hi) return;
+    FILE *f = fopen("build/watch.txt", "a");
+    if (!f) return;
+    fprintf(f, "write %02X at %05lX from %04X:%04X  AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X BP=%04X SP=%04X DS=%04X ES=%04X SS=%04X  bytes %02X %02X %02X\n",
+            v, (unsigned long)a, e->cs, e->ip, e->ax, e->bx, e->cx, e->dx,
+            e->si, e->di, e->bp, e->sp, e->ds, e->es, e->ss,
+            emu_rb(e, e->cs, e->ip), emu_rb(e, e->cs, (u16)(e->ip + 1)),
+            emu_rb(e, e->cs, (u16)(e->ip + 2)));
+    fclose(f);
+}
+#else
+#define watch_write(e, a, v) ((void)0)
+#endif
 
 #ifdef UEFIDOS_HOST
 static FILE *g_io_trace;
@@ -181,20 +230,60 @@ int emu_kbd_peek(Emu *e)
     return kbd_count(e) > 0;
 }
 
+#ifdef UEFIDOS_HOST
+static void dump_vram(Emu *e);   /* defined below: screen snapshot on a key wait */
+#endif
+
 int emu_kbd_get_full(Emu *e, int *scan, int *ascii)
 {
     long guard = 0;
 #ifdef UEFIDOS_HOST
     u32 start = plat_ticks_ms();    /* automated tests must not block forever */
+    static long wait_ms = -1;
+    static int guard_key = -2;
+    if (wait_ms < 0) {
+        const char *w = getenv("UEFIDOS_KBD_WAIT_MS");
+        wait_ms = w ? atol(w) : 3000;
+        if (wait_ms <= 0) wait_ms = 3000;
+    }
+    if (guard_key == -2) {
+        /* Which key an unscripted wait reports.  ESC aborts most installers, so
+         * menu-driven test runs set UEFIDOS_KBD_GUARD=ENTER and walk the
+         * default path instead. */
+        const char *g = getenv("UEFIDOS_KBD_GUARD");
+        guard_key = 0x1B;
+        if (g && *g) {
+            if (!strcmp(g, "ENTER") || !strcmp(g, "CR")) guard_key = 0x0D;
+            else if (!strcmp(g, "SPACE")) guard_key = 0x20;
+            else if (!strcmp(g, "TAB")) guard_key = 0x09;
+            else if (!strcmp(g, "ESC")) guard_key = 0x1B;
+            else if (!strcmp(g, "UP")) guard_key = 0x100 | 0x48;
+            else if (!strcmp(g, "DOWN")) guard_key = 0x100 | 0x50;
+            else if (!strcmp(g, "RIGHT")) guard_key = 0x100 | 0x4D;
+            else if (!strcmp(g, "LEFT")) guard_key = 0x100 | 0x4B;
+            else guard_key = atoi(g);
+        }
+    }
+#else
+    const u32 wait_ms = 3000u;
+    const int guard_key = 0x1B;
 #endif
     /* repaint before blocking: a program that has just finished drawing and
      * then waits for a key would otherwise leave a half-painted frame on
      * screen (the flush used to happen only from do_int / the step loop) */
     emu_video_flush(e);
+#ifdef UEFIDOS_HOST
+    dump_vram(e);               /* the screen is complete: this is what a user sees */
+#endif
     while (!kbd_pop(e, scan, ascii)) {
         emu_kbd_pump(e);
 #ifdef UEFIDOS_HOST
-        if (plat_ticks_ms() - start > 3000) { *scan = 0x01; *ascii = 27; return 1; }
+        if ((u32)(plat_ticks_ms() - start) > wait_ms) {
+            int k = guard_key;
+            if (k & 0x100) { *scan = k & 0xFF; *ascii = 0; }
+            else { *ascii = k & 0xFF; *scan = kbd_scan_of(*ascii); }
+            return 1;
+        }
 #else
         if (++guard > 120000) { *scan = 0x01; *ascii = 27; return 1; }   /* safety net */
 #endif
@@ -275,7 +364,14 @@ static u32 seg_resolve(Emu *e, u16 sel, u32 *limit)
 }
 
 /* Linear address of seg:off for an access of n bytes; enforces the segment
- * limit in protected mode (a violation latches e->pm_fault). */
+ * limit in protected mode (a violation latches e->pm_fault).
+ *
+ * In real mode the address wraps at 1 MB unless the A20 gate is enabled --
+ * exactly like a PC whose A20 line is still masked.  DOS-era loaders depend on
+ * this: EXEPACK's unpacker reads its compressed stream with DS:SI pairs such as
+ * FF69:FFF4, which only alias the intended 0F684 when the 20th address bit is
+ * dropped.  With a flat 16 MB real-mode memory model those reads return
+ * garbage and the stub reports "Packed file is corrupt". */
 static u32 lin_of(Emu *e, u16 sel, u32 off, u32 n)
 {
     u32 limit = 0xFFFFu;
@@ -285,7 +381,9 @@ static u32 lin_of(Emu *e, u16 sel, u32 off, u32 n)
         e->pm_fault_addr = base + off;
         return 0;
     }
-    return (base + off) & MEM_MASK;
+    u32 lin = base + off;
+    if (!(e->cr0 & CR0_PE) && !e->a20_on) lin &= 0xFFFFFu;
+    return lin & MEM_MASK;
 }
 
 u8 emu_rb(Emu *e, u16 seg, u16 off)
@@ -302,6 +400,7 @@ void emu_wb32(Emu *e, u16 seg, u32 off, u8 v)
 {
     u32 a = lin_of(e, seg, off, 1);
     if (e->pm_fault) return;
+    watch_write(e, a, v);
     e->mem[a] = v;
     if (e->gfx_w && a >= 0xA0000u && a < 0xA0000u + (u32)e->gfx_w * e->gfx_h) {
         g_video_dirty = 1;
@@ -356,6 +455,7 @@ void emu_wb(Emu *e, u16 seg, u16 off, u8 v)
 {
     u32 a = lin_of(e, seg, off, 1);
     if (e->pm_fault) return;
+    watch_write(e, a, v);
     e->mem[a] = v;
     if (e->gfx_w && a >= 0xA0000u && a < 0xA0000u + (u32)e->gfx_w * e->gfx_h) {
         g_video_dirty = 1;
@@ -883,7 +983,12 @@ static void decode_mrm(Emu *e, MRM *m, int seg_ov)
     case 6: if (m->mod == 0) off = fetch16(e); else { off = (u16)e->bp; use_ss = 1; } break;
     default: off = (u16)e->bx; break;
     }
-    if (m->mod == 1) off = (u16)(off + (u8)fetch8(e));
+    /* The 8-bit displacement is SIGNED (the 32-bit path below already does
+     * this): zero-extending it turns `mov [bp-4],ax` into `[bp+0FCh]`, which
+     * silently lands in the caller's frame.  Every compiler-generated stack
+     * frame (Microsoft C, Turbo C) uses negative displacements, so this one
+     * sign bit decided whether real DOS programs ran or corrupted themselves. */
+    if (m->mod == 1) off = (u16)(off + (u16)(s16)(s8)fetch8(e));
     else if (m->mod == 2) off = (u16)(off + fetch16(e));
     m->ea = off;
     if (m->seg_ov < 0) m->seg_ov = use_ss ? SEG_SS : SEG_DS;
@@ -1969,7 +2074,10 @@ static int step_8086(Emu *e)
             str_adv_di(e, sz, back);
             if (rep) {
                 str_cnt_dec(e);
-                if (rep_ne ? !getf(e, F_ZF) : getf(e, F_ZF)) break;
+                /* REPE/REPZ (F3) repeats while equal, REPNE (F2) while
+                 * different.  Getting this backwards makes every
+                 * `repne scasb` strlen stop on the first character. */
+                if (rep_ne ? getf(e, F_ZF) : !getf(e, F_ZF)) break;
             }
         }
         break;
@@ -1985,7 +2093,8 @@ static int step_8086(Emu *e)
             str_adv_di(e, sz, back);
             if (rep) {
                 str_cnt_dec(e);
-                if (rep_ne ? !getf(e, F_ZF) : getf(e, F_ZF)) break;
+                /* REPE/REPZ repeats while equal, REPNE while different. */
+                if (rep_ne ? getf(e, F_ZF) : !getf(e, F_ZF)) break;
             }
         }
         break;
@@ -2344,23 +2453,55 @@ static void install_ivt(Emu *e)
     emu_wb(e, MAGIC_SEG, STUB_OFF, 0xCF);
     emu_wb(e, MAGIC_SEG, (u16)(STUB_OFF + 1), 0x90);
     emu_wb(e, MAGIC_SEG, MAGIC_OFF, 0xCF);
-    /* BIOS data area */
+    /* ---- BIOS data area --------------------------------------------- */
+    /* Installers and graphics libraries sniff the adapter from these bytes
+     * before they draw anything: an all-zero BDA reads as "MDA, no colour
+     * BIOS", and SimEarth's INSTALL.EXE then refuses graphics and paints into
+     * the mono buffer at B000h.  Fill in what a POST leaves behind on a VGA
+     * machine, so mode 3 / 13h look like a real card. */
+    emu_ww(e, 0x40, 0x10, 0x0021);   /* equipment: floppy + 80x25 colour (bits 4-5 = 10) */
+    emu_wb(e, 0x40, 0x12, 0x00);     /* equipment byte 2: no mouse/joystick */
     emu_ww(e, 0x40, 0x13, 640);      /* KB of conventional memory */
-    emu_wb(e, 0x40, 0x49, 3);        /* video mode */
+    emu_wb(e, 0x40, 0x14, 0x00);     /* no serial/parallel ports (keeps POST simple) */
+    emu_wb(e, 0x40, 0x49, 3);        /* video mode: 3 = 80x25 colour text */
     emu_ww(e, 0x40, 0x4A, 80);       /* columns */
-    emu_ww(e, 0x40, 0x84, 24);       /* rows-1 */
+    emu_ww(e, 0x40, 0x4C, 4096);     /* bytes per video page (80*25*2 rounded) */
+    emu_ww(e, 0x40, 0x4E, 0);        /* cursor offset in the current page */
+    emu_ww(e, 0x40, 0x50, 0);        /* cursor position page 0 (row 0, col 0) */
+    emu_wb(e, 0x40, 0x62, 0);        /* active display page */
+    emu_ww(e, 0x40, 0x63, 0x03D4);   /* CRTC base port: colour (mono would be 3B4) */
+    emu_wb(e, 0x40, 0x65, 0x29);     /* mode control register shadow */
+    emu_wb(e, 0x40, 0x66, 0x30);     /* CGA palette shadow */
+    emu_ww(e, 0x40, 0x84, 24);       /* rows on screen - 1 */
+    emu_ww(e, 0x40, 0x85, 16);       /* character height (VGA 8x16 font) */
+    emu_ww(e, 0x40, 0x87, 0x0060);   /* video flags: EGA present, 256K, VGA */
     emu_ww(e, 0x40, 0x1A, 0);        /* keyboard buffer head */
     emu_ww(e, 0x40, 0x1C, 0);        /* keyboard buffer tail */
 }
 
+static void arena_setup(Emu *e, u16 psp_seg, u32 image_bytes);
+
+/* PSP:0005h is the "CP/M entry point": a far call to it ends the program.
+ * Microsoft C's runtime actually CALLs it on exit (it copies the five bytes
+ * into its own code), so a garbage pointer there turns every normal exit into
+ * a jump into nowhere.  Point it at a tiny terminate stub in the reserved ROM
+ * window and fill in the rest of the PSP the way DOS does. */
+#define PSP_CALL_OFF 0xFFD0u
+
 static void build_psp(Emu *e, u16 psp_seg, const char *argline)
 {
     u16 s = psp_seg;
-    emu_ww(e, s, 0x00, 0x20CD);     /* INT 20h */
-    emu_ww(e, s, 0x02, 0xA000);     /* top of memory */
-    emu_wb(e, s, 0x05, 0x9A);       /* far call to DOS */
-    emu_ww(e, s, 0x06, 0xF01E);     /* ??? */
-    /* termination / ctrl-c / critical-error vectors from IVT */
+    /* terminate stub: INT 20h (the magic-vector hook ends the program) */
+    emu_wb(e, MAGIC_SEG, PSP_CALL_OFF, 0xCD);
+    emu_wb(e, MAGIC_SEG, (u16)(PSP_CALL_OFF + 1), 0x20);
+
+    emu_ww(e, s, 0x00, 0x20CD);              /* INT 20h */
+    emu_ww(e, s, 0x02, g_dos.mem_top ? g_dos.mem_top : 0xA000);  /* top of memory */
+    emu_wb(e, s, 0x04, 0x00);                /* reserved */
+    emu_wb(e, s, 0x05, 0x9A);                /* CALL FAR ...  CP/M entry */
+    emu_ww(e, s, 0x06, PSP_CALL_OFF);
+    emu_ww(e, s, 0x08, MAGIC_SEG);
+    /* termination / ctrl-break / critical-error handlers from the live IVT */
     for (int i = 0; i < 3; i++) {
         u8 n = (u8)(0x22 + i);
         u16 off = emu_rw(e, 0, (u16)(n * 4));
@@ -2368,6 +2509,9 @@ static void build_psp(Emu *e, u16 psp_seg, const char *argline)
         emu_ww(e, s, (u16)(0x0A + i * 4), off);
         emu_ww(e, s, (u16)(0x0C + i * 4), seg);
     }
+    emu_ww(e, s, 0x16, e->psp_seg ? e->psp_seg : s); /* parent PSP */
+    /* job file table: 20 handles, all "not open" */
+    for (int i = 0; i < 20; i++) emu_wb(e, s, (u16)(0x18 + i), 0xFF);
     /* environment */
     u16 env_seg = 0x0B00;
     u32 env_off = (u32)env_seg * 16;
@@ -2377,6 +2521,15 @@ static void build_psp(Emu *e, u16 psp_seg, const char *argline)
     e->mem[(env_off + k++) & MEM_MASK] = 0;
     e->mem[(env_off + k++) & MEM_MASK] = 0;
     emu_ww(e, s, 0x2C, env_seg);
+    emu_ww(e, s, 0x2E, 0xFFFE);              /* SS:SP before the first CALL 5 */
+    emu_ww(e, s, 0x30, s);
+    emu_ww(e, s, 0x32, 20);                  /* size of the job file table */
+    emu_ww(e, s, 0x34, 0x18);                /* -> JFT */
+    emu_ww(e, s, 0x36, s);
+    emu_ww(e, s, 0x38, e->psp_seg ? e->psp_seg : s); /* previous PSP */
+    /* two default FCBs: drive byte 0 then 11 blanks means "empty" */
+    emu_wb(e, s, 0x5C, 0x00);
+    emu_wb(e, s, 0x6C, 0x00);
     /* command tail */
     u32 len = 0;
     if (argline && *argline) {
@@ -2403,6 +2556,7 @@ int emu_init(Emu *e)
     e->eflags = 0x0202;
     e->video_mode = 3;
     e->cr0 = 0;
+    e->a20_on = 0;              /* gate masked: real-mode addresses wrap at 1 MB */
     seg_cache_sync(e);          /* real-mode caches: base = sel<<4, limit 64K */
     install_ivt(e);
     return 0;
@@ -2433,6 +2587,7 @@ static int load_com_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
     e->psp_seg = psp_seg;
     g_dos.dta_seg = psp_seg;        /* DOS default DTA is PSP:0080h */
     g_dos.dta_off = 0x80;
+    arena_setup(e, psp_seg, 0x100u + size);
     return 0;
 }
 
@@ -2449,7 +2604,11 @@ static int load_exe_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
     u32 hdr = (u32)e_cparhdr * 16u;
     if (hdr == 0 || hdr >= size) return 1;
     u32 modsize = size - hdr;
-    if (modsize > 0xFF00u) return 1;
+    /* An EXE image may span many segments -- it just has to fit in the memory
+     * block DOS gave the program.  (The old 64 KB cap here rejected every
+     * "large" DOS executable, e.g. SimEarth's 125 KB SIMEARTH.EXE.) */
+    u32 modparas = (modsize + 15u) / 16u;
+    if ((u32)psp_seg + 0x10u + modparas + 0x10u >= 0xA000u) return 1;
     build_psp(e, psp_seg, args);
     u16 load_seg = (u16)(psp_seg + 0x10);
     u32 base = (u32)load_seg * 16;
@@ -2477,12 +2636,44 @@ static int load_exe_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
     e->psp_seg = psp_seg;
     g_dos.dta_seg = psp_seg;        /* DOS default DTA is PSP:0080h */
     g_dos.dta_off = 0x80;
+    arena_setup(e, psp_seg, modsize);
     return 0;
 }
 
 static int is_mz(const u8 *img, u32 size)
 {
     return size >= 2 && img[0] == 'M' && img[1] == 'Z';
+}
+
+/* Conventional-memory ceiling seen by DOS programs (segment A000h = 640 KB).
+ * Everything a program allocates lives below it, like on a real PC. */
+#define DOS_MEM_TOP 0xA000u
+
+/* DOS hands a freshly loaded program ONE block covering everything from its
+ * PSP to the top of conventional memory; the program shrinks it with INT 21h
+ * AH=4Ah and then allocates from the tail with AH=48h.  Modelling it that way
+ * (instead of "free memory starts after the image") matters for packed
+ * executables: an EXEPACK stub unpacks itself upward into memory it expects
+ * the loader to have allocated, so the block has to be as large as possible.
+ *
+ * The MCB for the program's own block sits one paragraph below the PSP, which
+ * is where DOS puts it, and the PSP segment is therefore also the segment a
+ * program passes to AH=4Ah in ES. */
+static void arena_setup(Emu *e, u16 psp_seg, u32 image_bytes)
+{
+    (void)image_bytes;                       /* the block is full conventional RAM */
+    u16 top = (u16)DOS_MEM_TOP;
+    if (psp_seg < 2 || (u32)psp_seg + 2u >= (u32)top) {
+        g_dos.mem_base = 0;
+        g_dos.mem_top = top;
+        return;
+    }
+    u16 mcb = (u16)(psp_seg - 1);
+    g_dos.mem_base = mcb;
+    g_dos.mem_top = top;
+    emu_wb(e, mcb, 0, 'Z');                  /* single block, last in chain */
+    emu_ww(e, mcb, 1, psp_seg);              /* owned by this program */
+    emu_ww(e, mcb, 3, (u16)((u32)top - (u32)psp_seg - 1u));
 }
 
 static int load_program_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char *args)
@@ -2497,7 +2688,7 @@ static int load_program_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const c
 /* ring buffer of the most recent steps, dumped when a program hits the
  * instruction limit so a spin loop can be located without a debugger */
 typedef struct { u16 cs, ip, ax, bx, cx, dx, si, di, bp, sp, ds, es, ss; } StepRec;
-#define RING_N 64
+#define RING_N 4096
 static StepRec g_ring[RING_N];
 static unsigned g_ring_pos, g_ring_cnt;
 static void ring_note(Emu *e)
@@ -2542,6 +2733,32 @@ static void trace_regs(Emu *e, u64 steps)
 }
 #else
 static void trace_regs(Emu *e, u64 steps) { (void)e; (void)steps; }
+#endif
+
+#ifdef UEFIDOS_HOST
+/* A program that starts executing out of segment 0000 is running garbage --
+ * the interrupt vector table is data, not code.  In practice this means a
+ * corrupted far pointer or stack (a real emulator bug far more often than a
+ * program bug), so trap it and write the last 64 steps down: the ring shows
+ * the call that went wrong. */
+static void cs_trap(Emu *e, u64 steps)
+{
+    FILE *f = fopen("build/cs_trap.txt", "a");
+    if (!f) return;
+    fprintf(f, "TRAP: execution entered segment %04X at step %llu\n", e->cs, (unsigned long long)steps);
+    fprintf(f, "CS:IP=%04X:%04X AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X BP=%04X SP=%04X DS=%04X ES=%04X SS=%04X FL=%04X\n",
+            e->cs, e->ip, e->ax, e->bx, e->cx, e->dx, e->si, e->di, e->bp, e->sp, e->ds, e->es, e->ss, e->flags);
+    fprintf(f, "stack around SS:SP (SS=%04X SP=%04X): ", e->ss, e->sp);
+    for (int i = -4; i < 16; i++) {
+        u16 off = (u16)(e->sp + i * 2);
+        fprintf(f, " %04X:%04X=%04X", e->ss, off, emu_rw(e, e->ss, off));
+    }
+    fprintf(f, "\n");
+    ring_dump(e, f);
+    fclose(f);
+}
+#else
+static void cs_trap(Emu *e, u64 steps) { (void)e; (void)steps; }
 #endif
 
 #ifdef UEFIDOS_HOST
@@ -2643,7 +2860,14 @@ int emu_run(Emu *e)
         step(e);
         steps++;
         total++;
-        if (g_video_dirty && (steps & 0x3FFFFull) == 0) video_flush(e);
+        if (!(e->cr0 & CR0_PE) && (e->cs < 0x10 || (e->cs >= 0xA000 && e->cs != 0xF000))) {
+            cs_trap(e, total);
+            e->halted = 1;
+            e->exit_code = 0xFE;
+            break;
+        }
+        if (g_video_dirty && (steps & 0x3FFFFull) == 0) { video_flush(e); }
+        if ((total & 0x3FFFFull) == 0) dump_vram(e);   /* steps resets on keys */
         if ((steps & 0x3FFull) == 0) emu_kbd_pump(e);
         /* an interactive program that is receiving keys is alive, not stuck:
          * refill its instruction budget so it can never be killed while the
@@ -2825,6 +3049,7 @@ int emu_exec_program(Emu *e, const char *prog, const char *args)
     Emu saved;
     memcpy(&saved, e, sizeof(Emu));
     u16 s_dta_seg = g_dos.dta_seg, s_dta_off = g_dos.dta_off;
+    u16 s_mem_base = g_dos.mem_base, s_mem_top = g_dos.mem_top;
     dos_handle s_handles[DOS_HANDLE_MAX];
     memcpy(s_handles, g_dos.handles, sizeof(s_handles));
 
@@ -2845,6 +3070,8 @@ int emu_exec_program(Emu *e, const char *prog, const char *args)
     memcpy(e, &saved, sizeof(Emu));
     g_dos.dta_seg = s_dta_seg;
     g_dos.dta_off = s_dta_off;
+    g_dos.mem_base = s_mem_base;
+    g_dos.mem_top = s_mem_top;
     memcpy(g_dos.handles, s_handles, sizeof(s_handles));
     g_exec_depth--;
     return code;

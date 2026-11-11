@@ -3,7 +3,7 @@
 #define UEFIDOS_CONFIG_H
 
 #define UEFIDOS_NAME       "UEFI-DOS"
-#define UEFIDOS_VERSION    "0.9.0"
+#define UEFIDOS_VERSION    "0.10.0"
 /* DOS API level.  The kernel implements MS-DOS 4.0 semantics (SHARE modes,
  * FCB calls, FILES=, extended error reporting, AH=6Ch extended open), and
  * INT 21h AH=30h now reports that level: AL=major, AH=minor -> AX=0x0004
@@ -22,10 +22,14 @@
 /* conventional memory emulated for 16-bit programs */
 #define EMU_RAM_SIZE (16u * 1024u * 1024u) /* 16 MiB: 1 MiB real mode + room for 32-bit clients */
 
-/* DOS 4.0/5.0 default is FILES=8 (handles 0..4 are the predefined devices);
- * CONFIG.SYS FILES= can raise the effective limit up to this ceiling. */
+/* DOS 4.0/5.0 default is FILES=8 (handles 0..4 are the predefined devices), but
+ * that leaves a program only three file handles and ambitious 1990s software
+ * dies on it: SimEarth's SIMEARTH.EXE reports "Index file missing" because it
+ * cannot open its .NDX next to SHARED.DAT and its overlays.  Default to 20,
+ * which is what those programs' manuals told users to put in CONFIG.SYS;
+ * CONFIG.SYS FILES= can still lower or raise it up to this ceiling. */
 #define DOS_HANDLE_MAX 255
-#define DOS_FILES_DEFAULT 8
+#define DOS_FILES_DEFAULT 20
 #define DOS_MAX_DRIVES  4
 
 #endif /* UEFIDOS_CONFIG_H */

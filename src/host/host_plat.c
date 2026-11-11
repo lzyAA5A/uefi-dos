@@ -76,6 +76,7 @@ static unsigned long long g_kb_polls = 0;
 static unsigned long long g_kb_next_poll = 0;
 static unsigned long long g_kb_max_polls = 100000;
 static int  g_kb_inited = 0;
+static int  g_kb_guard = 27;    /* key returned once the script runs out */
 
 static int key_token(const char *t)
 {
@@ -148,6 +149,17 @@ static void kb_script_init(void)
     }
     m = getenv("UEFIDOS_KBD_MAX_POLLS");
     if (m) g_kb_max_polls = strtoull(m, 0, 10);
+    /* UEFIDOS_KBD_GUARD: the key handed out when the script is exhausted.
+     * Menu-driven installers treat ESC as "abort", so tests that only want to
+     * walk the default path set it to ENTER. */
+    {
+        const char *g = getenv("UEFIDOS_KBD_GUARD");
+        g_kb_guard = 27;
+        if (g && *g) {
+            int k = key_token(g);
+            if (k >= 0) g_kb_guard = k;
+        }
+    }
     g_kb_next_poll = 5000;      /* let the program draw its first frame */
     g_kb_next_ms = GetTickCount64() + 400;
 }
@@ -165,7 +177,7 @@ int plat_kbd_poll(void)
         g_kb_next_ms = GetTickCount64() + 250;
         return k;
     }
-    if (g_kb_idx >= g_kb_n && g_kb_polls > g_kb_max_polls) return 27;   /* ESC */
+    if (g_kb_idx >= g_kb_n && g_kb_polls > g_kb_max_polls) return g_kb_guard;
     if (_kbhit()) {
         int c = _getch();
         if (c == 0 || c == 0xE0) {

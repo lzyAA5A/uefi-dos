@@ -98,10 +98,20 @@ class FatImage:
         v = struct.unpack_from('<H', self.data, off)[0]
         return (v >> 4) if (cluster & 1) else (v & 0x0FFF)
 
+    def eoc(self):
+        """First end-of-chain marker for this FAT width."""
+        if self.fs_type == 32:
+            return 0x0FFFFFF8
+        if self.fs_type == 16:
+            return 0xFFF8
+        return 0xFF8
+
     def chain(self, start, max_clusters=4096):
+        # Cluster numbering starts at 2, so the test must be `2 <= c`:
+        # the first file on a freshly formatted volume lives at cluster 2.
         c = self.clamp(start)
         out = []
-        while 3 <= c < 0x0FFFFFF0 and len(out) < max_clusters:
+        while 2 <= c < self.eoc() and len(out) < max_clusters:
             out.append(c)
             nc = self.fat_get(c)
             if nc == c:

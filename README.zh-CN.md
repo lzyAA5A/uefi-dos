@@ -12,16 +12,19 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 0.9.0 —— 25 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
-的 x86_64 与 IA32 实机启动）。0.9.0 把**报告的 DOS 版本从 2.11 提升到 4.0**，并补齐
-DOS 4.0 实模式里可移植工具真正会去探测的那部分调用：`AH=32h` DPB、`AH=52h`
-list of lists、`AH=59h` 扩展错误、`AH=5Ah` 唯一临时文件、`AH=60h` truename、
-`AH=63h` DBCS 探测、`AH=68h` commit 与 `AH=6Ch` 扩展打开 —— 全部由
-`DOS4TEST.COM` 一个 16 位程序里的 30 项断言验证。
+当前版本 0.10.0 —— 25 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+的 x86_64 与 IA32 实机启动）。0.10.0 是**真软件版本**：第一次把一款 1993 年的商业
+DOS 游戏真正跑起来 —— [SimEarth 1.5](docs/simearth.md)：Maxis 的安装程序走完五屏、
+解开 overlay、写出 `SIMEARTH.CFG`，随后游戏以 320×200×256 画出地形图与控制面板。
+为此修掉了这类程序对 PC 的八个假设（详见 `docs/simearth.md`）：16 位代码用**负的
+8 位位移**访问栈帧、实模式地址在 **1 MB 处回绕**（A20 门）、**BIOS 数据区**必须描述
+彩色显示卡、`INT 21h AH=48h/49h/4Ah` 必须真的能分配内存、`PSP:0005h` 必须指向终止
+桩、MZ 镜像**可以大于 64 KB**、`AH=47h` 返回**不带盘符**的当前目录、默认 `FILES=`
+要给出多于三个可用句柄。
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-0.9.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.9.0.zip)
+[**下载 `UEFI-DOS-0.10.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.10.0.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：

@@ -30,9 +30,29 @@ static void trace_call(Emu *e, int intno)
     if (!g_trace_enabled || !g_trace) return;
     g_trace_n++;
     if (g_trace_n <= 300 || (g_trace_n % 1000) == 0) {
-        fprintf(g_trace, "%7lu INT%02X AH=%02X AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X ES=%04X\n",
+        fprintf(g_trace, "%7lu INT%02X AH=%02X AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X ES=%04X",
                 g_trace_n, intno, (unsigned)(e->ax >> 8), e->ax, e->bx, e->cx, e->dx,
                 e->si, e->di, e->es);
+        /* Path-taking calls: printing the ASCIIZ string turns "DOS error 2"
+         * into "it wanted this file, from this directory". */
+        if (intno == 0x21) {
+            u8 ah = (u8)(e->ax >> 8);
+            int has_path = (ah == 0x39 || ah == 0x3A || ah == 0x3B || ah == 0x3C ||
+                            ah == 0x3D || ah == 0x41 || ah == 0x43 || ah == 0x4B ||
+                            ah == 0x4E || ah == 0x56 || ah == 0x5B || ah == 0x60);
+            if (has_path) {
+                char buf[80];
+                u16 n = 0;
+                while (n < sizeof(buf) - 1) {
+                    u8 ch = emu_rb(e, e->ds, (u16)(e->dx + n));
+                    if (!ch) break;
+                    buf[n++] = (char)(ch >= 32 && ch < 127 ? ch : '?');
+                }
+                buf[n] = 0;
+                fprintf(g_trace, "  \"%s\"", buf);
+            }
+        }
+        fprintf(g_trace, "\n");
         fflush(g_trace);
     }
 }
@@ -66,8 +86,21 @@ static void set_err(Emu *e, u8 code)
     e->ax = code;
     g_dos.last_error = code;
     g_dos.last_error_valid = 1;
+#ifdef UEFIDOS_HOST
+    if (g_trace_enabled == 1 && g_trace) { fprintf(g_trace, "        -> DOS error %u\n", code); fflush(g_trace); }
+#endif
 }
-static void set_ok(Emu *e) { e->flags = (u16)(e->flags & ~F_CF); }
+static void set_ok(Emu *e)
+{
+    e->flags = (u16)(e->flags & ~F_CF);
+#ifdef UEFIDOS_HOST
+    /* a failed call right after the trace line is what a compatibility run
+     * actually needs to see: "AH=3D ... SIM.OVL" + "-> DOS error 2" */
+    if (g_trace_enabled == 1 && g_trace) { fprintf(g_trace, "        -> ok\n"); fflush(g_trace); }
+#else
+    (void)e;
+#endif
+}
 
 /* Day of week for a Gregorian date: 0 = Sunday .. 6 = Saturday
    (Sakamoto's method, which is valid for any y >= 1). */
@@ -101,9 +134,138 @@ static u16 dpb16(u32 v)
     return (u16)(v > 0xFFFFu ? 0xFFFFu : v);
 }
 
-/* Write the DPB of one mounted drive at F000:(DOS_DPB_OFF + slot*LEN).
- * All sector fields are relative to the start of the volume, as DOS defines
- * them, so subtract the partition LBA. */
+/* ------------------------------------------------------------------ */
+/* DOS memory arena (INT 21h AH=48h/49h/4Ah/58h)                       */
+/* ------------------------------------------------------------------ */
+/* Memory control blocks live in the emulated RAM itself, so tools that walk
+ * the chain (AH=52h hands them the first one) see a normal DOS arena:
+ *   +0 'M' (more blocks) or 'Z' (last), +1 owner PSP (0 = free),
+ *   +3 size in paragraphs, data starts at mcb+1. */
+#define MCB_MORE 'M'
+#define MCB_LAST 'Z'
+
+static u16 mcb_next_seg(Emu *e, u16 seg)
+{
+    if (emu_rb(e, seg, 0) == (u8)MCB_LAST) return 0;
+    return (u16)(seg + 1 + emu_rw(e, seg, 3));
+}
+
+/* Walk the arena; returns the MCB segment of the first block that satisfies
+ * `need` paragraphs (0 = none).  max_free gets the largest free block. */
+static u16 arena_find(Emu *e, u16 need, u16 *max_free)
+{
+    u16 seg = g_dos.mem_base;
+    u16 found = 0;
+    if (max_free) *max_free = 0;
+    if (!seg) return 0;
+    for (int guard = 0; guard < 256 && seg; guard++) {
+        u8 tag = emu_rb(e, seg, 0);
+        u16 owner = emu_rw(e, seg, 1);
+        u16 size = emu_rw(e, seg, 3);
+        if (owner == 0) {
+            if (!found && size >= need) found = seg;
+            if (max_free && size > *max_free) *max_free = size;
+        }
+        if (tag == (u8)MCB_LAST) break;
+        u16 nx = (u16)(seg + 1 + size);
+        if (nx <= seg) break;
+        seg = nx;
+    }
+    return found;
+}
+
+static int arena_alloc(Emu *e, u16 need, u16 *out_ds, u16 *out_max)
+{
+    u16 max_free = 0;
+    if (need == 0) need = 1;
+    u16 blk = arena_find(e, need, &max_free);
+    if (out_max) *out_max = max_free;
+    if (!blk) return 0;
+    u16 size = emu_rw(e, blk, 3);
+    u8 tag = emu_rb(e, blk, 0);
+    if (size > need) {                        /* split: keep a free tail */
+        u16 rest = (u16)(blk + 1 + need);
+        emu_wb(e, blk, 0, (u8)MCB_MORE);
+        emu_wb(e, rest, 0, tag);
+        emu_ww(e, rest, 1, 0);
+        emu_ww(e, rest, 3, (u16)(size - need - 1));
+        emu_ww(e, blk, 3, need);
+    }
+    emu_ww(e, blk, 1, e->psp_seg);
+    *out_ds = (u16)(blk + 1);
+    return 1;
+}
+
+static int arena_free(Emu *e, u16 ds)
+{
+    u16 seg = g_dos.mem_base;
+    if (!seg) return 0;
+    for (int guard = 0; guard < 256 && seg; guard++) {
+        u16 size = emu_rw(e, seg, 3);
+        if ((u16)(seg + 1) == ds) {
+            emu_ww(e, seg, 1, 0);
+            /* merge with following blocks while they are free */
+            while (emu_rb(e, seg, 0) != (u8)MCB_LAST) {
+                u16 nx = (u16)(seg + 1 + size);
+                if (nx <= seg) break;
+                if (emu_rw(e, nx, 1) != 0) break;
+                u8 ntag = emu_rb(e, nx, 0);
+                u16 nsize = emu_rw(e, nx, 3);
+                emu_wb(e, seg, 0, ntag);
+                size = (u16)(size + 1 + nsize);
+                emu_ww(e, seg, 3, size);
+            }
+            return 1;
+        }
+        seg = mcb_next_seg(e, seg);
+    }
+    return 0;
+}
+
+/* AH=4Ah -- resize a memory block.  ES:0000 is the block's data segment; a
+ * program resizes its own block with ES = PSP (the MCB sits at PSP-1), which
+ * is how every DOS startup shrinks the block DOS gave it and then allocates
+ * the tail.  Growing absorbs following free blocks; shrinking splits them off
+ * as a new free block. */
+static int arena_resize(Emu *e, u16 ds, u16 want, u16 *out_max)
+{
+    u16 seg = g_dos.mem_base;
+    for (int guard = 0; guard < 256 && seg; guard++) {
+        u16 size = emu_rw(e, seg, 3);
+        if ((u16)(seg + 1) == ds) {
+            u16 owner = emu_rw(e, seg, 1);
+            if (owner != e->psp_seg && owner != 0) { if (out_max) *out_max = 0; return 0; }
+            /* how large can this block become?  absorb free neighbours */
+            u16 total = size, probe = seg;
+            while (emu_rb(e, probe, 0) != (u8)MCB_LAST) {
+                u16 nx = (u16)(probe + 1 + emu_rw(e, probe, 3));
+                if (nx <= probe) break;
+                if (emu_rw(e, nx, 1) != 0) break;
+                total = (u16)(total + 1 + emu_rw(e, nx, 3));
+                probe = nx;
+            }
+            if (want > total) { if (out_max) *out_max = total; return 0; }
+            u8 last_tag = emu_rb(e, probe, 0);
+            if (want == total) {              /* take the whole run */
+                emu_wb(e, seg, 0, last_tag);
+                emu_ww(e, seg, 3, want);
+            } else {                          /* split: free tail block */
+                u16 rest = (u16)(seg + 1 + want);
+                emu_wb(e, seg, 0, (u8)MCB_MORE);
+                emu_ww(e, seg, 3, want);
+                emu_wb(e, rest, 0, last_tag);
+                emu_ww(e, rest, 1, 0);
+                emu_ww(e, rest, 3, (u16)(total - want - 1));
+            }
+            if (out_max) *out_max = want;
+            return 1;
+        }
+        seg = mcb_next_seg(e, seg);
+    }
+    if (out_max) *out_max = 0;
+    return 0;
+}
+
 static u16 dpb_write(Emu *e, int slot, int drive, u16 next)
 {
     fat_vol *v = &g_dos.drives[drive].vol;
@@ -145,8 +307,6 @@ static u16 dpb_chain(Emu *e)
     return head;
 }
 
-/* Extended error -> (class, suggested action, locus) mapping.  The numbers are
- * the ones DOS 3.0+ documents for the same base errors. */
 static void ext_error(u16 code, u8 *cls, u8 *act, u8 *locus)
 {
     switch (code) {
@@ -632,20 +792,51 @@ void int21_handler(Emu *e)
         return;
     }
     case 0x47: {
-        char cwd[DOS_MAX_PATH];
-        dos_get_cwd(cwd, sizeof(cwd));
+        /* AH=47h: current directory WITHOUT the drive letter, with a leading
+         * backslash, and an empty string in the root.  Programs concatenate
+         * "X:" in front of it, so handing back "C:\SIMEARTH" made SimEarth ask
+         * for "C:\C:\SIMEARTH\GR.OVL" and then give up on its overlays. */
+        int d = dos_current_drive();
+        const char *cwd = (d >= 0 && d < DOS_MAX_DRIVES) ? g_dos.drives[d].cwd : "";
         int n = 0;
-        while (cwd[n]) n++;
-        int subdirs = n > 2;
-        for (int i = 0; i <= n; i++) emu_wb(e, e->ds, (u16)(e->si + i), (u8)cwd[i]);
-        e->ax = (u16)(subdirs ? 0x0100 : 0x0000);
+        if (cwd[0]) {
+            emu_wb(e, e->ds, (u16)(e->si + n), (u8)'\\');
+            n++;
+            while (cwd[n - 1] && n < DOS_MAX_PATH - 1) {
+                emu_wb(e, e->ds, (u16)(e->si + n), (u8)cwd[n - 1]);
+                n++;
+            }
+        }
+        emu_wb(e, e->ds, (u16)(e->si + n), 0);
+        e->ax = (u16)(cwd[0] ? 0x0100 : 0x0000);   /* bit 8: not the root */
         set_ok(e);
         return;
     }
-    case 0x48: case 0x49: case 0x4A:
-        if (ah == 0x48) { set_err(e, 8); }       /* no extra memory */
-        else { set_ok(e); }
+    case 0x48: {                                 /* allocate memory */
+        u16 ds = 0, max_free = 0;
+        if (!arena_alloc(e, e->bx, &ds, &max_free)) {
+            e->bx = max_free;
+            set_err(e, 8);                       /* insufficient memory */
+            return;
+        }
+        e->ax = ds;
+        set_ok(e);
         return;
+    }
+    case 0x49:                                   /* free memory block */
+        if (!arena_free(e, e->es)) { set_err(e, 9); return; }
+        set_ok(e);
+        return;
+    case 0x4A: {                                 /* resize memory block */
+        u16 max_size = 0;
+        if (!arena_resize(e, e->es, e->bx, &max_size)) {
+            e->bx = max_size;
+            set_err(e, 8);
+            return;
+        }
+        set_ok(e);
+        return;
+    }
     case 0x4B: {                                 /* EXEC: load & execute child */
         char prog[DOS_MAX_PATH];
         char args[130];
@@ -719,7 +910,7 @@ void int21_handler(Emu *e)
         e->dx = 0;
         return;
     case 0x58:
-        e->ax = 0;
+        e->ax = 0;                               /* allocation strategy: first fit, low */
         set_ok(e);
         return;
     case 0x5B: {
@@ -762,7 +953,7 @@ void int21_handler(Emu *e)
         u16 lol = DOS_LOL_OFF;
         u16 dpbs = dpb_chain(e);
         for (int i = 0; i < 0x40; i++) emu_wb(e, MAGIC_SEG, (u16)(lol + i), 0);
-        emu_ww(e, MAGIC_SEG, (u16)(lol + 0x00), 0);       /* first MCB */
+        emu_ww(e, MAGIC_SEG, (u16)(lol + 0x00), g_dos.mem_base); /* first MCB */
         emu_ww(e, MAGIC_SEG, (u16)(lol + 0x02), dpbs);    /* first DPB */
         emu_ww(e, MAGIC_SEG, (u16)(lol + 0x04), 0);       /* first SFT */
         e->es = MAGIC_SEG;

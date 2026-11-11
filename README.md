@@ -13,17 +13,20 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version 0.9.0 — 25 of 25 automated checks pass on the Windows host harness and
-on QEMU + OVMF (x86_64 and IA32). 0.9.0 **raises the reported DOS level from
-2.11 to 4.0** and adds the rest of the DOS 4.0 real-mode surface that portable
-tools probe: `AH=32h` DPB, `AH=52h` list of lists, `AH=59h` extended error,
-`AH=5Ah` unique temporary files, `AH=60h` truename, `AH=63h` DBCS probe,
-`AH=68h` commit and `AH=6Ch` extended open, all asserted by
-`DOS4TEST.COM` (30 checks in one 16-bit program).
+Version 0.10.0 — 25 of 25 automated checks pass on the Windows host harness and
+on QEMU + OVMF (x86_64 and IA32). 0.10.0 is a **real-software release**: it is
+the first version that installs and runs a commercial 1993 DOS game,
+[SimEarth 1.5](docs/simearth.md) — the Maxis installer completes, and the game
+paints its 320×200×256 terrain map. Getting there meant fixing eight separate
+assumptions such a program makes about a PC: 16-bit code with negative stack
+displacements, real-mode address wraparound at 1 MB (the A20 gate), a populated
+BIOS data area, a DOS memory arena (`AH=48h/49h/4Ah`), a correct PSP, EXE images
+larger than 64 KB, `AH=47h` returning a drive-less path, and a usable default
+`FILES=`. Details and reproduction steps: [`docs/simearth.md`](docs/simearth.md).
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-0.9.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.9.0.zip)
+[**Download `UEFI-DOS-0.10.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.10.0.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -480,6 +483,31 @@ buffer at `0040:001A/001C/001E`, non-callable interrupt vectors, and the missing
 `INT 1Ah` timer. Those programs are third-party work and are not part of this
 repository.
 
+### SimEarth 1.5 (1993): the milestone case
+
+`docs/simearth.md` is a step-by-step account of running a commercial 1993 game:
+the Maxis `INSTALL.EXE` completes its five screens, unpacks the overlays and
+writes `SIMEARTH.CFG`, and `SIMEARTH.EXE` then runs in 320×200×256 with its
+terrain map and control panels drawn. It is worth reading as a list of what a
+program of that era assumes about the machine, because each assumption was a bug
+here until it was tested:
+
+* 16-bit code addresses its stack frame with **negative 8-bit displacements**
+  (`mov [bp-4],ax`); zero-extending that displacement silently redirected every
+  local variable into the caller's frame.
+* real-mode addresses **wrap at 1 MB** while the A20 gate is masked — EXEPACK
+  loaders read their compressed stream through aliases like `FF69:FFF4`.
+* the **BIOS data area** must describe a colour adapter (`40:10h` equipment
+  word, `40:63h` CRTC port, `40:85h` character height), or installers decide the
+  machine is a mono MDA and refuse to draw.
+* `INT 21h AH=48h/49h/4Ah` must really allocate: Microsoft C's startup allocates
+  a copy of the environment and aborts with `R6009` otherwise.
+* `PSP:0005h` (the CP/M entry point that MS C *calls* to exit) must point at a
+  terminate stub, not at a garbage far pointer.
+* an MZ image may be **larger than 64 KB** (SimEarth's is 125 KB).
+* `INT 21h AH=47h` returns the current directory **without** a drive letter.
+* the default `FILES=` must leave more than three usable handles.
+
 Also worth knowing: `INT 21h AH=30h` reports DOS **4.00** (`AX=0x0004`) so that
 modern tools take their DOS 4+ code path. Up to 0.8.0 it reported `2.10`
 (`AX=0x0A02`) because the Compaq DOS 2.11 `SYS.COM` version gate rejects a minor
@@ -572,6 +600,35 @@ start_prebuilt.bat   the launcher shipped as start.bat inside that package
   `A:`..`D:`, MBR partition probing with a superfloppy fallback.
 
 ## Notable bugs found and fixed
+
+The 0.10.0 batch came from running SimEarth (see `docs/simearth.md`):
+
+- **16-bit displacements were unsigned**: `mov [bp-4],ax` stored to `[bp+0FCh]`,
+  so every Microsoft/Turbo C stack frame wrote its locals into the caller's
+  frame — return addresses turned into `FFFFh` and control fled into the
+  interrupt vector table. The 32-bit path always had the sign right.
+- **`REP`'s repeat condition was inverted for `SCAS`/`CMPS`**: `REPZ` repeated
+  while *different*, so `repne scasb` ("find the next zero byte") stopped on the
+  first character, and EXEPACK's `repz scasb` backward scan stopped immediately.
+- **real-mode addresses did not wrap at 1 MB** (A20 gate), so EXEPACK loaders
+  read garbage through aliases like `FF69:FFF4` and reported "Packed file is
+  corrupt". The gate is now a real state, controlled by ports `92h`/`64h` and
+  `INT 15h AX=2400h..2402h`.
+- **no DOS memory manager**: `AH=48h` always failed, which killed every program
+  whose runtime allocates (Microsoft C aborts with `R6009 - not enough space for
+  environment`). There is now an MCB arena spanning `[PSP, A000h)` with working
+  `AH=48h/49h/4Ah/58h` and a first-MCB pointer in the list of lists.
+- **`PSP:0005h` held a garbage far pointer**; MS C's runtime *calls* it to exit,
+  so the program jumped into segment 0 and executed the IVT. The PSP is now
+  complete (`INT 20h`, top of memory, `CALL FAR` to a terminate stub, parent
+  PSP, job file table, FCB area).
+- **the BIOS data area described no video adapter**, so installers detected an
+  MDA card and refused to draw (SimEarth padded its text into `B000h`).
+- **the MZ loader rejected images over 64 KB** — normal for large DOS programs.
+- **`AH=47h` returned `C:\SIMEARTH`** instead of `\SIMEARTH`, so the program
+  asked for `C:\C:\SIMEARTH\GR.OVL` and gave up on its overlays.
+- **default `FILES=8`** left three file handles; raised to 20 (programs of that
+  era expect the `FILES=20` their manuals recommend).
 
 - `fat_read_chain_byte` double-counted the output offset and re-added the sector
   index when a read spanned more than one 512-byte chunk (multi-cluster

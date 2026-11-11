@@ -538,7 +538,16 @@ int dos_rmdir(const char *path)
     u8 nm[11];
     int root;
     rc = resolve_entry(drive, abs, &d, &parent, nm, &root);
-    if (rc != FAT_OK) return rc;
+    if (rc != FAT_OK) {
+#ifdef UEFIDOS_HOST
+        plat_puts("[open-fail] ");
+        plat_puts(path);
+        plat_puts("  (abs ");
+        plat_puts(abs);
+        plat_puts(")\n");
+#endif
+        return rc;
+    }
     if (root) return FAT_EACCES;
     if (!(d.raw[11] & 0x10)) return FAT_ENOTDIR;
     return fat_rmdir(vol_of(drive), parent, nm);
@@ -556,7 +565,16 @@ int dos_unlink(const char *path)
     u8 nm[11];
     int root;
     rc = resolve_entry(drive, abs, &d, &parent, nm, &root);
-    if (rc != FAT_OK) return rc;
+    if (rc != FAT_OK) {
+#ifdef UEFIDOS_HOST
+        plat_puts("[open-fail] ");
+        plat_puts(path);
+        plat_puts("  (abs ");
+        plat_puts(abs);
+        plat_puts(")\n");
+#endif
+        return rc;
+    }
     if (root) return FAT_EACCES;
     if (d.raw[11] & 0x01) return FAT_EACCES;   /* read-only attribute */
     return fat_delete_file(vol_of(drive), parent, nm);
@@ -683,7 +701,16 @@ int dos_open_ex(const char *path, int open_mode, int share, int *out)
     u8 nm[11];
     int root;
     rc = resolve_entry(drive, abs, &d, &parent, nm, &root);
-    if (rc != FAT_OK) return rc;
+    if (rc != FAT_OK) {
+#ifdef UEFIDOS_HOST
+        plat_puts("[open-fail] ");
+        plat_puts(path);
+        plat_puts("  (abs ");
+        plat_puts(abs);
+        plat_puts(")\n");
+#endif
+        return rc;
+    }
     if (root) return FAT_EISDIR;
     if (d.raw[11] & 0x10) return FAT_EISDIR;
     if (open_mode != 0) {
@@ -958,7 +985,16 @@ int dos_attr_get(const char *path, u8 *attr)
     u8 nm[11];
     int root;
     rc = resolve_entry(drive, abs, &d, &parent, nm, &root);
-    if (rc != FAT_OK) return rc;
+    if (rc != FAT_OK) {
+#ifdef UEFIDOS_HOST
+        plat_puts("[open-fail] ");
+        plat_puts(path);
+        plat_puts("  (abs ");
+        plat_puts(abs);
+        plat_puts(")\n");
+#endif
+        return rc;
+    }
     *attr = root ? 0x10 : d.raw[11];
     return FAT_OK;
 }
@@ -975,7 +1011,16 @@ int dos_attr_set(const char *path, u8 attr)
     u8 nm[11];
     int root;
     rc = resolve_entry(drive, abs, &d, &parent, nm, &root);
-    if (rc != FAT_OK) return rc;
+    if (rc != FAT_OK) {
+#ifdef UEFIDOS_HOST
+        plat_puts("[open-fail] ");
+        plat_puts(path);
+        plat_puts("  (abs ");
+        plat_puts(abs);
+        plat_puts(")\n");
+#endif
+        return rc;
+    }
     if (root) return FAT_EACCES;
     return fat_set_attr(vol_of(drive), parent, nm, attr);
 }

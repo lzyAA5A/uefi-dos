@@ -217,7 +217,7 @@ Run-Check 'FAT: create-over-existing truncates (AH=3Ch) and keeps the chain vali
 # caught here instead of as "a game renders garbage".
 Run-Check 'emulator: 8086 instruction test vectors (ITEST)' {
     & $HostExe --itest
-} @('ITEST PASSED', 'itest: 49 passed, 0 failed')
+} @('ITEST PASSED', 'itest: 59 passed, 0 failed')
 
 # Native 64-bit SDK program: a PE image built by sdk/ is mapped, relocated and
 # executed on the real CPU, with the DOS API and a 16-bit downcall inside.

@@ -120,6 +120,49 @@ static void test_share(void)
     section_done("share semantics");
 }
 
+/* ---------------- 4.1b AH=47h current directory ---------------- */
+/* DOS reports the current directory WITHOUT a drive letter (and an empty
+ * string in the root); programs prepend "X:" themselves.  Returning
+ * "C:\SIMEARTH" made SimEarth build "C:\C:\SIMEARTH\GR.OVL". */
+static void test_cwd_call(void)
+{
+    section("[4.1b] AH=47h current directory format");
+    int cf = 0;
+    char buf[80];
+    for (int i = 0; i < (int)sizeof(buf); i++) buf[i] = (char)0x7F;
+    int saved = g_dos.cur_drive;
+    /* a subdirectory on C: */
+    i21(0x3B, 0x0000, 0, 0, putstr("C:\\SIMT"), 0, 0, 0, &cf);   /* may fail: ignore */
+    i21(0x39, 0x0000, 0, 0, putstr("C:\\SIMT"), 0, 0, 0, &cf);
+    i21(0x3B, 0x0000, 0, 0, putstr("C:\\SIMT"), 0, 0, 0, &cf);
+    if (cf) { bad("chdir into SIMT", 1, 0); g_dos.cur_drive = saved; return; }
+
+    u16 si = 0x0400;
+    i21(0x47, 0x4700, 0, 0, 0, si, 0, SCR_SEG, &cf);
+    int n = 0;
+    while (n < (int)sizeof(buf) - 1) {
+        u16 a = (u16)(si + n);
+        u8 ch = emu_rb(&g_e, SCR_SEG, a);
+        if (!ch) break;
+        buf[n++] = (char)ch;
+    }
+    buf[n] = 0;
+    if (buf[0] == '\\' && buf[1] != ':' && strchr(buf, ':') == NULL)
+        ok("AH=47h returns \\SIMT (no drive letter)");
+    else bad("AH=47h path text", (int)(unsigned char)buf[0], (int)'\\');
+    if (cf == 0) ok("AH=47h clears CF");
+    else bad("AH=47h CF", cf, 0);
+
+    /* back to the root: DOS returns an empty string there */
+    i21(0x3B, 0x0000, 0, 0, putstr("C:\\"), 0, 0, 0, &cf);
+    i21(0x47, 0x4700, 0, 0, 0, si, 0, SCR_SEG, &cf);
+    if (emu_rb(&g_e, SCR_SEG, si) == 0) ok("AH=47h returns an empty string in the root");
+    else bad("AH=47h root string", emu_rb(&g_e, SCR_SEG, si), 0);
+
+    i21(0x3A, 0x3A00, 0, 0, putstr("C:\\SIMT"), 0, 0, 0, &cf);   /* rmdir */
+    section_done("current directory call");
+}
+
 /* ---------------- 4.2 FILES= / AH=67h ---------------- */
 static void test_files(void)
 {
@@ -131,31 +174,36 @@ static void test_files(void)
     if (cf) { bad("create FILES.TXT", h, 0); return; }
     i21(0x3E, 0x0000, h, 0, 0, 0, 0, 0, &cf);
 
-    /* default FILES=8 => handles 5,6,7 are the only free ones */
+    /* The default FILES= is 20 (handles 0..4 are the predefined devices), so
+     * 15 file handles are free; it has to be high enough for software that
+     * keeps a data file, its index and overlays open at once. */
     g_dos.files_limit = DOS_FILES_DEFAULT;
-    int hs[8];
+    int hs[DOS_FILES_DEFAULT + 4];
     int opened = 0, err = 0;
-    for (int i = 0; i < 6; i++) {
+    int cap = DOS_FILES_DEFAULT - 5 + 2;
+    if (cap > (int)(sizeof(hs) / sizeof(hs[0]))) cap = (int)(sizeof(hs) / sizeof(hs[0]));
+    for (int i = 0; i < cap; i++) {
         u16 r = i21(0x3D, 0x0000, 0, 0, pn, 0, 0, 0, &cf);
         if (!cf) hs[opened++] = (int)r;
         else { err = r; break; }
     }
-    int expect = DOS_FILES_DEFAULT - 5;      /* 3 free handles */
-    if (opened == expect) ok("FILES=8 yields 3 free handles (0..4 predefined)");
-    else bad("FILES=8 free handle count", opened, expect);
+    int expect = DOS_FILES_DEFAULT - 5;      /* free handles 5..19 */
+    if (opened == expect) ok("default FILES=20 yields 15 free handles (0..4 predefined)");
+    else bad("free handle count at the default FILES=", opened, expect);
     if (err != 4) bad("too many open files should be error 4", err, 4);
     else ok("over the FILES= limit returns error 4 (too many open files)");
     for (int i = 0; i < opened; i++) i21(0x3E, 0x0000, (u16)hs[i], 0, 0, 0, 0, 0, &cf);
 
-    /* AH=67h raises the limit */
-    i21(0x67, 0x6700, 20, 0, 0, 0, 0, 0, &cf);
+    /* AH=67h changes the limit */
+    i21(0x67, 0x6700, 9, 0, 0, 0, 0, 0, &cf);
     opened = 0; err = 0;
     for (int i = 0; i < 8; i++) {
         u16 r = i21(0x3D, 0x0000, 0, 0, pn, 0, 0, 0, &cf);
         if (!cf) hs[opened++] = (int)r; else { err = r; break; }
     }
-    if (opened == 8) ok("AH=67h BX=20 allows 8 concurrent opens");
-    else bad("AH=67h handle count", opened, 8);
+    if (opened == 4) ok("AH=67h BX=9 leaves 4 free handles (5..8)");
+    else bad("AH=67h handle count", opened, 4);
+    if (err != 4) bad("AH=67h limit should report error 4", err, 4);
     for (int i = 0; i < opened; i++) i21(0x3E, 0x0000, (u16)hs[i], 0, 0, 0, 0, 0, &cf);
 
     g_dos.files_limit = saved;
@@ -404,6 +452,7 @@ int dual_selftest(const char *image)
            g_dos.files_limit, g_dos.fcb_limit, 'A' + g_dos.last_drive);
 
     test_share();
+    test_cwd_call();
     test_files();
     test_fcb();
     test_locks();
