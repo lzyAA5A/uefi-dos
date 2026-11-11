@@ -22,7 +22,7 @@
 
 #include "uefidos.h"
 
-#define DOSAPI_VERSION 0x0101u      /* 1.00 */
+#define DOSAPI_VERSION 0x0101u      /* 1.01: find_first/find_next long_name, longname() */
 
 /* UEFI configuration table GUID -> dosapi_exports */
 #define UEFIDOS_API_GUID { 0x55454449u, 0x2D44, 0x4F53, \

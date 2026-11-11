@@ -123,6 +123,16 @@ Run-Check 'FCBTEST.COM: FCB create/write/read/delete from 16-bit code' {
     & $HostExe --shell (Join-Path $Build 't_fcb.img') 'FCBTEST'
 } @('FCB-OK')
 
+# ---- DOS 4.0 real-mode surface: AH=32h/52h/59h/60h/63h/68h/6Ch + 5Ah ----
+Copy-Item (Join-Path $Build 'UEFIDOS.img') (Join-Path $Build 't_dos4.img') -Force
+Run-Check 'DOS4TEST.COM: DPB, list of lists, extended error, AH=6Ch/5Ah/60h' {
+    & $HostExe --shell (Join-Path $Build 't_dos4.img') 'DOS4TEST'
+} @('DOS version 4.00', 'version: OK', 'dpb-bps: OK', 'dpb-nfats: OK', 'lol-dpb: OK',
+    'exterr-class: OK', '6c-create: OK', '6c-write: OK', '68h: OK', '6c-read: OK',
+    '6c-trunc: OK', '6c-exists: OK', '6c-nofile: OK', '5a-create: OK', '5a-find: OK',
+    '5a-del: OK', '60h-drive: OK', '60h-root: OK', 'C:\hello.txt', '63h-dbcs: OK',
+    'DOS4-OK')
+
 # ---- bundled utilities (INFO / CAL / SUM / HEX) ----
 # CAL's month name is cross-checked against the host clock, which also proves
 # the INT 21h AH=2Ah wiring end to end.
@@ -130,7 +140,7 @@ $monthName = (Get-Date).ToString('MMMM', [System.Globalization.CultureInfo]::Inv
 Copy-Item (Join-Path $Build 'UEFIDOS.img') (Join-Path $Build 't_tools.img') -Force
 Run-Check 'bundled tools: INFO panel (version/date/time/drive/dir/native API)' {
     & $HostExe --shell (Join-Path $Build 't_tools.img') 'INFO'
-} @('=== UEFI-DOS system info ===', 'DOS version : 2.10', 'Native API  : 01/64-bit pointers')
+} @('=== UEFI-DOS system info ===', 'DOS version : 4.00', 'Native API  : 01/64-bit pointers')
 
 Run-Check 'bundled tools: CAL prints the current month grid' {
     & $HostExe --shell (Join-Path $Build 't_tools.img') 'CAL'
@@ -215,7 +225,7 @@ Run-Check 'emulator: 8086 instruction test vectors (ITEST)' {
 # goes through INT 21h AH=3Ch truncation of an existing file.
 Run-Check 'native SDK: RUN64 runs a 64-bit PE program (dosapi + exec16)' {
     & $HostExe --shell (Join-Path $Build 't_tools.img') 'RUN64 HELLO64.EXE' 'RUN64 HELLO64.EXE'
-} @('RUN64: loading HELLO64.EXE', 'pointer size : 64 bit', 'DOS version  : 2.10',
+} @('RUN64: loading HELLO64.EXE', 'pointer size : 64 bit', 'DOS version  : 4.00',
     'reading      : HELLO.TXT', 'wrote        : NATIVE.TXT', 'exec16       : HELLO.COM -> exit 0',
     'NATIVE-OK', 'exit code 0')
 

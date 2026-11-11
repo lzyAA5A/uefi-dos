@@ -134,7 +134,7 @@ RUN64: loading HELLO64.EXE as a native 64-bit image
 === UEFI-DOS native SDK demo ===
 pointer size : 64 bit
 API version  : 0100
-DOS version  : 2.10
+DOS version  : 4.00
 drive        : C:
 reading      : HELLO.TXT (15 bytes)
 Hello UEFI-DOS!

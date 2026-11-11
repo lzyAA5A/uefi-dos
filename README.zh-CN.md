@@ -7,18 +7,21 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 8086 解释器运行 16 位实模式 DOS 程序 —— 一套"类似 V86"的软件兼容层，**不依赖 BIOS，
 也不依赖硬件虚拟化**。
 
-兼容基线是 **MS-DOS 2.11** 语义（程序看到的版本就是它），在此基础上补上 2.11 从未
-有过的东西：FAT32、64 位 UEFI 启动、FAT16 大容量卷、DOS 4.0 的文件共享/加锁/FCB
-语义、原生 32/64 位 DOS API，以及 386 保护模式与 DPMI 0.9 宿主。
+它就是一个 `.EFI` 文件，而 DOS 程序看到的是 **MS-DOS 4.0**
+（`INT 21h AH=30h` 返回 `AX=0x0004`）；在此基础上补上 DOS 从未有过的东西：
+FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
+与 DPMI 0.9 宿主。
 
-当前版本 0.8.0 —— 24 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
-的 x86_64 与 IA32 实机启动）。0.8.0 新增：**图形模式**（INT 10h mode 13h 与
-VESA VBE，直接写 UEFI GOP 帧缓冲）、**每个 UEFI 卷都变成盘符**（插上 U 盘就是 `D:`）、
-以及**长文件名**（VFAT LFN 可读可建，老 DOS 程序仍只见 8.3）。
+当前版本 0.9.0 —— 25 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+的 x86_64 与 IA32 实机启动）。0.9.0 把**报告的 DOS 版本从 2.11 提升到 4.0**，并补齐
+DOS 4.0 实模式里可移植工具真正会去探测的那部分调用：`AH=32h` DPB、`AH=52h`
+list of lists、`AH=59h` 扩展错误、`AH=5Ah` 唯一临时文件、`AH=60h` truename、
+`AH=63h` DBCS 探测、`AH=68h` commit 与 `AH=6Ch` 扩展打开 —— 全部由
+`DOS4TEST.COM` 一个 16 位程序里的 30 项断言验证。
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-0.8.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.8.0.zip)
+[**下载 `UEFI-DOS-0.9.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.9.0.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -42,7 +45,7 @@ VESA VBE，直接写 UEFI GOP 帧缓冲）、**每个 UEFI 卷都变成盘符**�
 | 命令解释器 | `DIR CD MD RD DEL REN TYPE COPY CLS ECHO VER VOL DATE TIME PROMPT PATH SET MEM HELP APITEST MOUNT UNMOUNT CONFIG FCB DRIVES EXIT SHUTDOWN`、批处理、`AUTOEXEC.BAT` |
 | DOS 内核 | 8.3 文件名（+ VFAT 长文件名）、按驱动器维护当前目录、DOS 错误码、**DOS 4.0 语义**（见下） |
 | 8086 模拟器 | 8086/80186 实模式解释器、16 MiB 模拟内存、PSP、IVT、带重定位的 `.COM` 与 MZ `.EXE` 加载器、8087 转义按 8086 空转处理 |
-| INT 21h | 控制台、文件 I/O、查找首/次 + DTA、目录、日期时间、版本、中断向量读写、IOCTL、句柄复制、PSP、内存桩、**EXEC（AH=4Bh）**、**AH=67h**、**AH=5Ch** 字节锁、**SHARE 模式** |
+| INT 21h | 控制台、文件 I/O、查找首/次 + DTA、目录、日期时间、版本（4.00）、中断向量读写、IOCTL、句柄复制、PSP、内存桩、**EXEC（AH=4Bh）**、**AH=67h**、**AH=5Ch** 字节锁、**SHARE 模式**、**DOS 4.0 面：32h 52h 59h 5Ah 60h 63h 68h 6Ch** |
 | FCB 调用族 | AH=0Fh 10h 11h 12h 13h 14h 15h 16h 17h 21h 22h 23h 27h 28h（`src/emu/fcb.c`） |
 | INT 10h / 16h / 1Ah / 13h | 文本服务（置模式、光标、读写字符+属性、电传、窗口滚动）作用于模拟屏幕、支持扩展键的阻塞键盘、BIOS 计时、磁盘读/写/几何参数 |
 | 显示（文本） | 模拟内存里的 80×25 彩色文本屏（`B800:0000`）：直接写显存和 `INT 10h` 输出都落在同一块屏上，再镜像到控制台（只重画变化的行） |
@@ -75,7 +78,7 @@ VESA VBE，直接写 UEFI GOP 帧缓冲）、**每个 UEFI 卷都变成盘符**�
 ```
 C:\> INFO
 === UEFI-DOS system info ===
-DOS version : 2.10
+DOS version : 4.00
 Date        : 2026-11-08
 Time        : 13:58:09
 Drive       : C:
@@ -113,7 +116,7 @@ HELLO.TXT: 15 bytes, checksum 0471
 
 ```
 C:\> APITEST
-APITEST: DOS version 2.10, native pointer size 8
+APITEST: DOS version 4.00, native pointer size 8
 APITEST: size 16, read 16 bytes: Hello UEFI-DOS!
 APITEST: wrote 13 bytes to TMPAPI.TXT
 APITEST: find '*.TXT' -> 1 file(s)
@@ -151,6 +154,12 @@ seek 的 whence 与 INT 21h 相同，`find_first`/`find_next` 回填的字段与
 | 字节锁 | `AH=5Ch AL=0/1`，重叠检测在句柄表内完成，冲突报错误 5 |
 | FAT16 大卷 | 分配游标 + 空闲簇计数；`tools/mkfat16.py` 生成 32 MB / 1.9 GB 稀疏测试卷 |
 | 文件大小 | 保持 `u32`，按 DOS 4.0 语义以 32 MB 为实测上限（已在 1.9 GB FAT16 卷上验证） |
+| 报告版本 | `AH=30h` 返回 `AX=0x0004`（DOS 4.00），`VER` 显示同一级别；想报告别的版本改 `src/uefidos_config.h` 里的 `UEFIDOS_DOSVER_*` |
+| 数据结构 | `AH=32h` 在保留 ROM 窗口里为每个已挂载盘生成一个 DPB；`AH=52h` 返回 list of lists，其 `+2` 指向该 DPB 链 |
+| 错误上报 | `AH=59h` 把上次失败映射成 class / 建议动作 / locus 三元组（`2`→class 8、`5`/`21h`→class 3、`27h`→class 11、`50h`→class 12 …） |
+| 扩展打开 | `AH=6Ch` 支持 DOS 的 action 位：打开已有 / 不存在则创建 / 覆盖已有，`AX` 返回句柄、`CX` 返回 `1`/`2`/`3`；`AH=68h` 提交 |
+| 临时文件 | `AH=5Ah` 在指定目录下生成 `TMPxxxxx.TMP` 并带冲突重试，两个程序不会撞名 |
+| truename / DBCS | `AH=60h` 规范化成 `C:\DIR\FILE.EXT`；`AH=63h` 返回 `AL=0`（单字节代码页） |
 
 双路径一致性（`--phase46`）把同一操作分别走 `INT 21h` 与 `g_dosapi`，逐项断言：
 句柄有效、字节数相同、seek 位置相同、读回内容逐字节相同、错误码相同
@@ -309,7 +318,7 @@ C:\> RUN64 HELLO64.EXE
 RUN64: loading HELLO64.EXE as a native 64-bit image
 === UEFI-DOS native SDK demo ===
 pointer size : 64 bit
-DOS version  : 2.10
+DOS version  : 4.00
 reading      : HELLO.TXT (16 bytes)
 Hello UEFI-DOS!
 wrote        : NATIVE.TXT (44 bytes)
@@ -384,11 +393,13 @@ Long Name Report.txt         31 13:12  11-11-26
 
 ## 回归测试
 
-`run_tests.ps1` 会先完整构建，再跑 24 项检查：FAT32 读/写自检；宿主命令解释器
+`run_tests.ps1` 会先完整构建，再跑 25 项检查：FAT32 读/写自检；宿主命令解释器
 DIR/TYPE/VER/COM/EXE/EXEC/显示 + 原生 API 与上行调用演示；宿主写路径；软盘镜像挂载
 为 `A:`；在 2.11 镜像上写 FAT12；读取 2.11 与 MS-DOS 5 镜像；两项 QEMU/OVMF 启动
 冒烟测试（x86_64 与 IA32）；阶段 4/6 语义与双路径对比；32 MB 与 1.9 GB FAT16 卷写入；
-由真实 16 位代码调用 FCB 的 `FCBTEST.COM`；以及 `KEYTEST.COM` —— 它通过 `INT 16h` 读五个键并打印扫描码，证明方向键和功能键确实以真实 BIOS 扫描码送达客户机。
+由真实 16 位代码调用 FCB 的 `FCBTEST.COM`；DOS 4.0 一致性探针 `DOS4TEST.COM`（DPB、
+list of lists、扩展错误、`AH=6Ch` 的创建/打开/覆盖/拒绝四态、临时文件、truename、DBCS、
+commit —— 共 30 项断言，最后打印一行 `DOS4-OK`）；以及 `KEYTEST.COM` —— 它通过 `INT 16h` 读五个键并打印扫描码，证明方向键和功能键确实以真实 BIOS 扫描码送达客户机。
 
 需要 Microsoft DOS 软盘镜像的检查在 `UEFIDOS_DOS211` / `UEFIDOS_DOS5` 未设置时会
 报告 `[SKIP]` 并跳过。
@@ -431,9 +442,11 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 移/循环选择子编号、`0040:001A/001C/001E` 处缺失的 BIOS 键盘缓冲区、中断向量不可调用、
 以及缺失的 `INT 1Ah` 计时。这些程序是第三方作品，不属于本仓库。
 
-另外注意：`INT 21h AH=30h` 报告 DOS **2.10**（`AX=0x0A02`），因为 2.11 时期的工具
-（包括 `SYS.COM`）会拒绝大于 10 的次版本号；`VER` 仍显示 2.11，因为内核实现的语义
-就是 2.11。
+另外注意：`INT 21h AH=30h` 现在报告 DOS **4.00**（`AX=0x0004`），让现代工具走它们
+的 DOS 4+ 分支。0.8.0 及之前报告的是 `2.10`（`AX=0x0A02`），因为 Compaq DOS 2.11 的
+`SYS.COM` 版本门槛会拒绝大于 10 的次版本号 —— 报 4.00 的代价正是这一点：那张 2.11
+软盘上的 `SYS.COM` 现在会拒绝运行。想回到旧行为，`src/uefidos_config.h` 里注释写明了
+两行改法（`UEFIDOS_DOSVER_MAJOR 2`、`..._MINOR 11`、`..._COMPAT_MINOR 10`）。
 
 ## 目录结构
 
@@ -475,6 +488,7 @@ tools/
                      VRAM.COM / UPCALL.COM
   make_pm_tests.py   手汇编 DPMITEST.COM（实模式 → PM16 → PM32 → 反射）
   make_fcb_test.py   手汇编 FCBTEST.COM（FCB 建/写/读/删）
+  make_dos4_test.py  手汇编 DOS4TEST.COM（DOS 4.0 调用面，30 项检查）
   make_tools.py      生成内置工具 INFO/CAL/SUM/HEX/CLOCK
   make_release.ps1   打包"开箱即用"发布版（镜像 + start.bat）
   mkfat16.py         稀疏 FAT16 格式化器（32 MB .. 1.9 GB 测试卷）

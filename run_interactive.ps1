@@ -69,7 +69,8 @@ $makeArgs = @($Img, '--size-mb', '64',
     '--file',    ((Join-Path $Build 'SUM.COM')     + '=SUM.COM'),
     '--file',    ((Join-Path $Build 'CAL.COM')     + '=CAL.COM'),
     '--file',    ((Join-Path $Build 'GFXTEST.COM')  + '=GFXTEST.COM'),
-    '--file',    ((Join-Path $Build 'VESATEST.COM') + '=VESATEST.COM'))
+    '--file',    ((Join-Path $Build 'VESATEST.COM') + '=VESATEST.COM'),
+    '--file',    ((Join-Path $Build 'DOS4TEST.COM') + '=DOS4TEST.COM'))
 # the curated third-party games/tools that build.ps1 may have extracted from your
 # own DOS disk images (nothing of that kind ships with this repository)
 $imported = Join-Path $Build 'imported'
@@ -86,6 +87,7 @@ if ($dos211 -and (Test-Path $dos211)) {
     $lines += 'DIR A:'
 }
 $lines += 'ECHO UEFI-DOS interactive shell ready. Type HELP for commands.'
+$lines += 'ECHO DOS 4.0 call probe: DOS4TEST'
 $lines += 'ECHO Type SHUTDOWN to power off, EXIT to return to firmware.'
 $makeArgs += @('--autoexec', ($lines -join '\n'))
 Write-Host '== building interactive.img ...'

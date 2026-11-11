@@ -10,8 +10,15 @@
 #include "fs/fat.h"
 
 #define DOS_MAX_PATH 128
+/* DOS_HANDLE_MAX / DOS_MAX_DRIVES live in uefidos_config.h (included through
+ * uefidos.h); keep these fallbacks for translation units that include dos.h
+ * before the config. */
+#ifndef DOS_HANDLE_MAX
 #define DOS_HANDLE_MAX 20
+#endif
+#ifndef DOS_MAX_DRIVES
 #define DOS_MAX_DRIVES 4
+#endif
 
 /* backing store for an image file mounted as a drive (e.g. floppy images) */
 typedef struct dos_imgbd {
@@ -77,6 +84,7 @@ struct dos_state {
     u16 dta_seg, dta_off;
     u16 psp_seg;
     u16 last_error;           /* DOS error code of last failed call */
+    int last_error_valid;     /* nonzero after a failed INT 21h call */
     dos_handle handles[DOS_HANDLE_MAX];
     int  files_limit;         /* effective FILES= (handles 0..files_limit-1) */
     int  fcb_limit;           /* FCBS= first value */

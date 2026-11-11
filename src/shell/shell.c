@@ -519,7 +519,9 @@ static int cmd_apitest(const char *rest)
     plat_puts("APITEST: DOS version ");
     api_put_num((u16)(ver & 0xFF));
     plat_putc('.');
-    api_put_num((u16)(ver >> 8));
+    u16 vminor = (u16)(ver >> 8);
+    if (vminor < 10) plat_putc('0');            /* print 4.00, like DOS and VER */
+    api_put_num(vminor);
     plat_puts(", native pointer size ");
     api_put_num((u16)sizeof(void *));
     plat_puts("\n");

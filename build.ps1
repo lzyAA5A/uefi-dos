@@ -65,7 +65,8 @@ try {
     # ---- IA32 (32-bit UEFI) build ----
     $cflags32 = @('-m32','-O2','-std=gnu11','-ffreestanding','-Wall','-Wextra',
         '-fno-asynchronous-unwind-tables','-fno-unwind-tables',
-        '-fno-stack-protector','-fno-builtin','-fno-ident','-Isrc')
+        '-fno-stack-protector','-fno-builtin','-mno-stack-arg-probe',
+        '-fno-ident','-Isrc')
     $objs32 = @()
     foreach ($s in $sources) {
         $o = Join-Path $Build ((Split-Path $s -Leaf) -replace '\.c$', '.i.o')
@@ -113,6 +114,7 @@ try {
             @{ script = 'tools/make_tools.py';    what = 'bundled utility set' }
     @{ script = 'tools/make_keytest.py';  what = 'keyboard scan-code probe' }
         @{ script = 'tools/make_gfx_test.py'; what = 'graphics mode probes (mode 13h + VESA)' }
+        @{ script = 'tools/make_dos4_test.py'; what = 'DOS 4.0 conformance probe' }
         )
         foreach ($g in $generators) {
             $gp = Join-Path $Root $g.script
@@ -140,7 +142,7 @@ try {
         $programs = @('HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM',
                       'UPCALL.COM','DTATEST.COM','I2FTEST.COM','DPMITEST.COM','FCBTEST.COM',
                       'INFO.COM','CLOCK.COM','HEX.COM','SUM.COM','CAL.COM','KEYTEST.COM',
-                            'GFXTEST.COM','VESATEST.COM')
+                            'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM')
         # the native SDK examples are PE images, not DOS programs: optional
         $nativePrograms = @()
         foreach ($p in @('HELLO64.EXE','HELLO32.EXE')) {
@@ -155,7 +157,7 @@ try {
 
         $autoexecLines = @(
             'VER','DIR','TYPE HELLO.TXT','HELLO','TELETYPE','MZEXE','RUNNER','VRAM',
-            'APITEST','UPCALL','DTATEST','I2FTEST','DPMITEST',
+            'APITEST','UPCALL','DTATEST','I2FTEST','DPMITEST','DOS4TEST',
             'MD TEMP','COPY HELLO.TXT TEMP\COPY.TXT','TYPE TEMP\COPY.TXT','DEL TEMP\COPY.TXT','RD TEMP',
             'ECHO WRITE-OK'
         )

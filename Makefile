@@ -35,7 +35,7 @@ CFLAGS_COMMON = -O2 -std=gnu11 -ffreestanding -Wall -Wextra \
                 -fno-asynchronous-unwind-tables -fno-unwind-tables \
                 -fno-stack-protector -fno-builtin -fno-ident -Isrc
 CFLAGS64 = $(CFLAGS_COMMON) -m64 -mno-red-zone -mno-stack-arg-probe
-CFLAGS32 = $(CFLAGS_COMMON) -m32
+CFLAGS32 = $(CFLAGS_COMMON) -m32 -mno-stack-arg-probe
 LDFLAGS  = -nostdlib -Wl,--subsystem,10 -Wl,-e,efi_main \
            -Wl,--no-insert-timestamp -Wl,--enable-reloc-section
 
@@ -89,7 +89,7 @@ $(BUILD)/obj32/%.o: %.c
 # tools in tools/, exactly as build.ps1 does on Windows.
 PROGS = HELLO.COM TELETYPE.COM MZEXE.EXE RUNNER.COM VRAM.COM UPCALL.COM \
         DTATEST.COM I2FTEST.COM DPMITEST.COM FCBTEST.COM INFO.COM CLOCK.COM \
-        HEX.COM SUM.COM CAL.COM KEYTEST.COM
+        HEX.COM SUM.COM CAL.COM KEYTEST.COM DOS4TEST.COM
 
 progs:
 	@mkdir -p $(BUILD)
@@ -98,6 +98,7 @@ progs:
 	$(PYTHON) tools/make_fcb_test.py $(BUILD)
 	$(PYTHON) tools/make_tools.py $(BUILD)
 	$(PYTHON) tools/make_keytest.py $(BUILD)
+	$(PYTHON) tools/make_dos4_test.py $(BUILD)
 
 image: $(BUILD)/BOOTX64.EFI $(BUILD)/BOOTIA32.EFI progs sdk
 	$(PYTHON) tools/make_image.py $(BUILD)/UEFIDOS.img --size-mb 64 \
@@ -107,7 +108,7 @@ image: $(BUILD)/BOOTX64.EFI $(BUILD)/BOOTIA32.EFI progs sdk
 	  --text 'CONFIG.SYS=FILES=20\nLASTDRIVE=D\n' \
 	  $(foreach p,$(PROGS),--file $(BUILD)/$(p)=$(p)) \
 	  --file $(BUILD)/HELLO64.EXE=HELLO64.EXE \
-	  --autoexec "VER\nDIR\nTYPE HELLO.TXT\nHELLO\nTELETYPE\nMZEXE\nRUNNER\nVRAM\nAPITEST\nUPCALL\nDTATEST\nI2FTEST\nDPMITEST\nECHO WRITE-OK\nRUN64 HELLO64.EXE\nCONFIG\nFCBTEST\nINFO\nCAL\nSUM HELLO.TXT\nHEX HELLO.TXT"
+	  --autoexec "VER\nDIR\nTYPE HELLO.TXT\nHELLO\nTELETYPE\nMZEXE\nRUNNER\nVRAM\nAPITEST\nUPCALL\nDTATEST\nI2FTEST\nDPMITEST\nECHO WRITE-OK\nRUN64 HELLO64.EXE\nCONFIG\nFCBTEST\nDOS4TEST\nINFO\nCAL\nSUM HELLO.TXT\nHEX HELLO.TXT"
 	@echo "built: $(BUILD)/UEFIDOS.img (AUTOEXEC ends at a live C:\\> prompt)"
 
 # ---- native SDK ----------------------------------------------------------

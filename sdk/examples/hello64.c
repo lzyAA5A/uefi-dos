@@ -34,7 +34,9 @@ int uefidos_main(const uefidos_exports *api, const char *args)
     rt_puts("DOS version  : ");
     rt_putu(ver & 0xFF);
     rt_putc('.');
-    rt_putu(ver >> 8);
+    u16 minor = ver >> 8;                 /* two digits, like DOS itself and VER */
+    if (minor < 10) rt_putc('0');
+    rt_putu(minor);
     rt_puts("\n");
 
     rt_puts("drive        : ");

@@ -57,7 +57,16 @@ static int read_dos_str(Emu *e, u16 seg, u16 off, char *dst, int max)
 
 static void con_put(Emu *e, char c);
 
-static void set_err(Emu *e, u8 code) { e->flags |= F_CF; e->ax = code; }
+/* Error bookkeeping.  Every failed call must also leave a record behind, because
+ * DOS programs routinely follow a CF=1 return with INT 21h AH=59h (extended
+ * error) to get the failure class and the suggested action. */
+static void set_err(Emu *e, u8 code)
+{
+    e->flags |= F_CF;
+    e->ax = code;
+    g_dos.last_error = code;
+    g_dos.last_error_valid = 1;
+}
 static void set_ok(Emu *e) { e->flags = (u16)(e->flags & ~F_CF); }
 
 /* Day of week for a Gregorian date: 0 = Sunday .. 6 = Saturday
@@ -69,6 +78,95 @@ static int dos_weekday(int y, int m, int d)
     if (m < 3) y -= 1;
     int w = (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
     return w < 0 ? w + 7 : w;
+}
+
+/* ------------------------------------------------------------------ */
+/* DOS 4.0 data structures                                             */
+/* ------------------------------------------------------------------ */
+/* F000:C000.. is the reserved ROM window: no guest code ever runs there, so
+ * it is a safe home for the structures DOS programs ask us for a pointer to. */
+#define DOS_LOL_OFF  0xC000u   /* INT 21h AH=52h: list of lists */
+#define DOS_DPB_OFF  0xC100u   /* INT 21h AH=32h: one DPB per mounted drive */
+#define DOS_DPB_LEN  32
+
+static int boot_drive(void)
+{
+    for (int d = 0; d < DOS_MAX_DRIVES; d++)
+        if (g_dos.drives[d].mounted) return d;
+    return 2;
+}
+
+static u16 dpb16(u32 v)
+{
+    return (u16)(v > 0xFFFFu ? 0xFFFFu : v);
+}
+
+/* Write the DPB of one mounted drive at F000:(DOS_DPB_OFF + slot*LEN).
+ * All sector fields are relative to the start of the volume, as DOS defines
+ * them, so subtract the partition LBA. */
+static u16 dpb_write(Emu *e, int slot, int drive, u16 next)
+{
+    fat_vol *v = &g_dos.drives[drive].vol;
+    u16 off = (u16)(DOS_DPB_OFF + slot * DOS_DPB_LEN);
+    u16 spc = v->spc ? (u16)v->spc : 1u;
+    u8 shift = 0;
+    while (shift < 8 && (u16)(1u << shift) < spc) shift++;
+    u32 data_sec = v->data_lba > v->part_lba ? v->data_lba - v->part_lba : 0;
+    u32 root_sec = v->root_lba > v->part_lba ? v->root_lba - v->part_lba : 0;
+    for (int i = 0; i < DOS_DPB_LEN; i++) emu_wb(e, MAGIC_SEG, (u16)(off + i), 0);
+    emu_wb(e, MAGIC_SEG, (u16)(off + 0x00), (u8)drive);         /* drive */
+    emu_wb(e, MAGIC_SEG, (u16)(off + 0x01), (u8)drive);         /* unit */
+    emu_ww(e, MAGIC_SEG, (u16)(off + 0x02), (u16)(v->bytes_per_sector ? v->bytes_per_sector : 512));
+    emu_wb(e, MAGIC_SEG, (u16)(off + 0x04), (u8)(spc - 1));
+    emu_wb(e, MAGIC_SEG, (u16)(off + 0x05), shift);
+    emu_ww(e, MAGIC_SEG, (u16)(off + 0x06), dpb16(v->reserved));
+    emu_wb(e, MAGIC_SEG, (u16)(off + 0x08), (u8)v->nfats);
+    emu_ww(e, MAGIC_SEG, (u16)(off + 0x09), dpb16(v->root_entries));
+    emu_ww(e, MAGIC_SEG, (u16)(off + 0x0B), dpb16(data_sec));   /* first data sector */
+    emu_ww(e, MAGIC_SEG, (u16)(off + 0x0D), dpb16(v->cluster_count + 1));
+    emu_ww(e, MAGIC_SEG, (u16)(off + 0x0F), dpb16(v->fat_sectors));
+    emu_ww(e, MAGIC_SEG, (u16)(off + 0x11), dpb16(root_sec));
+    emu_ww(e, MAGIC_SEG, (u16)(off + 0x13), 0xFFFF);            /* no driver */
+    emu_wb(e, MAGIC_SEG, (u16)(off + 0x15), (u8)(v->cluster_count < 4085u ? 0xF0 : 0xF8));
+    emu_wb(e, MAGIC_SEG, (u16)(off + 0x16), 0x00);              /* accessed */
+    emu_ww(e, MAGIC_SEG, (u16)(off + 0x17), next);              /* next DPB */
+    return off;
+}
+
+/* Rebuild the DPB chain and return the offset of the first entry (0 if no
+ * volume is mounted).  Walking downwards keeps the chain ascending. */
+static u16 dpb_chain(Emu *e)
+{
+    u16 head = 0;
+    for (int d = DOS_MAX_DRIVES - 1; d >= 0; d--) {
+        if (!g_dos.drives[d].mounted) continue;
+        head = dpb_write(e, d, d, head);
+    }
+    return head;
+}
+
+/* Extended error -> (class, suggested action, locus) mapping.  The numbers are
+ * the ones DOS 3.0+ documents for the same base errors. */
+static void ext_error(u16 code, u8 *cls, u8 *act, u8 *locus)
+{
+    switch (code) {
+    case 0x02: case 0x03: case 0x0F:                     /* not found      */
+        *cls = 8; *act = 1; *locus = 1; break;
+    case 0x04: case 0x08:                                /* out of handles/memory */
+        *cls = 1; *act = 1; *locus = (code == 0x08) ? 5 : 1; break;
+    case 0x05: case 0x21: case 0x32:                     /* access/sharing */
+        *cls = 3; *act = 4; *locus = 1; break;
+    case 0x13: case 0x1E: case 0x1F: case 0x28:          /* media/protect  */
+        *cls = 5; *act = 4; *locus = 2; break;
+    case 0x27:                                           /* disk full      */
+        *cls = 11; *act = 4; *locus = 2; break;
+    case 0x50:                                           /* already exists */
+        *cls = 12; *act = 4; *locus = 1; break;
+    case 0x0B:                                           /* bad format     */
+        *cls = 9; *act = 4; *locus = 2; break;
+    default:
+        *cls = 13; *act = 1; *locus = 1; break;
+    }
 }
 
 static int input_key(Emu *e)
@@ -270,13 +368,47 @@ void int21_handler(Emu *e)
     case 0x2E: set_ok(e); return;
     case 0x2F: e->es = g_dos.dta_seg; e->bx = g_dos.dta_off; set_ok(e); return;
     case 0x30:
-        /* DOS returns AL = major version, AH = minor version:
-         * 2.10 -> AX = 0x0A02 (see UEFIDOS_DOSVER_COMPAT_MINOR). */
-        e->ax = (u16)(((UEFIDOS_DOSVER_COMPAT_MINOR & 0xFF) << 8) | (UEFIDOS_DOSVER_MAJOR & 0xFF));
+        /* DOS returns AL = major version, AH = minor version, so MS-DOS 4.0
+         * reports AX = 0x0004 and MS-DOS 5.0 reports 0x000A.  The level we
+         * claim is UEFIDOS_DOSVER_* (see src/uefidos_config.h): 4.00 by
+         * default, with a documented way back to the 2.10 quirk that the
+         * Compaq DOS 2.11 SYS.COM version gate wants. */
+        e->ax = (u16)(((UEFIDOS_DOSVER_COMPAT_MINOR & 0xFF) << 8) |
+                      (UEFIDOS_DOSVER_MAJOR & 0xFF));
         set_ok(e);
         return;
+    case 0x32: {
+        /* Get the Drive Parameter Block for DL (0 = default drive). */
+        int d = (e->dx & 0xFF) ? (int)(e->dx & 0xFF) - 1 : dos_current_drive();
+        dpb_chain(e);
+        if (d < 0 || d >= DOS_MAX_DRIVES || !g_dos.drives[d].mounted) {
+            set_err(e, 0x0F);
+            return;
+        }
+        e->ds = MAGIC_SEG;
+        e->bx = (u16)(DOS_DPB_OFF + d * DOS_DPB_LEN);
+        set_ok(e);
+        return;
+    }
     case 0x33:
-        if ((e->ax & 0xFF) == 0x00) { e->dx = (u16)((e->dx & 0xFF00) | 0); }
+        switch (e->ax & 0xFF) {
+        case 0x00: case 0x01:
+            /* Ctrl-Break check: report (and accept) "off". */
+            e->dx = (u16)(e->dx & 0xFF00);
+            break;
+        case 0x02: case 0x03:
+            /* DOS 3.3+ extended-break flags: report "off" as well. */
+            e->dx = 0;
+            break;
+        case 0x05:
+            /* DOS 4.0: boot drive, 0 = A:. */
+            e->dx = (u16)((e->dx & 0xFF00) | (u8)boot_drive());
+            break;
+        case 0x06:
+            break;                                  /* set boot drive: ignored */
+        default:
+            break;
+        }
         set_ok(e);
         return;
     case 0x35: {
@@ -621,6 +753,156 @@ void int21_handler(Emu *e)
         if (n > DOS_HANDLE_MAX) n = DOS_HANDLE_MAX;
         g_dos.files_limit = n;
         set_ok(e);
+        return;
+    }
+    case 0x52: {
+        /* AH=52h: pointer to the DOS "list of lists" (ES:BX).  We model the
+         * header fields that portable tools read: +0 MCB chain (none), +2 the
+         * DPB chain, +4 the first SFT (file tables are not exposed). */
+        u16 lol = DOS_LOL_OFF;
+        u16 dpbs = dpb_chain(e);
+        for (int i = 0; i < 0x40; i++) emu_wb(e, MAGIC_SEG, (u16)(lol + i), 0);
+        emu_ww(e, MAGIC_SEG, (u16)(lol + 0x00), 0);       /* first MCB */
+        emu_ww(e, MAGIC_SEG, (u16)(lol + 0x02), dpbs);    /* first DPB */
+        emu_ww(e, MAGIC_SEG, (u16)(lol + 0x04), 0);       /* first SFT */
+        e->es = MAGIC_SEG;
+        e->bx = lol;
+        set_ok(e);
+        return;
+    }
+    case 0x59: {
+        /* AH=59h: extended error.  AH=59h itself always clears CF; the code
+         * comes from the last failed call, which set_err() records. */
+        if (!g_dos.last_error_valid || g_dos.last_error == 0) {
+            e->ax = 0;
+            e->bx = 0;
+            e->cx = 0;
+        } else {
+            u8 cls = 0, act = 0, locus = 0;
+            ext_error(g_dos.last_error, &cls, &act, &locus);
+            e->ax = g_dos.last_error;
+            e->bx = (u16)(((u16)cls << 8) | act);
+            e->cx = (u16)((u16)locus << 8);
+        }
+        set_ok(e);
+        return;
+    }
+    case 0x5A: {
+        /* AH=5Ah: create a unique temporary file.  We append TMPxxxxx.TMP to
+         * the directory named in DS:DX and retry on a name collision, which is
+         * what DOS 4.0 does with the 11-character template it is given. */
+        char tmpl[DOS_MAX_PATH];
+        char path[DOS_MAX_PATH + 16];
+        static const char hexd[] = "0123456789ABCDEF";
+        read_dos_str(e, e->ds, e->dx, tmpl, sizeof(tmpl));
+        int h = -1, rc = FAT_EIO;
+        u32 seed = plat_ticks_ms();
+        for (int attempt = 0; attempt < 64; attempt++) {
+            char tail[16];
+            u32 s = seed + (u32)attempt * 0x9E3779B9u + (u32)attempt;
+            int n = 0;
+            tail[n++] = 'T'; tail[n++] = 'M'; tail[n++] = 'P';
+            for (int k = 0; k < 5; k++) tail[n++] = hexd[(s >> (k * 4)) & 0xF];
+            tail[n++] = '.'; tail[n++] = 'T'; tail[n++] = 'M'; tail[n++] = 'P';
+            tail[n] = 0;
+            if (strlen(tmpl) + (u32)n + 2 >= sizeof(path)) { rc = FAT_ENOPATH; break; }
+            strcpy(path, tmpl);
+            int len = (int)strlen(path);
+            if (len == 0) {
+                strcpy(path, tail);
+            } else if (path[len - 1] == '\\' || path[len - 1] == '/') {
+                strcat(path, tail);
+            } else {
+                /* Replace the template's name part with our own name. */
+                int cut = len;
+                while (cut > 0 && path[cut - 1] != '\\' && path[cut - 1] != '/' &&
+                       path[cut - 1] != ':') cut--;
+                path[cut] = 0;
+                strcat(path, tail);
+            }
+            rc = dos_creat(path, &h);
+            if (rc == FAT_OK) break;
+            if (rc != FAT_EEXIST) break;
+        }
+        if (rc != FAT_OK) { set_err(e, (u8)dos_error_code(rc)); return; }
+        set_ok(e);
+        e->ax = (u16)h;
+        return;
+    }
+    case 0x60: {
+        /* AH=60h: canonicalise DS:SI into a full "C:\DIR\FILE.EXT" at ES:DI. */
+        char in[DOS_MAX_PATH];
+        char out[DOS_MAX_PATH + 8];
+        char abs[DOS_MAX_PATH];
+        int drive = 0;
+        read_dos_str(e, e->ds, e->si, in, sizeof(in));
+        int rc = dos_parse_path(in, &drive, abs, sizeof(abs));
+        if (rc != FAT_OK) { set_err(e, (u8)dos_error_code(rc)); return; }
+        int n = 0;
+        out[n++] = (char)('A' + drive);
+        out[n++] = ':';
+        out[n++] = '\\';
+        for (int i = 0; abs[i] && n < (int)sizeof(out) - 1; i++)
+            out[n++] = (abs[i] == '/') ? '\\' : abs[i];
+        out[n] = 0;
+        for (int i = 0; i < n; i++) emu_wb(e, e->es, (u16)(e->di + i), (u8)out[i]);
+        emu_wb(e, e->es, (u16)(e->di + n), 0);
+        set_ok(e);
+        return;
+    }
+    case 0x63:
+        /* AH=63h: DBCS lead byte table.  AL=0 (no DBCS support), which is what
+         * DOS reports when the loaded country uses a single-byte code page. */
+        e->ax = (u16)(e->ax & 0xFF00);
+        set_ok(e);
+        return;
+    case 0x68: {
+        /* AH=68h: commit a file's buffered data to the device.  Our writes are
+         * synchronous, so this only has to validate the handle. */
+        int h = e->bx;
+        if (h < 0 || h >= g_dos.files_limit) { set_err(e, 0x06); return; }
+        if (h >= 5 && !g_dos.handles[h].used) { set_err(e, 0x06); return; }
+        set_ok(e);
+        return;
+    }
+    case 0x6C: {
+        /* AH=6Ch: extended open/create.  DS:SI name, BX mode, CX attributes,
+         * DX action bits: bit0 open existing, bit1 create if missing,
+         * bit2 replace existing.  Returns AX = handle, CX = 1 opened /
+         * 2 created / 3 replaced. */
+        char path[DOS_MAX_PATH];
+        u8 attr8 = 0;
+        int exists, h = -1, rc, took = 0;
+        u16 mode = e->bx;
+        u8 action = (u8)(e->dx & 0xFF);
+        read_dos_str(e, e->ds, e->si, path, sizeof(path));
+        int open_mode = (int)(mode & 0x03);
+        int share = (int)((mode >> 4) & 0x07);
+        if (open_mode == 3) open_mode = 2;
+        if (share > DOS_SHARE_DENY_NONE) share = DOS_SHARE_COMPAT;
+        exists = (dos_attr_get(path, &attr8) == FAT_OK);
+        u8 newattr = (u8)(e->cx & 0x27);
+        if (!newattr) newattr = 0x20;
+        if (exists && (action & 0x04)) {
+            rc = dos_creat_ex(path, newattr, share, open_mode, &h);
+            took = 3;
+        } else if (exists && (action & 0x01)) {
+            rc = dos_open_ex(path, open_mode, share, &h);
+            took = 1;
+        } else if (exists) {
+            set_err(e, 0x50);              /* asked to fail if it exists */
+            return;
+        } else if (action & 0x02) {
+            rc = dos_creat_ex(path, newattr, share, open_mode, &h);
+            took = 2;
+        } else {
+            set_err(e, 0x02);              /* file not found */
+            return;
+        }
+        if (rc != FAT_OK) { set_err(e, (u8)dos_error_code(rc)); return; }
+        set_ok(e);
+        e->ax = (u16)h;
+        e->cx = (u16)took;
         return;
     }
     default:

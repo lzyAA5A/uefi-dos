@@ -1,4 +1,4 @@
-# DOS 4.0 real-mode semantics (阶段 4) — UEFI-DOS 0.5.0
+# DOS 4.0 real-mode semantics (阶段 4) — UEFI-DOS 0.5.0 .. 0.9.0
 
 阶段 4 把内核从 “能跑 DOS 2.11 程序” 扩展到 “按 DOS 4.0 的语义约束跑”。它与阶段 5
 （ring 3 / 分页 / 完整 DPMI）完全解耦：全部改动都在内核 `src/kernel/dos.c`、FCB 层
@@ -213,6 +213,97 @@ FAT32 的 `fat_write_chain` 偏移类型。
 4. `fat_create_file()` 创建后紧接的重新解析会失败（返回错误 2，文件却已建好）：
    已改为创建后直接使用调用方传入的 parent/name，不再重复解析。
 5. `mkfat16.py` 早期版本的 BPB 只写 `total_sectors16`，1.9 GB 卷必须写 `total32`。
+
+## 0.9.0：报告版本改为 4.00 + 补齐 DOS 4.0 的实模式调用面
+
+0.8.0 之前 `INT 21h AH=30h` 返回 `AX=0x0A02`（DOS 2.10）：这是为了绕开 Compaq
+DOS 2.11 `SYS.COM` 的版本门槛 —— 它反汇编出来是 `xchg ah,al; cmp ax,0136h;
+jb ...; cmp ax,020Ah; ja ...`，即只接受 0x0136..0x020A。0.9.0 起改为报告
+**DOS 4.00**（`AX=0x0004`），代价是那张 2.11 盘上的 `SYS.COM` 会拒绝运行。
+
+配置在 `src/uefidos_config.h`：
+
+| 宏 | 0.9.0 值 | 含义 |
+| --- | --- | --- |
+| `UEFIDOS_DOSVER_MAJOR` | 4 | 语义级别，`VER` 打印用 |
+| `UEFIDOS_DOSVER_MINOR` | 0 | 语义级别的小版本 |
+| `UEFIDOS_DOSVER_COMPAT_MINOR` | 0 | `AH=30h` 返回的 AH（次版本）。改回 `2/11/10` 即恢复旧行为 |
+
+### 新增的 INT 21h 入口
+
+| AH | 名称 | 实现要点 | 实测 |
+| --- | --- | --- | --- |
+| 32h | 取 DPB | 在保留 ROM 窗口 `F000:C100` 起为每个已挂载盘写一个 32 字节 DPB，链在 +17h；扇区字段相对卷首（减 `part_lba`） | `dpb-bps` 512、`dpb-nfats`、`dpb-spf` |
+| 52h | list of lists | `F000:C000`：+0 MCB 链（0）、+2 首个 DPB、+4 首个 SFT（0，句柄表不对外） | `lol-es`、`lol-dpb` |
+| 59h | 扩展错误 | `set_err()` 现在同时记录 `g_dos.last_error`/`last_error_valid`；59h 把错误码映射成 class/action/locus 三元组（2、3、0F → class 8；4、8 → 1；5、21、32 → 3；13、1E、1F、28 → 5；27 → 11；50 → 12；0B → 9；其余 13）。59h 自身总是清 CF | `exterr-code`=2、`exterr-class`=8 |
+| 5Ah | 唯一临时文件 | `TMP` + 5 位十六进制 + `.TMP`（8.3 合法），目录模板可以是 `X:\...\` 或以反斜杠结尾；`FAT_EEXIST` 时重试最多 64 次 | `5a-create`、`5a-find`、`5a-del` |
+| 60h | truename | `dos_parse_path()` → `C:\DIR\FILE.EXT`，大小写按用户输入保留 | `60h-drive`、`60h-root` |
+| 63h | DBCS 前导字节表 | `AL=0`（单字节代码页），与 DOS 在无 DBCS 国家码下的行为一致 | `63h-dbcs` |
+| 68h | commit | 写路径本来就是同步的，只校验句柄（`h < files_limit` 且 `used`，或 `h<5` 设备） | `68h` |
+| 6Ch | 扩展打开 | action 位：bit0 打开已有、bit1 不存在则创建、bit2 覆盖已有；mode 的低 3 位是访问模式、bit4-6 是 SHARE（复用 `dos_open_ex`/`dos_creat_ex`）；`AX` 返回句柄、`CX` 返回 1 打开 / 2 创建 / 3 覆盖；已存在但没置 bit0 → 错误 50h，不存在且没置 bit1 → 错误 02h | `6c-create/open/trunc/exists/nofile` |
+| 33h AL=05h | 启动盘 | 返回第一个已挂载盘的盘符（通常 C: → 2） | 由 6Ch/60h 的用例间接覆盖 |
+
+### 验证程序 `DOS4TEST.COM`
+
+`tools/make_dos4_test.py` 手写汇编生成（约 1.8 KB），30 项断言，最后打印
+`DOS4-OK` / `DOS4-FAIL`：
+
+```
+C:\> DOS4TEST
+DOS version 4.00
+version: OK
+-- AH=32h drive parameter block
+dpb-bps: OK
+dpb-nfats: OK
+dpb-spf: OK
+-- AH=52h list of lists
+lol-es: OK
+lol-dpb: OK
+-- AH=59h extended error
+exterr-code: OK
+exterr-class: OK
+-- AH=6Ch extended open
+6c-create-cf: OK
+6c-create: OK
+6c-write-cf: OK
+6c-write: OK
+68h: OK
+6c-open-cf: OK
+6c-open: OK
+6c-read-cf: OK
+6c-read: OK
+6c-data: OK
+6c-trunc-cf: OK
+6c-trunc: OK
+6c-exists: OK
+6c-nofile: OK
+6c-del: OK
+-- AH=5Ah temporary file
+5a-create-cf: OK
+5a-create: OK
+5a-find: OK
+5a-del: OK
+-- AH=60h truename
+60h-drive: OK
+60h-root: OK
+C:\hello.txt
+63h-dbcs: OK
+DOS4-OK
+```
+
+写这类程序有两条硬规矩（第一版因此误报了 7 个 “FAIL”）：
+
+1. 一项检查不能依赖跨过另一项检查还存活的寄存器 —— 上报函数要经 INT 21h 打印，
+   `BX`/`SI` 会被打掉，所以结果先落到内存单元，比较前重新读；
+2. CF 只在中断返回的那一刻有意义，`check_cf` 必须紧跟在 INT 之后发射。
+
+### 仍然不做的部分（有意为之）
+
+- `AH=59h` 不会返回建议动作之外的东西（不写 ES:DI 的补充结构），`AH=5Ah` 不回传
+  文件名（DOS 也不回传）；
+- `AH=52h` 的 SFT 指针是 0：句柄表是内核内部数组，没有可暴露的 DOS 结构；
+- `AH=32h` 的 DPB 使用 32 字节布局（DOS 3.x/4.0 的 0x17h 字段是 “next DPB” 指针），
+  高位字段按 16 位截顶（FAT32 大卷的 `first data sector` 会饱和到 0xFFFF）。
 
 ## 阶段 5 的现状
 

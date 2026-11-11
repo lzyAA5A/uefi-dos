@@ -8,20 +8,22 @@ runs a `COMMAND.COM`-like shell, and executes 16-bit real-mode DOS programs
 through an internal 8086 interpreter — a "V86-like" software compatibility layer
 with no BIOS and no virtualization support required.
 
-The compatibility target starts at **MS-DOS 2.11** semantics (that is what
-programs see) and then adds the things DOS 2.11 never had: FAT32, 64-bit UEFI
-boot, FAT16 large volumes, DOS 4.0 file-sharing/locking/FCB semantics, a native
-32/64-bit DOS API, and 386 protected mode with a DPMI 0.9 host.
+It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
+(`INT 21h AH=30h` returns `AX=0x0004`), on top of which it adds the things DOS
+never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
+API, and 386 protected mode with a DPMI 0.9 host.
 
-Version 0.8.0 — 24 of 24 automated checks pass on the Windows host harness and
-on QEMU + OVMF (x86_64 and IA32). 0.8.0 adds **graphics** (INT 10h mode 13h and
-VESA VBE on the UEFI framebuffer), **every UEFI volume as a drive** (a plugged-in
-USB stick becomes `D:`), and **long file names** (VFAT LFNs, readable and
-creatable, with the DOS side still seeing 8.3).
+Version 0.9.0 — 25 of 25 automated checks pass on the Windows host harness and
+on QEMU + OVMF (x86_64 and IA32). 0.9.0 **raises the reported DOS level from
+2.11 to 4.0** and adds the rest of the DOS 4.0 real-mode surface that portable
+tools probe: `AH=32h` DPB, `AH=52h` list of lists, `AH=59h` extended error,
+`AH=5Ah` unique temporary files, `AH=60h` truename, `AH=63h` DBCS probe,
+`AH=68h` commit and `AH=6Ch` extended open, all asserted by
+`DOS4TEST.COM` (30 checks in one 16-bit program).
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-0.8.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.8.0.zip)
+[**Download `UEFI-DOS-0.9.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-0.9.0.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -46,7 +48,7 @@ both inside. `make_release.ps1` rebuilds that package from source.
 | Shell | `DIR CD MD RD DEL REN TYPE COPY CLS ECHO VER VOL DATE TIME PROMPT PATH SET MEM HELP APITEST MOUNT UNMOUNT CONFIG FCB DRIVES EXIT SHUTDOWN`, batch files, `AUTOEXEC.BAT` |
 | DOS kernel | 8.3 names (+ VFAT long names), per-drive current directory, DOS error codes, **DOS 4.0 semantics** (see below) |
 | 8086 emulator | 8086/80186 real-mode interpreter, 16 MiB emulated RAM, PSP, IVT, `.COM` + MZ `.EXE` loader with relocations, 8087 escapes treated as 8086 no-ops |
-| INT 21h | console, file I/O, find first/next + DTA, dirs, date/time, version, vector get/set, IOCTL, dup, PSP, memory stubs, **EXEC (AH=4Bh)**, **AH=67h**, **AH=5Ch** byte locks, **SHARE modes** |
+| INT 21h | console, file I/O, find first/next + DTA, dirs, date/time, version (`4.00`), vector get/set, IOCTL, dup, PSP, memory stubs, **EXEC (AH=4Bh)**, **AH=67h**, **AH=5Ch** byte locks, **SHARE modes**, **DOS 4.0 surface: 32h 52h 59h 5Ah 60h 63h 68h 6Ch** |
 | FCB family | AH=0Fh 10h 11h 12h 13h 14h 15h 16h 17h 21h 22h 23h 27h 28h (`src/emu/fcb.c`) |
 | INT 10h / 16h / 1Ah / 13h | text services (mode set, cursor, read/write char+attr, teletype, window scroll) on the emulated screen, blocking keyboard with extended keys, BIOS tick counter, disk read/write/geometry |
 | Video (text) | an 80×25 colour-text screen at `B800:0000` inside emulated RAM; both direct VRAM writes and `INT 10h` output land there and are mirrored to the console (only changed rows are redrawn) |
@@ -81,7 +83,7 @@ services rather than the shell's own code:
 ```
 C:\> INFO
 === UEFI-DOS system info ===
-DOS version : 2.10
+DOS version : 4.00
 Date        : 2026-11-08
 Time        : 13:58:09
 Drive       : C:
@@ -123,7 +125,7 @@ path end to end:
 
 ```
 C:\> APITEST
-APITEST: DOS version 2.10, native pointer size 8
+APITEST: DOS version 4.00, native pointer size 8
 APITEST: size 16, read 16 bytes: Hello UEFI-DOS!
 APITEST: wrote 13 bytes to TMPAPI.TXT
 APITEST: find '*.TXT' -> 1 file(s)
@@ -165,6 +167,12 @@ for existing 16-bit code in [`docs/migration.md`](docs/migration.md).
 | Byte locks | `AH=5Ch AL=0/1`, overlap detection inside the handle table, conflicts report error 5 |
 | FAT16 large volumes | allocation cursor + free-cluster counter; `tools/mkfat16.py` builds 32 MB / 1.9 GB sparse test volumes |
 | File size | kept `u32`, practical 32 MB ceiling per DOS 4.0 semantics (verified on a 1.9 GB FAT16 volume) |
+| Reported version | `AH=30h` returns `AX=0x0004` (DOS 4.00); `VER` prints the same level. Set `UEFIDOS_DOSVER_*` in `src/uefidos_config.h` to claim another one |
+| Data structures | `AH=32h` synthesises a DPB per mounted drive in the reserved ROM window; `AH=52h` returns a list-of-lists whose `+2` points at that chain |
+| Error reporting | `AH=59h` maps the last failure to a class / suggested action / locus triple (`2`→class 8, `5`/`21h`→class 3, `27h`→class 11, `50h`→class 12, …) |
+| Extended open | `AH=6Ch` with the DOS action bits: open-existing / create-if-missing / replace-existing, returning handle in `AX` and `1`/`2`/`3` in `CX`; `AH=68h` commits |
+| Unique temp files | `AH=5Ah` appends `TMPxxxxx.TMP` to the given directory and retries on collision, so two programs never collide |
+| Truename / DBCS | `AH=60h` canonicalises to `C:\DIR\FILE.EXT`; `AH=63h` reports `AL=0` (single-byte code page) |
 
 Dual-path consistency (`--phase46`) runs the same operation through `INT 21h`
 and through `g_dosapi` and asserts: valid handle, identical byte counts,
@@ -323,7 +331,7 @@ C:\> RUN64 HELLO64.EXE
 RUN64: loading HELLO64.EXE as a native 64-bit image
 === UEFI-DOS native SDK demo ===
 pointer size : 64 bit
-DOS version  : 2.10
+DOS version  : 4.00
 reading      : HELLO.TXT (16 bytes)
 Hello UEFI-DOS!
 wrote        : NATIVE.TXT (44 bytes)
@@ -406,13 +414,16 @@ Long Name Report.txt         31 13:12  11-11-26
 
 ## Regression suite
 
-`run_tests.ps1` builds everything and runs 24 checks: FAT32 read/write selftest;
+`run_tests.ps1` builds everything and runs 25 checks: FAT32 read/write selftest;
 host shell DIR/TYPE/VER/COM/EXE/EXEC/video plus native-API and upcall demos;
 host shell write path; floppy-image `A:` mount; FAT12 write on a 2.11 image;
 FAT12 read of 2.11 and MS-DOS 5 images; two QEMU/OVMF boot smoke tests (x86_64
 and IA32); phase 4/6 semantics with the dual-path comparison; FAT16 write on
 32 MB and 1.9 GB volumes; `FCBTEST.COM` exercising FCB calls from real 16-bit
-code; and the bundled `INFO`/`CAL`/`SUM`/`HEX` utilities (the calendar month is
+code; the DOS 4.0 conformance probe `DOS4TEST.COM` (DPB, list of lists, extended
+error, `AH=6Ch` create/open/replace/refuse, temp file, truename, DBCS, commit —
+30 assertions, one `DOS4-OK` line); and the bundled `INFO`/`CAL`/`SUM`/`HEX`
+utilities (the calendar month is
 cross-checked against the host clock); and `KEYTEST.COM`, which reads five keys through `INT 16h` and prints their scan codes, proving arrow and function keys reach the guest as real BIOS scan codes; the
 instruction-level emulator test vectors (`--itest`, 49 cases); and `RUN64
 HELLO64.EXE`, a native 64-bit program built by the SDK, which prints the DOS
@@ -469,9 +480,13 @@ buffer at `0040:001A/001C/001E`, non-callable interrupt vectors, and the missing
 `INT 1Ah` timer. Those programs are third-party work and are not part of this
 repository.
 
-Also worth knowing: `INT 21h AH=30h` reports DOS **2.10** (`AX=0x0A02`) because
-2.11-era tools (`SYS.COM` among them) reject a minor revision above 10;
-`VER` still says 2.11 because that is the semantics the kernel implements.
+Also worth knowing: `INT 21h AH=30h` reports DOS **4.00** (`AX=0x0004`) so that
+modern tools take their DOS 4+ code path. Up to 0.8.0 it reported `2.10`
+(`AX=0x0A02`) because the Compaq DOS 2.11 `SYS.COM` version gate rejects a minor
+revision above 10 — claiming 4.00 costs exactly that: the 2.11 `SYS.COM` now
+refuses to run. `src/uefidos_config.h` documents the two-line change that goes
+back to the old behaviour (`UEFIDOS_DOSVER_MAJOR 2`, `..._MINOR 11`,
+`..._COMPAT_MINOR 10`).
 
 ## Layout
 
@@ -515,6 +530,7 @@ tools/
                      VRAM.COM / UPCALL.COM
   make_pm_tests.py   hand-assembles DPMITEST.COM (real -> PM16 -> PM32 -> reflection)
   make_fcb_test.py   hand-assembles FCBTEST.COM (FCB create/write/read/delete)
+  make_dos4_test.py  hand-assembles DOS4TEST.COM (DOS 4.0 call surface, 30 checks)
   make_tools.py      generates the bundled utilities INFO/CAL/SUM/HEX/CLOCK
   mkfat16.py         sparse FAT16 formatter (32 MB .. 1.9 GB test volumes)
   extract_dos_file.py  pull one file out of a raw FAT image by cluster chain
