@@ -12,7 +12,7 @@ Versions tested (all original media, nothing redistributed):
 | --- | --- | --- |
 | Windows 1.0 Developer Release 5 (Nov 1984) | 3 x 360K | kernel boots and reaches its message loop, screen stays blank |
 | Windows 1.01 (1985) | 5 x 360K | **`SETUP` installs the whole release**; `WIN` starts the kernel, no window drawn yet |
-| Windows 2.03 (1987) | 9 x 360K | `SETUP` starts, needs the same work as 1.01 |
+| Windows 2.03 (1987) | 9 x 360K | not tested yet: it uses the same real-mode core as 1.01, so the same blockers apply |
 | Windows/286 2.10 (1988) | 4 x 1.2M | not attempted: needs 286 protected mode + a real EMM |
 
 ## What was added for this (0.11.0)
