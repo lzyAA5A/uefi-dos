@@ -28,6 +28,16 @@ void plat_serial_puts(const char *s);
 void plat_serial_hex(const char *tag, u64 v);
 int  plat_kbd_poll(void);        /* -1 = no key, else CP437 code */
 int  plat_kbd_scan(void);        /* last scan code seen (0 if none) */
+/* Pointing device, polled by the emulated INT 33h driver.  Returns 1 when the
+ * device reported new movement or a button transition; dx/dy are relative
+ * mickeys and *buttons holds the current state (bit0 left, bit1 right,
+ * bit2 middle).  Returns 0 and leaves the outputs alone when there is no
+ * pointing device or nothing happened. */
+int  plat_mouse_poll(int *dx, int *dy, int *buttons);
+/* 1 when the firmware/host actually has a pointing device. */
+int  plat_mouse_present(void);
+/* 1 when the firmware/host actually has a pointing device. */
+int  plat_mouse_present(void);
 void plat_shutdown(void);
 u64  plat_ticks_ms(void);
 void plat_sleep_ms(u32 ms);

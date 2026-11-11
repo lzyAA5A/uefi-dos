@@ -45,7 +45,7 @@ try {
         'src/emu/emu.c',
         'src/emu/int21.c',
             'src/emu/fcb.c',
-        'src/emu/int2f.c',
+        'src/emu/int2f.c', 'src/emu/int33.c',
         'src/emu/dpmi.c'
     )
     $objs = @()
@@ -96,7 +96,7 @@ try {
             'src/emu/emu.c',
             'src/emu/int21.c',
             'src/emu/fcb.c',
-            'src/emu/int2f.c',
+            'src/emu/int2f.c', 'src/emu/int33.c',
             'src/emu/dpmi.c'
         )
         $hostExe = Join-Path $Build 'hosttest.exe'
@@ -114,6 +114,7 @@ try {
             @{ script = 'tools/make_tools.py';    what = 'bundled utility set' }
     @{ script = 'tools/make_keytest.py';  what = 'keyboard scan-code probe' }
         @{ script = 'tools/make_gfx_test.py'; what = 'graphics mode probes (mode 13h + VESA)' }
+        @{ script = 'tools/make_video_test.py'; what = 'CGA mode 4 and INT 33h mouse probes' }
         @{ script = 'tools/make_dos4_test.py'; what = 'DOS 4.0 conformance probe' }
         )
         foreach ($g in $generators) {
@@ -142,7 +143,8 @@ try {
         $programs = @('HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM',
                       'UPCALL.COM','DTATEST.COM','I2FTEST.COM','DPMITEST.COM','FCBTEST.COM',
                       'INFO.COM','CLOCK.COM','HEX.COM','SUM.COM','CAL.COM','KEYTEST.COM',
-                            'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM')
+                            'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM',
+                            'CGATEST.COM','MOUSETST.COM')
         # the native SDK examples are PE images, not DOS programs: optional
         $nativePrograms = @()
         foreach ($p in @('HELLO64.EXE','HELLO32.EXE','FILET64.EXE','FILET32.EXE')) {

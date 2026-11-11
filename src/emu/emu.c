@@ -48,9 +48,18 @@ u16 emu_in_port(Emu *e, u16 port)
         e->pal_read_phase = (u8)((e->pal_read_phase + 1) % 768);
         return v;
     }
+    case 0x60: {                /* keyboard data port: last scan code */
+        u16 v = 0;
+        if (e->kbd_out_valid) {
+            v = e->kbd_irq_scan;
+            e->kbd_out_valid = 0;
+        }
+        return v;
+    }
     case 0x61: return 0x20;     /* timer gate / speaker off */
     case 0x92: return (u16)(e->a20_on ? 0x02 : 0x00); /* system control port A */
-    case 0x64: return 0x14;     /* keyboard controller status: input buffer empty */
+    case 0x64:                  /* keyboard controller status */
+        return (u16)(0x14 | (e->kbd_out_valid ? 0x01 : 0x00));
     default: return 0;
     }
 }
@@ -66,6 +75,19 @@ void emu_out_port(Emu *e, u16 port, u16 val)
         e->dac[(e->pal_index & 0xFF) * 3 + (e->pal_phase % 3)] = (u8)(val & 0x3F);
         e->pal_phase = (u8)((e->pal_phase + 1) % 3);
         if (e->pal_phase == 0) e->pal_index = (u16)((e->pal_index + 1) & 0xFF);
+        break;
+    case 0x3D8:     /* CGA mode control: intensity bit for the 4-colour modes */
+        if (e->gfx_kind) {
+            e->cga_int = (u8)((val & 0x10) ? 1 : 0);
+            emu_cga_palette(e);
+        }
+        break;
+    case 0x3D9:     /* CGA colour select: palette bit 5, background 0..15 */
+        if (e->gfx_kind) {
+            e->cga_pal = (u8)((val >> 5) & 1);
+            e->cga_bg = (u8)(val & 0x0F);
+            emu_cga_palette(e);
+        }
         break;
     case 0x92:      /* System Control Port A: bit 1 = A20 enable */
         e->a20_on = (val & 0x02) ? 1 : 0;
@@ -213,6 +235,8 @@ static int kbd_pop(Emu *e, int *scan, int *ascii)
     return 1;
 }
 
+static int vector_is_ours(Emu *e, int n);
+
 void emu_kbd_pump(Emu *e)
 {
     int k, scan, asc;
@@ -221,6 +245,15 @@ void emu_kbd_pump(Emu *e)
     if (k < 0) return;
     if (k & 0x100) { scan = k & 0xFF; asc = 0; }
     else { asc = k & 0xFF; scan = kbd_scan_of(asc); }
+    /* A program that installed its own INT 9 handler (Windows 1.x/2.x keyboard
+     * drivers) expects hardware-style delivery: latch the scan code for port
+     * 60h and raise IRQ1 instead of writing into the BIOS buffer. */
+    if (!vector_is_ours(e, 9)) {
+        e->kbd_irq_scan = (u8)scan;
+        e->kbd_out_valid = 1;
+        e->kbd_irq_pending = 1;
+        return;
+    }
     kbd_push(e, scan, asc);
 }
 
@@ -402,8 +435,10 @@ void emu_wb32(Emu *e, u16 seg, u32 off, u8 v)
     if (e->pm_fault) return;
     watch_write(e, a, v);
     e->mem[a] = v;
-    if (e->gfx_w && a >= 0xA0000u && a < 0xA0000u + (u32)e->gfx_w * e->gfx_h) {
-        g_video_dirty = 1;
+    if (e->gfx_w) {
+        if (a >= 0xA0000u && a < 0xA0000u + (u32)e->gfx_w * e->gfx_h) g_video_dirty = 1;
+        /* CGA modes keep the bitmap at B8000 (16 KB, both fields) */
+        else if (e->gfx_kind && a >= 0xB8000u && a < 0xB8000u + 0x4000u) g_video_dirty = 1;
     }
     if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) {
         if (!e->gfx_w) g_video_dirty = 1;
@@ -457,8 +492,10 @@ void emu_wb(Emu *e, u16 seg, u16 off, u8 v)
     if (e->pm_fault) return;
     watch_write(e, a, v);
     e->mem[a] = v;
-    if (e->gfx_w && a >= 0xA0000u && a < 0xA0000u + (u32)e->gfx_w * e->gfx_h) {
-        g_video_dirty = 1;
+    if (e->gfx_w) {
+        if (a >= 0xA0000u && a < 0xA0000u + (u32)e->gfx_w * e->gfx_h) g_video_dirty = 1;
+        /* CGA modes keep the bitmap at B8000 (16 KB, both fields) */
+        else if (e->gfx_kind && a >= 0xB8000u && a < 0xB8000u + 0x4000u) g_video_dirty = 1;
     }
     if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) {
         if (!e->gfx_w) g_video_dirty = 1;
@@ -490,11 +527,94 @@ void emu_wd(Emu *e, u16 seg, u16 off, u32 v)
  * mirror is throttled; the force flush at the end of emu_run catches up. */
 static u32 g_last_flush_ms = 0;
 
+/* CGA modes 4/5/6 keep their pixels at B8000 in the even/odd interleaved
+ * layout, packed 2 (mode 4/5) or 1 (mode 6) bits per pixel.  They are expanded
+ * into a linear 8bpp buffer here so every platform colour path stays a plain
+ * palette lookup. */
+static u8 g_expand[640 * 200];
+
+/* software pointer: an arrow blitted into the frame we are about to show */
+static const char *g_arrow[12] = {
+    "X           ",
+    "XX          ",
+    "X.X         ",
+    "X..X        ",
+    "X...X       ",
+    "X....X      ",
+    "X.....X     ",
+    "X......X    ",
+    "X.......X   ",
+    "X....XXXXX  ",
+    "X..X..X     ",
+    "X.X X..X    "
+};
+
+/* pixels the pointer overwrote in a *linear* framebuffer (which is real guest
+ * VRAM, so they are put back before the next frame is drawn) */
+static int g_cur_prev_n;
+static u32 g_cur_prev_off[256];
+static u8  g_cur_prev_val[256];
+
+static void pointer_undo(u8 *fb)
+{
+    for (int i = 0; i < g_cur_prev_n; i++) fb[g_cur_prev_off[i]] = g_cur_prev_val[i];
+    g_cur_prev_n = 0;
+}
+
+static void cga_expand(Emu *e)
+{
+    const u8 *src = e->mem + 0xB8000;
+    int w = (int)e->gfx_w, h = (int)e->gfx_h;
+    for (int y = 0; y < h; y++) {
+        const u8 *row = src + (y >> 1) * 80 + ((y & 1) ? 0x2000 : 0);
+        u8 *dst = g_expand + (u32)y * (u32)w;
+        if (e->gfx_kind == 2) {
+            for (int x = 0; x < w; x++)
+                dst[x] = (u8)((row[x >> 3] >> (7 - (x & 7))) & 1);
+        } else {
+            for (int x = 0; x < w; x++)
+                dst[x] = (u8)((row[x >> 2] >> (6 - ((x & 3) << 1))) & 3);
+        }
+    }
+}
+
+static void draw_pointer(Emu *e, u8 *fb, int w, int h, int record)
+{
+    if (!e->mouse_visible || e->mouse_show_count <= 0) return;
+    for (int row = 0; row < 12; row++) {
+        int py = e->mouse_y + row;
+        if (py < 0 || py >= h) continue;
+        for (int col = 0; col < 12; col++) {
+            char c = g_arrow[row][col];
+            int px = e->mouse_x + col;
+            if (c == ' ' || px < 0 || px >= w) continue;
+            u32 off = (u32)py * (u32)w + (u32)px;
+            if (record && g_cur_prev_n < 256) {
+                g_cur_prev_off[g_cur_prev_n] = off;
+                g_cur_prev_val[g_cur_prev_n] = fb[off];
+                g_cur_prev_n++;
+            }
+            fb[off] = (c == 'X') ? 0 : 15;
+        }
+    }
+}
+
 void emu_video_flush(Emu *e)
 {
     if (e->gfx_w) {
-        /* graphics: the whole A0000 window is the framebuffer */
-        plat_video_gfx_show(e->mem + 0xA0000, (int)e->gfx_w, (int)e->gfx_h, e->dac);
+        int w = (int)e->gfx_w, h = (int)e->gfx_h;
+        u8 *fb;
+        if (e->gfx_kind) {
+            cga_expand(e);
+            fb = g_expand;
+            g_cur_prev_n = 0;
+            draw_pointer(e, fb, w, h, 0);
+        } else {
+            fb = e->mem + 0xA0000;
+            pointer_undo(fb);           /* remove the previous arrow */
+            draw_pointer(e, fb, w, h, 1);
+        }
+        plat_video_gfx_show(fb, w, h, e->dac);
         return;
     }
     plat_video_show(e->mem + 0xB8000);
@@ -566,12 +686,57 @@ void emu_dac_write(Emu *e, u8 index, u8 r, u8 g, u8 b)
 int emu_gfx_geometry(u16 mode, int *w, int *h)
 {
     switch (mode) {
+    case 0x04:                                  /* CGA 320x200x4 */
+    case 0x05:
+                *w = 320; *h = 200; return 1;
+    case 0x06:  *w = 640; *h = 200; return 1;   /* CGA 640x200x2 */
     case 0x13:  *w = 320; *h = 200; return 1;   /* VGA mode 13h */
     case 0x100: *w = 640; *h = 400; return 1;   /* VESA 640x400x8 */
     case 0x101: *w = 640; *h = 480; return 1;   /* VESA 640x480x8 */
     case 0x103: *w = 800; *h = 600; return 1;   /* VESA 800x600x8 */
     default: return 0;
     }
+}
+
+/* CGA palettes: 0 = green/red/brown, 1 = cyan/magenta/white, each in a low and
+ * a high intensity variant (the "intensity" bit of the mode control register). */
+static const u8 g_cga_pal[2][2][3][3] = {
+    {
+        { { 0, 42, 0 },   { 42, 0, 0 },    { 42, 21, 0 } },
+        { { 0, 42, 42 },  { 42, 0, 42 },   { 42, 42, 42 } }
+    },
+    {
+        { { 21, 63, 21 }, { 63, 21, 21 },  { 63, 63, 21 } },
+        { { 21, 63, 63 }, { 63, 21, 63 },  { 63, 63, 63 } }
+    }
+};
+
+void emu_cga_palette(Emu *e)
+{
+    const u8 *bg = g_vga_default[e->cga_bg & 0x0F];
+    e->dac[0] = bg[0];
+    e->dac[1] = bg[1];
+    e->dac[2] = bg[2];
+    if (e->gfx_kind == 2) {
+        e->dac[3] = 63;             /* mode 6: black / white */
+        e->dac[4] = 63;
+        e->dac[5] = 63;
+        return;
+    }
+    for (int i = 0; i < 3; i++) {
+        const u8 *c = g_cga_pal[e->cga_int & 1][e->cga_pal & 1][i];
+        e->dac[(i + 1) * 3 + 0] = c[0];
+        e->dac[(i + 1) * 3 + 1] = c[1];
+        e->dac[(i + 1) * 3 + 2] = c[2];
+    }
+}
+
+/* 0 = linear 8bpp at A0000, 1 = CGA 2bpp at B8000, 2 = CGA 1bpp at B8000 */
+static int gfx_kind_of(u16 mode)
+{
+    if (mode == 0x04 || mode == 0x05) return 1;
+    if (mode == 0x06) return 2;
+    return 0;
 }
 
 /* program-visible mode set (INT 10h AH=00); mode 3/7/0 fall back to text */
@@ -584,17 +749,43 @@ void emu_set_video_mode(Emu *e, u16 mode)
     if (emu_gfx_geometry(mode, &w, &h) && plat_video_gfx_begin(w, h) == 0) {
         e->gfx_w = (u16)w;
         e->gfx_h = (u16)h;
-        if (e->video_mode != 0x13) emu_dac_reset(e);
-        memset(e->mem + 0xA0000, 0, (u32)w * (u32)h);
+        e->gfx_kind = gfx_kind_of(mode);
+        g_cur_prev_n = 0;
+        if (e->gfx_kind) {
+            memset(e->mem + 0xB8000, 0, 0x4000);   /* CGA bitmap window */
+            e->cga_pal = 1;
+            e->cga_bg = 0;
+            e->cga_int = 0;
+            emu_dac_reset(e);
+            emu_cga_palette(e);
+        } else {
+            if (e->video_mode != 0x13) emu_dac_reset(e);
+            memset(e->mem + 0xA0000, 0, (u32)w * (u32)h);
+        }
         e->mem[0x450] = 0;
         e->mem[0x451] = 0;
+        /* BDA: video mode byte, columns and rows-1 (programs read these) */
+        e->mem[0x449] = (u8)mode;
+        e->mem[0x44A] = (u8)((w >= 640) ? 80 : 40);
+        e->mem[0x484] = 24;
         g_video_dirty = 1;
         video_flush_force(e);
         return;
     }
+    /* text mode: show the last graphics frame first (a program that paints and
+     * immediately switches back still expects to see what it drew) */
+    if (e->gfx_w) {
+        g_video_dirty = 1;
+        video_flush_force(e);
+    }
     /* text mode: reset the hardware cursor and blank the 80x25 buffer */
     e->gfx_w = 0;
     e->gfx_h = 0;
+    e->gfx_kind = 0;
+    g_cur_prev_n = 0;
+    e->mem[0x449] = (u8)((mode == 7) ? 7 : 3);
+    e->mem[0x44A] = 80;
+    e->mem[0x484] = 24;
     plat_video_text();
     e->mem[0x450] = 0;                    /* 0040:0050 = cursor position */
     e->mem[0x451] = 0;
@@ -1721,6 +1912,7 @@ static int step_8086(Emu *e)
         case 0xF2: rep = 1; rep_ne = 1; break;
         case 0xF3: rep = 1; break;
         case 0xF0: break;                       /* LOCK */
+        case 0xF1: break;   /* ICEBP / debugger trap: no debugger attached */
         case 0x66: e->op32 = !e->op32; break;    /* operand-size */
         case 0x67: e->addr32 = !e->addr32; break;/* address-size */
         default: prefix_done = 1; break;
@@ -2353,7 +2545,12 @@ static int step_8086(Emu *e)
     case 0xCC: intn = 3; goto do_int;
     case 0xCE: if (getf(e, F_OF)) { intn = 4; goto do_int; } break;
     case 0x0F: step_386(e, seg_ov); break;
-    case 0xF4: e->halted = 1; e->exit_code = 0; break;   /* HLT */
+            case 0xF4:   /* HLT: an idle wait (sti; hlt) is how real-mode Windows
+                      * sleeps until the next timer tick, so with interrupts
+                      * enabled this is just a wasted step; only a HLT with IF
+                      * clear really ends the program */
+            if (!(e->eflags & F_IF)) { e->halted = 1; e->exit_code = 0; }
+            break;
     case 0x9B: break;                                    /* WAIT */
     case 0xD8: case 0xD9: case 0xDA: case 0xDB:
     case 0xDC: case 0xDD: case 0xDE: case 0xDF:
@@ -2407,6 +2604,7 @@ do_int: {
             else if (intn == 0x1A) int1a_handler(e);
             else if (intn == 0x2F) int2f_handler(e);
             else if (intn == 0x31) int31_handler(e);
+            else if (intn == 0x33) int33_handler(e);
             else if (intn == 0x60) int60_handler(e);
             else { e->halted = 1; e->exit_code = 0; }
             return 0;
@@ -2444,7 +2642,8 @@ u16 emu_pop16(Emu *e) { return pop16(e); }
 static int hooked_int(int n)
 {
     return n == 0x10 || n == 0x13 || n == 0x16 || n == 0x1A || n == 0x20 ||
-           n == 0x21 || n == 0x27 || n == 0x2F || n == 0x31 || n == 0x60;
+           n == 0x21 || n == 0x27 || n == 0x2F || n == 0x31 || n == 0x33 ||
+           n == 0x60;
 }
 
 static void install_ivt(Emu *e)
@@ -2517,6 +2716,12 @@ static void arena_setup(Emu *e, u16 psp_seg, u32 image_bytes);
    the environment block at offset 2 and DOS extenders (DOS/16M, DOS/4GW)
    read it back to reopen their own EXE and load the 32-bit image. */
 static char g_prog_path[DOS_MAX_PATH];
+
+/* the program the shell/EXEC last loaded: AH=30h consults it for SETVER */
+const char *emu_current_program(void)
+{
+    return g_prog_path;
+}
 
 /* Number of times an unsupported opcode was executed, and whether the message
    should be printed.  The brute-force audit (tools --ifuzz) silences the text
@@ -2603,6 +2808,18 @@ int emu_init(Emu *e)
     emu_dac_reset(e);
     e->eflags = 0x0202;
     e->video_mode = 3;
+    e->cga_pal = 1;
+    e->cga_bg = 0;
+    e->cga_int = 0;
+    e->mouse_minx = 0;
+    e->mouse_miny = 0;
+    e->mouse_maxx = 639;
+    e->mouse_maxy = 199;
+    e->mouse_x = 320;
+    e->mouse_y = 100;
+    e->mouse_show_count = 0;
+    e->mouse_mask = 0;
+    e->irq_last_tick_ms = plat_ticks_ms();
     e->cr0 = 0;
     e->a20_on = 0;              /* gate masked: real-mode addresses wrap at 1 MB */
     seg_cache_sync(e);          /* real-mode caches: base = sel<<4, limit 64K */
@@ -2889,6 +3106,125 @@ static void dump_vram(Emu *e)
 static void dump_vram(Emu *e) { (void)e; }
 #endif
 
+/* ------------------------------------------------------------------ */
+/* hardware interrupts (IRQ0 timer, IRQ1 keyboard)                     */
+/* ------------------------------------------------------------------ */
+/* 1 when the vector still points at UEFI-DOS' own stub/handler, i.e. the guest
+ * did not install a handler of its own. */
+static int vector_is_ours(Emu *e, int n)
+{
+    u16 off = emu_rw(e, 0, (u16)(n * 4));
+    u16 seg = emu_rw(e, 0, (u16)(n * 4 + 2));
+    /* unhooked vectors point at the IRET stub (F000:FFE0), hooked ones at a
+     * per-vector trampoline: either way the guest installed nothing */
+    if (seg == MAGIC_SEG && (off == STUB_OFF || off == MAGIC_OFF)) return 1;
+    if (hooked_int(n) && seg == TRAMP_SEG && off == TRAMP_SLOT(n)) return 1;
+    return 0;
+}
+
+/* Deliver hardware-style: push FLAGS:CS:IP and jump to the guest handler.  The
+ * loop closes it again when the handler's IRET lands back on the saved point. */
+static int inject_irq(Emu *e, int vec)
+{
+    u16 off = emu_rw(e, 0, (u16)(vec * 4));
+    u16 seg = emu_rw(e, 0, (u16)(vec * 4 + 2));
+    if (!seg) return 0;
+    e->irq_ip = (u16)e->eip;
+    e->irq_cs = e->cs;
+    e->irq_sp = (u16)e->esp;
+    e->irq_ss = e->ss;
+    pushv(e, e->eflags, 16);
+    push16(e, e->cs);
+    push16(e, (u16)e->eip);
+    set_cs_ip(e, seg, off);
+    e->irq_depth++;
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* INT 33h mouse: host pointer -> guest driver state                   */
+/* ------------------------------------------------------------------ */
+static void mouse_clamp(Emu *e)
+{
+    if (e->mouse_x < e->mouse_minx) e->mouse_x = e->mouse_minx;
+    if (e->mouse_x > e->mouse_maxx) e->mouse_x = e->mouse_maxx;
+    if (e->mouse_y < e->mouse_miny) e->mouse_y = e->mouse_miny;
+    if (e->mouse_y > e->mouse_maxy) e->mouse_y = e->mouse_maxy;
+}
+
+int emu_mouse_available(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = plat_mouse_present() ? 1 : 0;
+    return cached;
+}
+
+/* Called from the instruction loop: samples the host pointer and turns it into
+ * driver state plus the pending-event mask that AX=000Ch clients ask for. */
+void emu_mouse_pump(Emu *e)
+{
+    int dx = 0, dy = 0, buttons = 0;
+    if (!emu_mouse_available()) return;
+    if (!plat_mouse_poll(&dx, &dy, &buttons)) return;
+    if (dx || dy) {
+        e->mouse_x += dx;
+        e->mouse_y += dy;
+        mouse_clamp(e);
+        e->mouse_dx += dx;
+        e->mouse_dy += dy;
+        e->mouse_pending_events |= 0x01;        /* motion */
+        g_video_dirty = 1;
+    }
+    for (int b = 0; b < 3; b++) {
+        int bit = 1 << b;
+        int was = (e->mouse_buttons & bit) != 0;
+        int now = (buttons & bit) != 0;
+        if (was == now) continue;
+        if (now) {
+            e->mouse_press[b]++;
+            e->mouse_pending_events |= 1 << (2 + 2 * b);
+        } else {
+            e->mouse_release[b]++;
+            e->mouse_pending_events |= 1 << (3 + 2 * b);
+        }
+        g_video_dirty = 1;
+    }
+    e->mouse_buttons = buttons;
+}
+
+/* The handler registered with INT 33h AX=000Ch is a far procedure that returns
+ * with RETF.  A frame is pushed here and the instruction loop notices the exact
+ * return (CS:IP:SS:SP all back where they were) to close the callback again. */
+static void mouse_inject(Emu *e)
+{
+    u16 mask = (u16)(e->mouse_pending_events & (e->mouse_mask ? e->mouse_mask : 0x7F));
+    if (!mask) {
+        e->mouse_pending_events = 0;
+        return;
+    }
+    if (!e->mouse_handler_off) {
+        e->mouse_pending_events = 0;
+        return;
+    }
+    e->mouse_cb_ip = (u16)e->eip;
+    e->mouse_cb_cs = e->cs;
+    e->mouse_cb_sp = (u16)e->esp;
+    e->mouse_cb_ss = e->ss;
+    push16(e, e->cs);                  /* RETF target */
+    push16(e, (u16)e->eip);
+    set_cs_ip(e, e->mouse_handler_seg, e->mouse_handler_off);
+    e->ax = mask;
+    e->bx = (u16)e->mouse_buttons;
+    e->cx = (u16)e->mouse_x;
+    e->dx = (u16)e->mouse_y;
+    e->si = (u16)e->mouse_dx;          /* motion since the last callback */
+    e->di = (u16)e->mouse_dy;
+    e->mouse_pending_events = 0;
+    e->mouse_dx = 0;
+    e->mouse_dy = 0;
+    e->mouse_cb_active = 1;
+}
+
 int emu_run(Emu *e)
 {
     u64 steps = 0;
@@ -2905,7 +3241,11 @@ int emu_run(Emu *e)
     while (!e->halted && !g_plat_shutdown_requested) {
         trace_step(e, steps);
         ring_note(e);
+        if (!e->mouse_cb_active && e->mouse_pending_events) mouse_inject(e);
         step(e);
+        if (e->mouse_cb_active && e->cs == e->mouse_cb_cs && e->eip == (u32)e->mouse_cb_ip &&
+            e->ss == e->mouse_cb_ss && (u16)e->esp == e->mouse_cb_sp)
+            e->mouse_cb_active = 0;
         steps++;
         total++;
         if (!(e->cr0 & CR0_PE) && (e->cs < 0x10 || (e->cs >= 0xA000 && e->cs != 0xF000))) {
@@ -2916,7 +3256,30 @@ int emu_run(Emu *e)
         }
         if (g_video_dirty && (steps & 0x3FFFFull) == 0) { video_flush(e); }
         if ((total & 0x3FFFFull) == 0) dump_vram(e);   /* steps resets on keys */
-        if ((steps & 0x3FFull) == 0) emu_kbd_pump(e);
+        if ((steps & 0x3FFull) == 0) { emu_kbd_pump(e); emu_mouse_pump(e); }
+        /* IRQ0 (timer, 18.2 Hz) and IRQ1 (keyboard) go to the guest's own
+         * handlers when it installed some; interrupts stay masked while the
+         * guest keeps IF clear, exactly like the hardware would */
+        if ((steps & 0xFFFull) == 0 && !(e->cr0 & CR0_PE)) {
+            /* BIOS tick counter (40:6C): real hardware bumps it from the timer
+             * interrupt, so programs that poll the variable directly (Windows'
+             * idle loop does) see time move even without INT 1Ah */
+            emu_wd(e, 0x40, 0x6C, (u32)(plat_ticks_ms() / 55u));
+            if (e->irq_depth && e->cs == e->irq_cs && (u16)e->eip == e->irq_ip &&
+                e->ss == e->irq_ss && (u16)e->esp == e->irq_sp)
+                e->irq_depth = 0;
+            if ((e->eflags & F_IF) && e->irq_depth == 0) {
+                u32 now = plat_ticks_ms();
+                if ((u32)(now - e->irq_last_tick_ms) >= 55) {
+                    e->irq_last_tick_ms = now;
+                    if (!vector_is_ours(e, 8)) inject_irq(e, 8);
+                }
+                if (e->kbd_irq_pending) {
+                    e->kbd_irq_pending = 0;
+                    if (!vector_is_ours(e, 9)) inject_irq(e, 9);
+                }
+            }
+        }
         /* an interactive program that is receiving keys is alive, not stuck:
          * refill its instruction budget so it can never be killed while the
          * user is playing */

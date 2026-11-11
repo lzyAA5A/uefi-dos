@@ -44,6 +44,11 @@ typedef struct dos_drive {
 #define DOS_SHARE_DENY_READ  3
 #define DOS_SHARE_DENY_NONE  4
 
+/* per-program DOS version overrides (CONFIG.SYS SETVER= / shell SETVER) */
+#ifndef DOS_SETVER_MAX
+#define DOS_SETVER_MAX 12
+#endif
+
 #define DOS_LOCK_MAX 8
 
 typedef struct dos_lock {
@@ -89,6 +94,11 @@ struct dos_state {
     int  files_limit;         /* effective FILES= (handles 0..files_limit-1) */
     int  fcb_limit;           /* FCBS= first value */
     int  last_drive;          /* LASTDRIVE= (0-based), clamped to DOS_MAX_DRIVES-1 */
+    /* SETVER-style per-program DOS version overrides.  Windows 1.x refuses to
+     * start on "DOS 4.00" while a few DOS 2.11 tools want the old quirk, so the
+     * reported version is settable per program instead of globally. */
+    struct { char prog[13]; u8 major, minor; } ver_fix[DOS_SETVER_MAX];
+    int  ver_fix_count;
     char path_env[DOS_MAX_PATH];
     char prompt[48];
     /* DOS memory arena (INT 21h AH=48h/49h/4Ah).  The loaded program owns
@@ -160,6 +170,10 @@ int  dos_read_drive(fat_vol *v, u32 cl, u32 size, u32 off, void *buf, u32 len, u
 
 /* CONFIG.SYS (DOS 4.0 subset: FILES=, FCBS=, LASTDRIVE=, others ignored) */
 void dos_read_config_sys(void);
+/* per-program DOS version overrides (SETVER): returns 1 when `path` matches */
+int  dos_setver_add(const char *prog, int major, int minor);
+int  dos_setver_del(const char *prog);
+int  dos_setver_lookup(const char *path, int *major, int *minor);
 
 /* DOS 4.0 SHARE byte-range locks (INT 21h AH=5Ch) */
 int  dos_lock_region(int handle, u32 off, u32 len);

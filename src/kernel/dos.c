@@ -1303,6 +1303,76 @@ static int cfg_num(const char *p, int dflt)
     return v;
 }
 
+/* ------------------------------------------------------------------ *
+ *  SETVER: per-program DOS version overrides
+ * ------------------------------------------------------------------ */
+/* keep only the file name, upper-cased, so "C:\WINDOWS\WIN.COM" matches "WIN.COM" */
+static void setver_name(const char *path, char out[13])
+{
+    const char *base = path;
+    for (const char *p = path; *p; p++)
+        if (*p == '\\' || *p == '/' || *p == ':') base = p + 1;
+    int n = 0;
+    while (base[n] && n < 12) {
+        char c = base[n];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 32);
+        out[n] = c;
+        n++;
+    }
+    out[n] = 0;
+}
+
+int dos_setver_lookup(const char *path, int *major, int *minor)
+{
+    char want[13];
+    if (!path || !*path) return 0;
+    setver_name(path, want);
+    for (int i = 0; i < g_dos.ver_fix_count; i++) {
+        if (strcmp(g_dos.ver_fix[i].prog, want) == 0) {
+            if (major) *major = g_dos.ver_fix[i].major;
+            if (minor) *minor = g_dos.ver_fix[i].minor;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int dos_setver_add(const char *prog, int major, int minor)
+{
+    char nm[13];
+    setver_name(prog, nm);
+    if (!nm[0]) return FAT_EINVAL;
+    if (major < 0 || major > 9 || minor < 0 || minor > 99) return FAT_EINVAL;
+    for (int i = 0; i < g_dos.ver_fix_count; i++) {
+        if (strcmp(g_dos.ver_fix[i].prog, nm) == 0) {
+            g_dos.ver_fix[i].major = (u8)major;
+            g_dos.ver_fix[i].minor = (u8)minor;
+            return FAT_OK;
+        }
+    }
+    if (g_dos.ver_fix_count >= DOS_SETVER_MAX) return FAT_ENOSPC;
+    int i = g_dos.ver_fix_count++;
+    memcpy(g_dos.ver_fix[i].prog, nm, sizeof(nm));
+    g_dos.ver_fix[i].major = (u8)major;
+    g_dos.ver_fix[i].minor = (u8)minor;
+    return FAT_OK;
+}
+
+int dos_setver_del(const char *prog)
+{
+    char nm[13];
+    setver_name(prog, nm);
+    for (int i = 0; i < g_dos.ver_fix_count; i++) {
+        if (strcmp(g_dos.ver_fix[i].prog, nm) == 0) {
+            for (int j = i; j + 1 < g_dos.ver_fix_count; j++)
+                g_dos.ver_fix[j] = g_dos.ver_fix[j + 1];
+            g_dos.ver_fix_count--;
+            return FAT_OK;
+        }
+    }
+    return FAT_ENOENT;
+}
+
 void dos_read_config_sys(void)
 {
     int h;
@@ -1351,6 +1421,25 @@ void dos_read_config_sys(void)
                 if (d < 0) d = 0;
                 g_dos.last_drive = d;
             }
+        } else if (strcmp(key, "SETVER") == 0 || strcmp(key, "DOSVER") == 0) {
+            /* SETVER NAME 3.30  -- report another DOS version to that program */
+            char nm[16];
+            int nn = 0;
+            while (*q == ' ' || *q == '\t') q++;
+            while (*q && *q != ' ' && *q != '\t' && *q != ',' && nn < 15)
+                nm[nn++] = *q++;
+            nm[nn] = 0;
+            while (*q == ' ' || *q == '\t' || *q == ',') q++;
+            int maj = 0, min = 0;
+            while (*q >= '0' && *q <= '9') { maj = maj * 10 + (*q - '0'); q++; }
+            while (*q && *q != '.' && *q != ' ') q++;
+            if (*q == '.') {
+                q++;
+                int digits = 0;
+                while (*q >= '0' && *q <= '9') { min = min * 10 + (*q - '0'); q++; digits++; }
+                if (digits == 1) min *= 10;     /* "3.3" means 3.30 */
+            }
+            if (nn > 0 && maj > 0) dos_setver_add(nm, maj, min);
         }
         /* everything else: ignored */
     }

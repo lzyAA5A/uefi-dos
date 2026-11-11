@@ -377,6 +377,35 @@ extern EFI_GUID gEfiLoadedImageProtocolGuid;
 extern EFI_GUID gEfiSimpleFileSystemProtocolGuid;
 extern EFI_GUID gEfiBlockIoProtocolGuid;
 extern EFI_GUID gEfiGraphicsOutputProtocolGuid;
+
+/* ---- EFI_SIMPLE_POINTER_PROTOCOL: PS/2 and USB mice ---- */
+typedef struct {
+    INT64   RelativeMovementX;
+    INT64   RelativeMovementY;
+    INT64   RelativeMovementZ;
+    BOOLEAN LeftButton;
+    BOOLEAN RightButton;
+} EFI_SIMPLE_POINTER_STATE;
+
+typedef struct {
+    UINT64  ResolutionX;
+    UINT64  ResolutionY;
+    UINT64  ResolutionZ;
+    BOOLEAN LeftButton;
+    BOOLEAN RightButton;
+} EFI_SIMPLE_POINTER_MODE;
+
+typedef struct _EFI_SIMPLE_POINTER_PROTOCOL {
+    EFI_STATUS (EFIAPI *Reset)(struct _EFI_SIMPLE_POINTER_PROTOCOL *This,
+                               BOOLEAN ExtendedVerification);
+    EFI_STATUS (EFIAPI *GetState)(struct _EFI_SIMPLE_POINTER_PROTOCOL *This,
+                                  EFI_SIMPLE_POINTER_STATE *State);
+    void      *WaitForInput;   /* EFI_EVENT (declared later in this header) */
+    EFI_SIMPLE_POINTER_MODE *Mode;
+} EFI_SIMPLE_POINTER_PROTOCOL;
+
+extern EFI_GUID gEfiSimplePointerProtocolGuid;
+
 extern EFI_GUID gEfiSerialIoProtocolGuid;
 extern EFI_GUID gEfiDevicePathProtocolGuid;
 

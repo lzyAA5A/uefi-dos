@@ -13,30 +13,30 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.0.0** — 27 of 27 automated checks pass on the Windows host harness
-and on QEMU + OVMF (x86_64 and IA32). 1.0.0 is the first stable release: the
-command surface, the native ABI and the on-disk layout are frozen from here on.
+Version **1.1.0** — 30 of 30 automated checks pass on the Windows host harness
+and on QEMU + OVMF (x86_64 and IA32).
 
-What changed since 0.9.0: the native SDK grew a real program
-([`FILETOOL`](docs/sdk-guide.md): 32-bit file I/O, long names, drive table and a
-16-bit downcall) plus whole-file helpers, a full
-[**SDK developer guide**](docs/sdk-guide.md), and a brute-force opcode audit
-(`--ifuzz`, 12,800 instruction streams) that guards the emulator's decoder.
-Testing against real software continued: [DOOM 0.99](docs/doom.md) found three
-more genuine DOS bugs — `POPF` discarding IOPL/NT (so DOS/16M decided the CPU was
-a 286), a missing `0F BA` (BT/BTS/BTR/BTC with an immediate bit) and an
-environment block without the program path (so any DOS extender failed to reopen
-its own image). The same release keeps everything 0.10.0 earned:
-[SimEarth 1.5](docs/simearth.md) installs and runs, and eight of its
-assumptions about a PC are now part of the test suite — 16-bit code with
-negative stack displacements, real-mode address wraparound at 1 MB (the A20
-gate), a populated BIOS data area, a DOS memory arena (`AH=48h/49h/4Ah`), a
-correct PSP, EXE images larger than 64 KB, `AH=47h` returning a drive-less path,
-and a usable default `FILES=`.
+1.1.0 is about the hardware a real-mode GUI needs. `INT 10h` now speaks the
+**CGA modes 4/5/6** (the even/odd-interleaved bitmap at `B800`, palette
+selection through `AH=0Bh` and the `3D8h`/`3D9h` ports), there is a full
+**`INT 33h` mouse driver** backed by the firmware's `EFI_SIMPLE_POINTER_PROTOCOL`
+(plus a software pointer drawn into the frame), and the emulator finally
+**injects hardware interrupts** — `INT 8` at 18.2 Hz and `INT 9` with a latched
+scan code on port `60h` — because real-mode Windows installs its own keyboard and
+timer handlers and never touches the BIOS buffer. `HLT` became an idle step, so
+`sti; hlt` message loops work, and the BIOS tick counter at `0040:006C` runs.
+
+One DOS-level feature made that possible: **`SETVER`**, a per-program DOS
+version. UEFI-DOS reports MS-DOS 4.00, and Windows 1.x refuses to start on
+anything newer than 3.x, so `SETVER WIN.COM 3.30` (shell or `CONFIG.SYS`) is the
+escape hatch instead of lowering the version for everybody. With it, **Windows
+1.01's `SETUP` installs the whole release** — see
+[`docs/windows1x.md`](docs/windows1x.md) for how far the runtime gets and what is
+still missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.0.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.0.0.zip)
+[**Download `UEFI-DOS-1.1.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.0.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -70,6 +70,10 @@ both inside. `make_release.ps1` rebuilds that package from source.
 | Long file names | VFAT LFN chains are parsed for lookup, `DIR` and the native API, and files created with a long name get an LFN chain plus a generated 8.3 alias; DOS programs still see only the alias |
 | Native 32/64-bit API | `g_dosapi` table — same operations and error codes as INT 21h, native pointers, one source for both firmware widths |
 | 16-bit bridge | `exec16()` downcall (native → real mode) and `INT 2Fh AX=5544h` upcall (real mode → native) |
+| CGA graphics | `INT 10h` modes 4/5/6 (320×200×4, 640×200×2), interleaved bitmap at `B800`, palette/background via `AH=0Bh` and the `3D8h`/`3D9h` ports |
+| Mouse | `INT 33h` functions 0000h–0024h, event handler + mask (000Ch), firmware pointer polling and a software arrow drawn into the frame |
+| Hardware interrupts | `INT 8` at 18.2 Hz and `INT 9` with a scan code latched for port `60h`, delivered only to handlers the guest installed; BIOS tick counter `0040:006C` runs |
+| Program version override | `SETVER prog x.yy` (shell) and `SETVER=` (`CONFIG.SYS`) change what `INT 21h AH=30h` reports to one program |
 | 386 protected mode | real → protected transition, GDT/LDT parsing, hidden segment caches with limit checks, `MOV CRn`/`LGDT`/`LIDT`/`LLDT`/`CLTS`, 32-bit addressing (SIB), `0F xx` opcode set, protected-mode IDT delivery |
 | DPMI 0.9 host | `INT 2Fh AX=1687h` bootstrap, `INT 31h` descriptors/DoS memory/real-mode reflection — see [`docs/protected-mode.md`](docs/protected-mode.md) |
 | Bundled utilities | `INFO CAL SUM HEX CLOCK` — 16-bit `.COM` programs built from `tools/make_tools.py` (see below) |
@@ -428,7 +432,7 @@ Long Name Report.txt         31 13:12  11-11-26
 
 ## Regression suite
 
-`run_tests.ps1` builds everything and runs 27 checks: FAT32 read/write selftest;
+`run_tests.ps1` builds everything and runs 30 checks: FAT32 read/write selftest;
 host shell DIR/TYPE/VER/COM/EXE/EXEC/video plus native-API and upcall demos;
 host shell write path; floppy-image `A:` mount; FAT12 write on a 2.11 image;
 FAT12 read of 2.11 and MS-DOS 5 images; two QEMU/OVMF boot smoke tests (x86_64
@@ -494,6 +498,33 @@ buffer at `0040:001A/001C/001E`, non-callable interrupt vectors, and the missing
 `INT 1Ah` timer. Those programs are third-party work and are not part of this
 repository.
 
+### Windows 1.x / 2.x
+
+The `INT 10h` CGA modes, the `INT 33h` driver and the hardware-interrupt
+injection exist because of Windows. `SETUP` from **Windows 1.01** runs end to end
+on a merged install volume: it detects the CGA adapter, copies the build and
+utility disks, writes `WIN.COM`/`WIN100.BIN`/`WIN100.OVL` and finishes with
+"Microsoft Windows is set up to operate on your computer". `WIN` starts the
+kernel once `SETVER WIN.COM 3.30` / `SETVER WIN100.BIN 3.30` satisfy its DOS
+version gate, but the desktop is not drawn yet; `docs/windows1x.md` lists the
+remaining services (a real `SFT` in the list of lists, `INT 15h`/XMS, the
+installable display-driver loader). **Windows 1.0 Developer Release 5** boots its
+kernel into the message loop the same way. Windows/286 2.10 needs 286 protected
+mode and an EMM, which UEFI-DOS does not have.
+
+### The firmware graphics path that GCC deleted
+
+Setting a video mode under QEMU/OVMF crashed straight into the firmware's own
+exception handler (`#UD` at a `ud2`). The cause was not the emulator: the GOP
+lookup helper `gop_find()` was defined but never called, so `g_gop` was provably
+NULL and the compiler removed the *entire* graphics path —
+`plat_video_gfx_show` compiled to a bare `ret` and `plat_video_gfx_begin` to a
+load from address 0x18 followed by `ud2`. Every host-side graphics test still
+passed, because the host platform has its own implementation; only a real
+firmware boot shows it. 1.1.0 calls `gop_find()` where it belongs and the
+regression suite now asserts that the built `BOOTX64.EFI` still contains real
+bodies for those functions (`tools/check_efi_symbols.py`).
+
 ### SimEarth 1.5 (1993): the milestone case
 
 `docs/simearth.md` is a step-by-step account of running a commercial 1993 game:
@@ -552,6 +583,7 @@ src/
   emu/fcb.c          DOS 4.0 FCB call family (AH=0Fh..28h)
   emu/int2f.c        INT 2Fh native multiplex (16-bit -> native upcall)
   emu/dpmi.c         DPMI 0.9 host: INT 2Fh/1687h, INT 31h, INT 60h entry
+  emu/int33.c        INT 33h mouse driver (position, buttons, event callback)
   emu/itest.c        instruction-level test vectors (hosttest --itest)
   host/              Windows platform + selftest/shell/fatlist/phase46/fat16 harness
 sdk/
@@ -571,6 +603,7 @@ tools/
   make_pm_tests.py   hand-assembles DPMITEST.COM (real -> PM16 -> PM32 -> reflection)
   make_fcb_test.py   hand-assembles FCBTEST.COM (FCB create/write/read/delete)
   make_dos4_test.py  hand-assembles DOS4TEST.COM (DOS 4.0 call surface, 30 checks)
+  make_video_test.py hand-assembles CGATEST.COM (mode 4 stripes) and MOUSETST.COM (INT 33h)
   make_tools.py      generates the bundled utilities INFO/CAL/SUM/HEX/CLOCK
   mkfat16.py         sparse FAT16 formatter (32 MB .. 1.9 GB test volumes)
   extract_dos_file.py  pull one file out of a raw FAT image by cluster chain

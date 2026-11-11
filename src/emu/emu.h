@@ -77,6 +77,35 @@ typedef struct Emu {
     /* graphics modes (INT 10h AH=00 mode 13h / VESA 4F02h): the framebuffer
      * lives at A0000 in emulated RAM, 8 bits per pixel */
     u16 gfx_w, gfx_h;
+    /* INT 10h AH=00 also selects the CGA packed modes 4/5/6, whose VRAM is at
+     * B8000 in the real even/odd-interleaved layout.  gfx_kind says how the
+     * flush has to read it: 0 = linear 8bpp at A0000, 1 = CGA 2bpp (mode 4/5),
+     * 2 = CGA 1bpp (mode 6). */
+    int gfx_kind;
+    /* CGA attribute state (INT 10h AH=0Bh and the 3D8h/3D9h ports): palette
+     * 0/1, background index and the intensity bit.  Expanded into the DAC so
+     * the platform layer never has to know about CGA colour rules. */
+    u8 cga_pal, cga_bg, cga_int;
+    /* INT 33h mouse state */
+    int  mouse_x, mouse_y;
+    int  mouse_minx, mouse_miny, mouse_maxx, mouse_maxy;
+    int  mouse_buttons;          /* bit0 left, bit1 right, bit2 middle */
+    int  mouse_visible;          /* show count > 0 */
+    int  mouse_show_count;
+    u16  mouse_press[3];         /* press counters per button */
+    u16  mouse_release[3];       /* release counters per button */
+    u16  mouse_handler_off, mouse_handler_seg;
+    u16  mouse_mask;             /* event mask for the callback */
+    int  mouse_pending_events;   /* events not yet delivered to the handler */
+    int  mouse_cb_active;        /* inside the user callback right now */
+    u16  mouse_cb_ip, mouse_cb_cs, mouse_cb_sp, mouse_cb_ss; /* return point */
+    int  mouse_dx, mouse_dy;     /* motion accumulated since the last query */
+    int  irq_depth;              /* hardware interrupt currently executing */
+    u32  irq_last_tick_ms;       /* last INT 8h injection */
+    int  kbd_irq_pending;        /* a key is waiting for IRQ1 delivery */
+    u8   kbd_irq_scan;           /* scan code latched for port 60h */
+    int  kbd_out_valid;          /* port 60h holds an unread scan code */
+    u16  irq_ip, irq_cs, irq_sp, irq_ss;  /* return point of the IRQ handler */
     u8  dac[256 * 3];       /* 6-bit VGA DAC, R,G,B */
     u16 pal_index;          /* 3C8h write index */
     u8  pal_phase;          /* 0..2 within a 3C9h triple (write) */
@@ -155,6 +184,9 @@ void emu_dac_reset(Emu *e);
 void emu_dac_read(Emu *e, u8 index, u8 out[3]);
 void emu_dac_write(Emu *e, u8 index, u8 r, u8 g, u8 b);
 void emu_video_flush(Emu *e);          /* repaint now (text mirror or framebuffer) */
+void emu_cga_palette(Emu *e);          /* rebuild DAC entries 0..3 for CGA modes */
+void emu_mouse_pump(Emu *e);           /* poll the host pointer, queue events */
+int  emu_mouse_available(void);
 void emu_seg_cache_sync(Emu *e);
 void emu_set_seg(Emu *e, int idx, u16 sel);
 void emu_push16(Emu *e, u16 v);
@@ -167,12 +199,14 @@ void int16_handler(Emu *e);
 void int13_handler(Emu *e);
 void int1a_handler(Emu *e);
 void int2f_handler(Emu *e);
+void int33_handler(Emu *e);   /* INT 33h mouse driver (emu/int33.c) */
 int  fcb_int21(Emu *e, u8 ah);
 void int31_handler(Emu *e);   /* DPMI (emu/dpmi.c) */
 void int60_handler(Emu *e);   /* DPMI real-mode host entry */
 int  dpmi_install_check(Emu *e);
 void pm_patch_idt(Emu *e);    /* install service gates after LIDT */
 int  step_public(Emu *e);     /* execute one instruction (DPMI reflection) */
+const char *emu_current_program(void); /* DOS path of the running program */
 int  itest_run(const char *filter); /* emu/itest.c: instruction-level tests */
 int  ifuzz_run(int verbose);        /* emu/itest.c: brute-force opcode audit */
 extern int emu_unsupported_ops;     /* number of unsupported opcodes executed */
@@ -183,6 +217,10 @@ extern int emu_unsupported_quiet;   /* 1 = do not print them (fuzz mode) */
 /* DPMI host descriptor tables and the real-mode entry point. */
 #define DPMI_GDT_LIN 0x00F08000u
 #define DPMI_IDT_LIN 0x00F10000u
+/* INT 33h callback: the driver far-calls the client handler, which returns with
+ * RETF.  The injected frame returns to a stub in the BIOS area. */
+#define MOUSE_STUB_SEG 0xF000u
+#define MOUSE_STUB_OFF 0xFFC0u
 #define DPMI_ENTRY_SEG 0xF000u
 #define DPMI_ENTRY_OFF 0xF000u
 

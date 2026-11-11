@@ -180,6 +180,33 @@ Run-Check 'FAT: long file names (create via native API, DIR/TYPE by long name)' 
     '8.3 alias    : LONGNA~1.TXT -> Long Name Report.txt', 'Long Name Report.txt',
     'this file has a VFAT long name')
 
+# CGA: INT 10h mode 4 keeps the bitmap at B800 in the even/odd interleaved
+# layout, so the platform layer only ever sees an expanded 8bpp frame.
+Run-Check 'graphics: CGA mode 4 (320x200x4) paints the interleaved bitmap' {
+    $env:UEFIDOS_GFX_DUMP = (Join-Path $Build 't_cga.ppm')
+    Remove-Item $env:UEFIDOS_GFX_DUMP -ErrorAction SilentlyContinue
+    & $HostExe --shell (Join-Path $Build 'UEFIDOS.img') 'CGATEST'
+    $sz = 0
+    if (Test-Path $env:UEFIDOS_GFX_DUMP) { $sz = (Get-Item $env:UEFIDOS_GFX_DUMP).Length }
+    Write-Host "CGA framebuffer dump: $sz bytes"
+} @('gfx: mode set 320x200x8', 'gfx: 320x200 framebuffer ->', 'CGA-OK 320x200x4', 'CGA-TEXT-OK')
+
+# INT 33h: the driver must report a present mouse, clamp/track the host pointer
+# and expose the motion counters (UEFIDOS_MOUSE scripts the pointer for testing).
+# The firmware side of the graphics path is what actually reaches the screen.
+# GCC deletes it outright when it can prove g_gop is NULL (that shipped once as a
+# #UD inside OVMF), so the built EFI must still contain real function bodies.
+Run-Check 'firmware: GOP graphics code is present in the built EFI (not dead-code)' {
+    & $Python (Join-Path $Root 'tools/check_efi_symbols.py') (Join-Path $Build 'BOOTX64.EFI') `
+        'plat_video_gfx_begin=64' 'plat_video_gfx_show=256' 'plat_video_text=16'
+} @('EFI SYMBOLS OK', 'plat_video_gfx_show:')
+
+Run-Check 'mouse: INT 33h reset/position/motion counters' {
+    $env:UEFIDOS_MOUSE = '40,20,0;0,0,1;0,0,0'
+    & $HostExe --shell (Join-Path $Build 'UEFIDOS.img') 'MOUSETST'
+    Remove-Item Env:UEFIDOS_MOUSE -ErrorAction SilentlyContinue
+} @('MOUSE-OK', ' reset=AX FFFF', 'x=0168', 'y=0078', 'motion=0028,0014')
+
 # Graphics: INT 10h mode 13h and the VESA VBE calls must switch the display to a
 # pixel framebuffer whose contents we can dump (the host platform writes a PPM;
 # under QEMU the same code writes the GOP framebuffer directly).
@@ -243,7 +270,7 @@ Run-Check 'native SDK: FILETOOL writes/verifies a 3000-byte file and lists drive
 # (ICEBP) -- both undocumented on the 8086 and unused by DOS software.
 Run-Check 'emulator: brute-force opcode audit (IFUZZ)' {
     & $HostExe --ifuzz
-} @('IFUZZ DONE', 'ifuzz: 8086 opcodes missing: 0F D6 F1 (3 total)')
+} @('IFUZZ DONE', 'ifuzz: 8086 opcodes missing: 0F D6 (2 total)')
 
 Write-Host ""
 Write-Host "=============================="

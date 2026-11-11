@@ -23,13 +23,15 @@ static unsigned long g_trace_n;
 static int g_trace_enabled = -1;
 static void trace_call(Emu *e, int intno)
 {
+    static int trace_all = -1;
     if (g_trace_enabled < 0) {
         g_trace_enabled = getenv("UEFIDOS_TRACE_INTS") ? 1 : 0;
         if (g_trace_enabled) g_trace = fopen("build/int_trace.txt", "w");
     }
     if (!g_trace_enabled || !g_trace) return;
     g_trace_n++;
-    if (g_trace_n <= 300 || (g_trace_n % 1000) == 0) {
+    if (trace_all < 0) trace_all = getenv("UEFIDOS_TRACE_ALL") ? 1 : 0;
+    if (trace_all || g_trace_n <= 300 || (g_trace_n % 1000) == 0) {
         fprintf(g_trace, "%7lu INT%02X AH=%02X AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X ES=%04X",
                 g_trace_n, intno, (unsigned)(e->ax >> 8), e->ax, e->bx, e->cx, e->dx,
                 e->si, e->di, e->es);
@@ -533,8 +535,17 @@ void int21_handler(Emu *e)
          * claim is UEFIDOS_DOSVER_* (see src/uefidos_config.h): 4.00 by
          * default, with a documented way back to the 2.10 quirk that the
          * Compaq DOS 2.11 SYS.COM version gate wants. */
-        e->ax = (u16)(((UEFIDOS_DOSVER_COMPAT_MINOR & 0xFF) << 8) |
-                      (UEFIDOS_DOSVER_MAJOR & 0xFF));
+        {
+            int mj = UEFIDOS_DOSVER_MAJOR;
+            int mn = UEFIDOS_DOSVER_COMPAT_MINOR;
+            int om, on;
+            /* a SETVER entry for the running program wins over the default */
+            if (dos_setver_lookup(emu_current_program(), &om, &on)) {
+                mj = om;
+                mn = on;
+            }
+            e->ax = (u16)(((mn & 0xFF) << 8) | (mj & 0xFF));
+        }
         set_ok(e);
         return;
     case 0x32: {
@@ -1443,14 +1454,29 @@ void int10_handler(Emu *e)
         }
         break;
     }
+    case 0x0B: { /* BH=0: background/border colour, BH=1: CGA palette select */
+        if ((u8)(e->bx >> 8) == 0) {
+            e->cga_bg = (u8)(e->bx & 0x0F);
+        } else {
+            e->cga_pal = (u8)(e->bx & 0x01);
+            e->cga_int = (u8)((e->bx & 0x80) ? 1 : 0);
+        }
+        emu_cga_palette(e);
+        break;
+    }
     case 0x0E: { /* teletype output: writes, advances, scrolls at the bottom */
         tele_put(e, (u8)(e->ax & 0xFF), (u8)(e->bx & 0xFF));
         break;
     }
-    case 0x0F:
-        e->ax = (u16)((80 << 8) | (u8)e->video_mode);
+    case 0x0F: { /* current video mode: AL = mode, AH = columns */
+        int gw = 0, gh = 0;
+        int cols = 80;
+        if (emu_gfx_geometry(e->video_mode, &gw, &gh) && gw < 640) cols = 40;
+        else if (!emu_gfx_geometry(e->video_mode, &gw, &gh)) cols = 80;
+        e->ax = (u16)(((cols & 0xFF) << 8) | (u8)e->video_mode);
         e->bx = (u16)(e->bx & 0xFF00);
         break;
+    }
     case 0x12:
         e->ax = (u16)((e->ax & 0xFF00) | 0x12);
         e->bx = 0;

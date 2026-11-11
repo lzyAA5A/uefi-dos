@@ -12,27 +12,26 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.0.0** —— 27 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
-的 x86_64 与 IA32 实机启动）。1.0.0 是第一个正式版：命令面、原生 ABI 与磁盘布局从此
-冻结。相对 0.9.0 的变化：原生 SDK 多了一个真正干活的程序
-[`FILETOOL`](docs/sdk-guide.md)（32 位文件读写、长文件名、盘符表与 16 位下行调用），
-新增整文件读写辅助函数、完整的 [**SDK 开发文档**](docs/sdk-guide.md)，以及一个
-暴力指令审计（`--ifuzz`，12,800 条指令流）来守住模拟器的译码器。真软件测试继续：
-[DOOM 0.99](docs/doom.md) 又挖出三个货真价实的 DOS 兼容性 bug —— `POPF` 丢掉
-IOPL/NT（导致 DOS/16M 判定 CPU 是 286）、缺 `0F BA`（立即数位的
-BT/BTS/BTR/BTC）、以及环境块里没有程序路径（任何 DOS 扩展器都无法重新打开自己的
-镜像）。0.10.0 的战果全部保留：SimEarth 1.5 可以安装并运行。0.10.0 是**真软件版本**：第一次把一款 1993 年的商业
-DOS 游戏真正跑起来 —— [SimEarth 1.5](docs/simearth.md)：Maxis 的安装程序走完五屏、
-解开 overlay、写出 `SIMEARTH.CFG`，随后游戏以 320×200×256 画出地形图与控制面板。
-为此修掉了这类程序对 PC 的八个假设（详见 `docs/simearth.md`）：16 位代码用**负的
-8 位位移**访问栈帧、实模式地址在 **1 MB 处回绕**（A20 门）、**BIOS 数据区**必须描述
-彩色显示卡、`INT 21h AH=48h/49h/4Ah` 必须真的能分配内存、`PSP:0005h` 必须指向终止
-桩、MZ 镜像**可以大于 64 KB**、`AH=47h` 返回**不带盘符**的当前目录、默认 `FILES=`
-要给出多于三个可用句柄。
+当前版本 **1.1.0** —— 30 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+的 x86_64 与 IA32 实机启动）。
+
+1.1.0 补的是「实模式 GUI 需要的硬件」：`INT 10h` 现在支持 **CGA 模式 4/5/6**
+（`B800` 的奇偶场交错位图，`AH=0Bh` 与 `3D8h`/`3D9h` 端口选择调色板），有了完整的
+**`INT 33h` 鼠标驱动**（底层是固件的 `EFI_SIMPLE_POINTER_PROTOCOL`，指针由模拟器画进
+帧缓冲），并且模拟器终于会**注入硬件中断** —— 18.2 Hz 的 `INT 8`，以及带 `60h` 端口
+扫描码锁存的 `INT 9`：实模式 Windows 自己接管键盘与定时器中断，根本不读 BIOS 键盘缓冲。
+`HLT` 变成「空转一步」，所以 `sti; hlt` 消息循环能正常等待；`0040:006C` 的 BIOS 计时
+计数器也开始走。
+
+为此还加了一个 DOS 层特性：**`SETVER`**（按程序设置 DOS 版本）。UEFI-DOS 报告的是
+MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
+`SETVER WIN.COM 3.30`（命令行或 `CONFIG.SYS`）是逃生口，而不是把所有人的版本降下去。
+有了它，**Windows 1.01 的 `SETUP` 能装完整个发行版**；运行时卡在哪、还缺什么，见
+[`docs/windows1x.md`](docs/windows1x.md)。
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.0.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.0.0.zip)
+[**下载 `UEFI-DOS-1.1.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.0.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -65,6 +64,10 @@ DOS 游戏真正跑起来 —— [SimEarth 1.5](docs/simearth.md)：Maxis 的安
 | 长文件名 | 打开、`DIR` 与原生 API 都会解析 VFAT LFN 链；用长名建文件会写入 LFN 链并生成 8.3 别名，DOS 程序依旧只见别名 |
 | 原生 32/64 位 API | `g_dosapi` 服务表 —— 操作与错误码与 INT 21h 完全一致，原生指针，同一份源码产出两种位宽的固件 |
 | 16 位桥 | `exec16()` 下行调用（原生 → 实模式）与 `INT 2Fh AX=5544h` 上行调用（实模式 → 原生） |
+| CGA 图形 | `INT 10h` 模式 4/5/6（320×200×4、640×200×2），`B800` 交错位图，`AH=0Bh` 与 `3D8h`/`3D9h` 端口选调色板与背景色 |
+| 鼠标 | `INT 33h` 功能 0000h–0024h、事件回调与掩码（000Ch）、轮询固件指针，并把箭头画进帧缓冲 |
+| 硬件中断 | 18.2 Hz 的 `INT 8` 与 `INT 9`（扫描码锁存到 `60h` 端口），只投递给客户自己装的处理程序；`0040:006C` 计时器在走 |
+| 按程序版本覆盖 | `SETVER prog x.yy`（命令行）与 `SETVER=`（`CONFIG.SYS`）单独改变某个程序读到的 `INT 21h AH=30h` |
 | 386 保护模式 | 实模式 → 保护模式切换、GDT/LDT 解析、带限长检查的隐藏段缓存、`MOV CRn`/`LGDT`/`LIDT`/`LLDT`/`CLTS`、32 位寻址（SIB）、`0F xx` 指令族、保护模式 IDT 分发 |
 | DPMI 0.9 宿主 | `INT 2Fh AX=1687h` 引导、`INT 31h` 描述符/DOS 内存/实模式反射 —— 见 [`docs/protected-mode.md`](docs/protected-mode.md) |
 | 内置工具 | `INFO CAL SUM HEX CLOCK` —— 由 `tools/make_tools.py` 生成的 16 位 `.COM` 程序 |
@@ -483,6 +486,7 @@ src/
   emu/fcb.c          DOS 4.0 FCB 调用族（AH=0Fh..28h）
   emu/int2f.c        INT 2Fh 原生命令复用（16 位 → 原生上行调用）
   emu/dpmi.c         DPMI 0.9 宿主：INT 2Fh/1687h、INT 31h、INT 60h 入口
+  emu/int33.c        INT 33h 鼠标驱动（位置、按键、事件回调）
   emu/itest.c        指令级测试向量（hosttest --itest）
   host/              Windows 平台 + 自检/命令解释器/fatlist/phase46/fat16 测试器
 sdk/

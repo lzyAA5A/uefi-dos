@@ -21,6 +21,42 @@ static int g_last_scan;
 
 int g_plat_shutdown_requested = 0;
 
+/* ------------------------------------------------------------------ */
+/* pointing device (INT 33h backing store)                             */
+/* ------------------------------------------------------------------ */
+static EFI_SIMPLE_POINTER_PROTOCOL *g_mouse;
+static int g_mouse_tried;
+
+int plat_mouse_present(void)
+{
+    if (!g_mouse_tried) {
+        g_mouse_tried = 1;
+        if (gBS && gBS->LocateProtocol)
+            gBS->LocateProtocol(&gEfiSimplePointerProtocolGuid, NULL, (void **)&g_mouse);
+    }
+    return g_mouse != NULL;
+}
+
+/* device counts -> DOS mickeys: two counts make one pixel, but a single count
+ * must still move the pointer or slow mice feel dead */
+static int half_count(INT64 v)
+{
+    if (v > 0) return (int)((v + 1) / 2);
+    if (v < 0) return -(int)(((0 - v) + 1) / 2);
+    return 0;
+}
+
+int plat_mouse_poll(int *dx, int *dy, int *buttons)
+{
+    EFI_SIMPLE_POINTER_STATE st;
+    if (!plat_mouse_present() || !dx || !dy || !buttons) return 0;
+    if (g_mouse->GetState(g_mouse, &st) != EFI_SUCCESS) return 0;
+    *dx = half_count(st.RelativeMovementX);
+    *dy = half_count(st.RelativeMovementY);
+    *buttons = (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
+    return 1;
+}
+
 /* EFI_TIME (EDK2 layout) */
 typedef struct {
     UINT16 Year;
@@ -479,6 +515,10 @@ static int gop_find(void)
 
 int plat_video_gfx_begin(int w, int h)
 {
+    /* locate the GOP on the first graphics mode: without this call g_gop is
+     * provably NULL and the compiler drops every graphics path (the symptom was
+     * a #UD inside the firmware the moment a game set a video mode) */
+    if (gop_find() != 0) return 1;
     if (!g_gop->Mode || !g_gop->Mode->Info) return 1;
 
     UINT32 best = 0xFFFFFFFFu;
@@ -517,6 +557,7 @@ int plat_video_gfx_begin(int w, int h)
  * pixel loop is both simpler and predictable. */
 void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
 {
+    if (gop_find() != 0) return;
     if (!g_gfx_on || !g_gop || !g_gop->Mode || !g_gop->Mode->Info) return;
     if (!g_gop->Mode->FrameBufferBase || !g_gop->Mode->FrameBufferSize) return;
     g_show_count++;

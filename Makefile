@@ -53,7 +53,7 @@ SRC = src/uefi/main.c \
       src/emu/emu.c \
       src/emu/int21.c \
       src/emu/fcb.c \
-      src/emu/int2f.c \
+      src/emu/int2f.c src/emu/int33.c \
       src/emu/dpmi.c
 
 OBJ64 = $(patsubst %.c,$(BUILD)/obj64/%.o,$(SRC))
@@ -62,7 +62,7 @@ OBJ32 = $(patsubst %.c,$(BUILD)/obj32/%.o,$(SRC))
 HOST_SRC = src/host/host_main.c src/host/host_plat.c src/host/dual_test.c \
            src/host/fat16_test.c src/fs/fat.c src/kernel/dos.c src/shell/shell.c \
            src/api/dosapi.c src/api/native.c src/emu/itest.c src/emu/emu.c \
-           src/emu/int21.c src/emu/fcb.c src/emu/int2f.c src/emu/dpmi.c
+           src/emu/int21.c src/emu/fcb.c src/emu/int2f.c src/emu/int33.c src/emu/dpmi.c
 
 all: $(BUILD)/BOOTX64.EFI $(BUILD)/BOOTIA32.EFI
 

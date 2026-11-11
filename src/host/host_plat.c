@@ -164,6 +164,91 @@ static void kb_script_init(void)
     g_kb_next_ms = GetTickCount64() + 400;
 }
 
+/* ------------------------------------------------------------------ */
+/* pointing device                                                     */
+/* ------------------------------------------------------------------ */
+/* UEFIDOS_MOUSE: scripted events "dx,dy,buttons; dx,dy,buttons; ..." so the
+ * mouse path is testable without a physical device.  Without it the real
+ * Windows cursor and buttons are used (relative to the previous sample). */
+static char g_mouse_script[512];
+static int  g_mouse_loaded;
+static POINT g_mouse_last;
+static int  g_mouse_have_last;
+static u64  g_mouse_next_ms;
+
+int plat_mouse_present(void)
+{
+    if (!g_mouse_loaded) {
+        const char *m = getenv("UEFIDOS_MOUSE");
+        g_mouse_loaded = 1;
+        if (m) {
+            strncpy(g_mouse_script, m, sizeof(g_mouse_script) - 1);
+            g_mouse_script[sizeof(g_mouse_script) - 1] = 0;
+        }
+    }
+    return 1;
+}
+
+static int mouse_script_next(int *dx, int *dy, int *btn)
+{
+    char *s = g_mouse_script;
+    while (*s == ' ' || *s == ';') s++;
+    if (!*s) return 0;
+    int v[3] = { 0, 0, 0 };
+    for (int i = 0; i < 3; i++) {
+        int sign = 1;
+        while (*s == ' ') s++;
+        if (*s == '-') { sign = -1; s++; }
+        int n = 0;
+        while (*s >= '0' && *s <= '9') { n = n * 10 + (*s - '0'); s++; }
+        v[i] = sign * n;
+        while (*s == ' ') s++;
+        if (*s == ',') s++;
+        else break;
+    }
+    while (*s && *s != ';') s++;
+    if (*s == ';') s++;
+    memmove(g_mouse_script, s, strlen(s) + 1);
+    *dx = v[0];
+    *dy = v[1];
+    *btn = v[2];
+    return 1;
+}
+
+int plat_mouse_poll(int *dx, int *dy, int *buttons)
+{
+    if (!dx || !dy || !buttons) return 0;
+    if (!g_mouse_loaded) plat_mouse_present();
+    if (g_mouse_script[0]) {
+        u64 now = plat_ticks_ms();
+        if (now < g_mouse_next_ms) return 0;
+        int ok = mouse_script_next(dx, dy, buttons);
+        if (!ok) return 0;
+        g_mouse_next_ms = now + 120;    /* one scripted event every 120 ms */
+        return 1;
+    }
+    /* real pointer: GetCursorPos works for the whole desktop */
+    POINT p;
+    if (!GetCursorPos(&p)) return 0;
+    int ddx = 0, ddy = 0;
+    if (g_mouse_have_last) {
+        ddx = (int)(p.x - g_mouse_last.x);
+        ddy = (int)(p.y - g_mouse_last.y);
+    }
+    g_mouse_last = p;
+    g_mouse_have_last = 1;
+    if (ddx == 0 && ddy == 0 && GetAsyncKeyState(VK_LBUTTON) == 0 &&
+        GetAsyncKeyState(VK_RBUTTON) == 0 &&
+        GetAsyncKeyState(VK_MBUTTON) == 0)
+        return 0;
+    *dx = ddx;
+    *dy = ddy;
+    *buttons = ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? 1 : 0) |
+               ((GetAsyncKeyState(VK_RBUTTON) & 0x8000) ? 2 : 0) |
+               ((GetAsyncKeyState(VK_MBUTTON) & 0x8000) ? 4 : 0);
+    return 1;
+}
+
 int plat_kbd_poll(void)
 {
     kb_script_init();

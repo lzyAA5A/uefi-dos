@@ -811,6 +811,74 @@ static int dispatch(char *line)
         else say("Unmounted");
         return FAT_OK;
     }
+    if (ci_equal(cmd, "SETVER")) {
+        /* SETVER [prog [major.minor]] / SETVER -prog : per-program DOS version.
+         * Windows 1.x refuses to start when DOS reports 4.00, so this is the
+         * escape hatch instead of lowering the version for every program. */
+        if (!*arg) {
+            plat_puts("Per-program DOS version overrides (SETVER)");
+            plat_putc('\n');
+            if (g_dos.ver_fix_count == 0) say("  (none)");
+            for (int i = 0; i < g_dos.ver_fix_count; i++) {
+                plat_puts("  ");
+                plat_puts(g_dos.ver_fix[i].prog);
+                plat_puts(" -> ");
+                api_put_num((u16)g_dos.ver_fix[i].major);
+                plat_putc('.');
+                if (g_dos.ver_fix[i].minor < 10) plat_putc('0');
+                api_put_num((u16)g_dos.ver_fix[i].minor);
+                plat_putc('\n');
+            }
+            return FAT_OK;
+        }
+        if (arg[0] == '-' || arg[0] == '/') {
+            int rc = dos_setver_del(arg + 1);
+            if (rc != FAT_OK) say_rc(rc, "SETVER");
+            else say("SETVER entry removed");
+            return FAT_OK;
+        }
+        /* split "NAME 3.30" / "NAME=3.30" / "NAME,3.30" */
+        char name[16];
+        int nn = 0;
+        const char *q = arg;
+        while (*q && *q != ' ' && *q != '=' && *q != ',' && nn < 15) name[nn++] = *q++;
+        name[nn] = 0;
+        while (*q == ' ' || *q == '=' || *q == ',') q++;
+        if (!*q) {
+            int mj, mn;
+            if (dos_setver_lookup(name, &mj, &mn)) {
+                plat_puts(name);
+                plat_puts(" reports DOS ");
+                api_put_num((u16)mj);
+                plat_putc('.');
+                if (mn < 10) plat_putc('0');
+                api_put_num((u16)mn);
+                plat_putc('\n');
+            } else {
+                say("SETVER: no entry for that program");
+            }
+            return FAT_OK;
+        }
+        int maj = 0, min = 0;
+        while (*q >= '0' && *q <= '9') { maj = maj * 10 + (*q - '0'); q++; }
+        while (*q && *q != '.') q++;
+        if (*q == '.') {
+            q++;
+            int digits = 0;
+            while (*q >= '0' && *q <= '9') { min = min * 10 + (*q - '0'); q++; digits++; }
+            if (digits == 1) min *= 10;
+        }
+        int rc = dos_setver_add(name, maj, min);
+        if (rc != FAT_OK) { say_rc(rc, "SETVER"); return FAT_OK; }
+        plat_puts(name);
+        plat_puts(" now reports DOS ");
+        api_put_num((u16)maj);
+        plat_putc('.');
+        if (min < 10) plat_putc('0');
+        api_put_num((u16)min);
+        plat_putc('\n');
+        return FAT_OK;
+    }
     if (ci_equal(cmd, "CONFIG")) {
         /* DOS 4.0 CONFIG.SYS view (FILES=, FCBS=, LASTDRIVE=) */
         int used = 0;
@@ -823,6 +891,9 @@ static int dispatch(char *line)
         api_put_num((u16)used);
         plat_puts(" of ");
         api_put_num((u16)g_dos.files_limit);
+        plat_putc('\n');
+        plat_puts("  SETVER entries: ");
+        api_put_num((u16)g_dos.ver_fix_count);
         plat_putc('\n');
         return FAT_OK;
     }
@@ -854,6 +925,7 @@ static int dispatch(char *line)
         say("  DIR   CD   MD   RD   DEL   REN   TYPE   COPY");
         say("  CLS   ECHO VER  VOL   DATE  TIME  PROMPT PATH");
         say("  SET   MEM  HELP EXIT  SHUTDOWN  MOUNT  UNMOUNT  DRIVES");
+        say("  SETVER [prog [x.yy]]: per-program DOS version (SETVER alone lists them)");
         say("  APITEST: native 32/64-bit DOS API demo (prints API-OK)");
         say("  RUN64 <file.exe>: run a native 32/64-bit PE program (sdk/)");
         say("External programs: .COM and .EXE files on the current drive.");

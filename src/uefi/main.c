@@ -19,6 +19,10 @@ EFI_GUID gEfiDevicePathProtocolGuid      = { 0x09576E91, 0x6D3F, 0x11D2, {0x8E,0
 /* Configuration table entry published for external EFI apps: the value is a
  * pointer to const dosapi_exports (see api/dosapi.h). */
 EFI_GUID gEfiUefiDosApiGuid              = UEFIDOS_API_GUID;
+/* EFI_SIMPLE_POINTER_PROTOCOL_GUID: the PS/2 / USB mouse the firmware exposes */
+EFI_GUID gEfiSimplePointerProtocolGuid = {
+    0x31878C87, 0x0B75, 0x11D5, { 0x9A, 0x4F, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D }
+};
 
 EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
 {
