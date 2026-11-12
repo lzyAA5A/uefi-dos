@@ -506,6 +506,54 @@ allocation fails". The 0x2085 failure branch at `0x2165..0x216B` and the loop at
 where to look, and the marker instrumentation for it must avoid relocating relative branches
 (see the previous section).
 
+### The allocation failure path, and the kernel heap bootstrap
+
+Disassembly of the failed branch (file offset = CS offset + 0x590):
+
+```
+2123 b8 07 00     mov $0x7,%ax          ; flags
+2126 33 db        xor %bx,%bx           ; size hint = 0
+2128 50 57 53     push ax; push di; push bx
+212b e8 5c e8     call 0x98a            ; GlobalAlloc(shift=0, size=DI, flags=7)
+212e 0b c0        or  %ax,%ax
+2130 74 33        je  0x2165            ; failure -> return 1, no retry
+...
+2156 8b d7        mov %di,%dx           ; SUCCESS path only: read the module header
+2158 b4 3f        mov $0x3f,%ah
+215a cd 21        int $0x21             ; DOS read of 0x40 bytes into the new block
+215c 72 07        jb  0x2165
+215e 8d 75 c0     lea -0x40(%di),%si
+2161 3b c1        cmp %cx,%ax           ; must read the whole header
+2163 74 0c        je  0x2171
+2165 ff 76 fc     push -0x4(%bp)
+2168 e8 88 e8     call 0x9f3            ; release the just-allocated block
+216b 33 c0 40     xor %ax,%ax; inc %ax ; return 1  (bogus "segment")
+216e e9 5f 02     jmp 0x23d0
+```
+
+Two consequences: (a) the failure path performs **no retry and no grow** — it frees the block and returns the bogus handle 1, which the caller (`CS:664D mov es,ax`) installs as a segment, so the kernel writes its module database into segment `0001` (the IVT); (b) although the module database is a *heap* allocation, its content is filled by a plain `INT 21h AH=3F` read of the file — which is why our INT trace never shows an `AH=3F` for `WIN100.BIN`: the read lives only on the success path.
+
+The heap bootstrap (`CS:73AB`, `inc bp` prologue, args at `[bp+6..0xC]`):
+
+```
+73b2..73bb  ax=load  bx=instance  cx=top  dx=[instance+0x10]
+73be        call 0x72d1           ; build the private MCB arena, returns the heap segment in BX
+73c1        mov %ds,%cs:0x2       ; heap anchor cell (0x9FE1 in the stock layout)
+73c8..73d9  heap+0x06=BX  heap+0x08=DX  heap+0x04=5  heap+0x18=0x1A=0x1E=0
+73dc        heap+0x12 = 0x20     ; first block offset
+73e1        heap+0x14 = 0x6163   ; grow callback (far pointer into the kernel)
+73e6..73f5  bx = (0x23)&~3 = 0x20;  cx = ((cx-3)&~3) - 0x20;  cx >>= 1; cx >>= 1
+73fb        mov %cx,(%bx)         ; first block header: unit count (4-byte units)
+73ff        heap+0x10 = 0x22      ; free-list head
+7404        call 0x53b6           ; initialise the free-list descriptor table
+740e..7427  call 0x5389 (twice)   ; allocate size-class descriptors
+741a        mov %bx,%cs:0x0       ; publish the heap header offset
+```
+
+Unit-count arithmetic confirms the usable-size formula measured earlier (a stock `ne_heap = 0x200` yields 428 bytes), and the arena block that the module database has to come out of is the one whose owner word is **0** — the block at `load+2`, whose paragraph count is `(ne_heap >> 4) - 5` (27 paragraphs for `ne_heap = 0x200`, 31 paragraphs for `0x240`).
+
+That last relation explains both experiments at once: raising `ne_heap` to `0x240` alone makes the block 31 paragraphs and the 29-paragraph request fits; raising it to `0x1000` does **not** help (measured again with a clean patch at file offset `0x410`: `0x212E AX=0000`, `ES=0D12`, still 77 DOS calls and `AH=4C AL=1`), because the allocator's split path refuses to carve a block out of that arena entry once the heap sits elsewhere. So the kernel needs both a larger `ne_heap` **and** a heap/anchor layout that matches, which is exactly what the real machine had before it produced the 25 KB heap seen in the reference dump.
+
 ## Windows 1.01: what the kernel asks DOS for
 
 `WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
