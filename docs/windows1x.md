@@ -948,3 +948,157 @@ python tools\make_tree_image.py build\w101flat.img F:\1231\_tmp\win\w101full --s
 $env:UEFIDOS_TRACE_WINDOW='6500-6770'; $env:UEFIDOS_TRACE_STEPS='6000000'
 build\hosttest.exe --shell build\w101flat.img 'SETVER WIN.COM 3.30' 'SETVER WIN100.BIN 3.30' 'WIN'
 ```
+
+### Second round on the same wall: the allocator's split/absorb logic (1.1.4)
+
+Three more measurements, all with the arena snapshot probe from this release
+(`UEFIDOS_DUMP_AT=0DD5:212B` -> `build/mem_at.bin`):
+
+| experiment | result |
+| --- | --- |
+| NE `heap` swept through `0x4000`, `0x8000`, `0xC000`, `0xF000` | the allocation at `CS:212Bh` returns `0` for every value (52 DOS calls, `exit(1)`) |
+| memory snapshot at the failing call | DOS-side MCB walk from `PSP-1` finds no MCB at all (`0D89` holds `0x4C`); the kernel's own chain is `0D9Ch size 0001` -> `0D9Eh size 001Bh` -> `0DBAh size 91E5h` (free) -> heap header `9FA1h` -> `Z FF FF 01 00 ...` at `9FBEh` |
+| free-list inspection in the same snapshot | the bucket test *passes*: the node at `9FA1h:0026h` is `bb 0d 00 00 2e 00 ff ff` (block segment `0DBBh`, size `002Eh`, end marker `FFFFh`), and `[node+3]` is `00`, exactly the value `CS:597Fh` compares `BH` against |
+| trace of the allocator's chain-end path (`CS:59D0h..5B40h`) | the search does reach the split for the 591 KB block (`DX = AX = 91E6h` at `CS:5A82h`), but `CS:5A82h` walks only 3 chain blocks (`0DBAh -> 9FA0h -> 9FBEh`), calls the grow helper `CS:5AA0h` on each, and when `CX` reaches 0 it does `xor ax,ax` -> return 0 |
+
+The accept rule, read from the disassembly:
+
+```
+594f: push cx; push ax
+5951: add $0x1,%bx                 ; requested paragraphs + 1
+5954: call 0x542c
+5957: mov 0x4(%di),%cx ; mov 0x6(%di),%es     ; head of the block chain
+5972: mov 0xa(%di),%si                        ; free-list node
+597f: cmp %bh,0x3(%si)              ; size bucket (high byte of the request) must match
+598a: mov %es:0x3(%di),%ax ; inc %ax ; cmp %dx,%ax ; jb skip
+5996: call 0x5a82                   ; split / absorb neighbours
+```
+
+`CS:5A82h` walks the chain and calls `CS:5AA0h` on each block, which refuses to extend
+when the *next* block is not `Z` and does not carry flag bit 3
+(`testb $0x8,0x5(%di)`), nor has `[block+0x1Eh] == 0`. In our run the block after the
+591 KB free block is the kernel's own local-heap header at `9FA0h/9FA1h`, so every
+extension attempt fails and the chain simply runs out.
+
+That is the same shape of answer as before, one level lower: the kernel builds an arena
+in which **the region above `instance-1` is advertised as free while its own 177 KB
+image still lives there**. On real MS-DOS 5 the kernel is executing from a copy that sits
+flush against the top of memory (segment `7480h`..`9FC0h`), i.e. the image is *outside*
+the free region it advertises. Our runs never produce that copy, whether the image is
+loaded low (`CS=0DD5h`) or flush against the top (`UEFIDOS_EXEC_HIGH=1`, `CS=7494h`) -
+both fail at exactly `CS:664Fh`. Reproducing whatever makes the real kernel relocate
+itself is now the single remaining unknown; the snapshot probe from this release is what
+the real-DOS side needs so that the two arenas can be compared field by field.
+
+## Kernel heap sizing: measured, and why it is not the blocker (1.1.4+)
+
+Everything below was measured, not inferred. The point of the round was to stop
+guessing which memory value the Windows 1.01 kernel wants.
+
+### The child image layout (WIN100.BIN, 177,488 bytes)
+
+* `e_cparhdr = 0x20` **paragraphs** = 0x200 bytes, so DOS loads the module starting
+  at **file offset 0x200**. The in-memory image is therefore `file - 0x200`:
+  * image `0x000` = file `0x200` = **KERNSTUB** (`push cs / pop ds / mov si,0x130 /
+    add si,0x1ff / and si,0xfe00` -> `si = 0x200`; `cmpw [si],'NE'`; on failure it
+    prints `KERNSTUB: Error during boot` from `CS:0x286` and `mov ax,4C01h / int 21h`).
+  * image `0x200` = file `0x400` = **NE header** (rev 0x0052, `ne_cseg = 1`,
+    `ne_csip = 0x64E5` -> segment index 1, `ne_heap` at NE+0x10 = **file 0x410**,
+    segment table at NE+0x22, align shift at NE+0x32 = 4, entry 0 sector = 0x40).
+  * image `0x590` = file `0x790` = the code of **segment 0**, i.e. `CS offset + 0x590
+    = file offset` was wrong; the correct relation is `CS = load + 0x390 bytes`
+    (`0x39` paragraphs) for this file, because `di = CS - 0x20 + (sector << (alignshift-4))`
+    with `sector = 0x40`, `alignshift = 4` gives `di = load + 0x20` (the NE header,
+    which is DGROUP) while the code segment stays where the loader put it.
+* Real MS-DOS 5.00 loads it at `load = 0x0FB2`, code at `CS = 0x0FEB`
+  (linear `0x0FEB0`), and that *is* `load + 0x39` - the same relation our emulator
+  produces. The earlier "real DOS puts the code at +0x210" note was an arithmetic
+  slip from assuming the child PSP was 0x0FBA.
+
+### The heap-init call and the exact sizing formula
+
+`CS:658B` (file `0x7B1B`) prepares the kernel's private heap:
+
+```
+658b  mov %cs:0x10,%es        ; ES = PSP
+6590  mov %es,%ax  / add $0x10,%ax    ; AX = PSP+0x10 = load segment
+6595  mov %cs:0x6498,%bx              ; BX = instance
+659a  mov %es:0x2,%cx                 ; CX = [PSP+2] = top of memory
+659f  mov %bx,%es / mov %es:0x10,%dx  ; DX = [instance+0x10]
+65a6..65a9  push dx, bx, ax, cx ; push cs ; call 0x73ab
+```
+
+`CS:73AB` reads the four arguments back (`[bp+0xA]` = instance, `[bp+8]` = load,
+`[bp+0xC]` = `[instance+0x10]`, `[bp+6]` = top of memory), calls `CS:72D1` to build
+the kernel's MCB chain, and uses the value `CS:72D1` returns in `CX`:
+
+```
+73ef  sub $0x3,%cx ; and $0xfc,%cl ; sub %bx,%cx ; shr $1,%cx ; shr $1,%cx
+      mov %cx,(%bx)          ; free units, 4 bytes each
+```
+
+So the free space of the kernel's local heap is `((CX-3) & ~3) - 0x20` bytes, and
+`CS:72D1` returns `CX = [instance+0x10] - 0x30`.
+
+Because the bootstrap left `SS = load_seg`, `SP = 0x0200`, the instance the kernel
+computes at `CS:6506` (`mov %ss,%ax / add %bx,%ax`) is `load + 0x20` paragraphs =
+exactly the NE header, so `[instance+0x10]` is `ne_heap` and the first heap is
+`0x200 - 0x30 = 0x1D0` -> **428 usable bytes**. The module database wants
+`DI = 0x19D + lenbyte + 1` = **435 bytes** (`lenbyte = 21` for the 13-character
+`C:\WIN100.OVL` it builds), so the allocation fails by 7 bytes.
+
+### The decisive experiment: a bigger heap does NOT help
+
+`F:\1231\_tmp\win\mk_heap_img.py <hex> <img>` copies the tree, patches
+`ne_heap` at **file 0x410** and rebuilds the image. With `ne_heap = 0x1000` the
+kernel really does use it - `UEFIDOS_TRACE_WINDOW=73a8-7420` shows
+
+```
+0D49:73AB AX=0D10 BX=0D30 CX=9FC0 DX=1000 ...      ; load, instance, top, ne_heap
+0D49:73BB AX=0D30 BX=0D10 CX=1000 DX=1000 ...      ; [bp+0xC] = heap arg
+0D49:73C1 AX=0D2E BX=0D10 CX=0FD0 DX=9FBE ...      ; 0x72D1 returned CX = 0x1000-0x30
+0D49:73EF AX=0D2E BX=0020 CX=0FD0 DX=9FBE ...      ; free = ((0xFD0-3)&~3)-0x20 = 4012 bytes
+```
+
+4012 bytes is nine times what the module database asks for, yet the program still
+ends at `CS:675C -> exit(1)` with the same DOS call count. **The heap size is not
+the blocker.** The rejection happens inside the allocator's split path
+(`CS:5A82` -> `CS:5AA0`), which only accepts a block whose chain is structurally
+what the kernel itself built:
+
+```
+5aa0  mov %es:0x3(%di),%ax   ; block size
+5aa4  inc %ax
+5aa5  cmp %di,0x1e(%di)      ; 0 = last block -> size is final
+5aa8  je 0x5ae2
+5aaa  testb $0x8,0xb(%di)    ; growable?
+5aae  jne 0x5ae2
+5ab0  mov %es:0x8(%di),%es   ; next block
+5ab5  cmpb $0x5a,%es:(%di)   ; next block is 'Z'?
+...
+5ae2  cmp %dx,%ax ; ret      ; caller: jae success
+```
+
+So the remaining work is to make the kernel's own arena/block chain consistent -
+the MCB chain our DOS hands back and the one the kernel rebuilds at `CS:72D1` have
+to agree about which region is the kernel's image and which is free.
+
+### Reference: real MS-DOS 5.00, measured with the monitor only
+
+`F:\1231\_tmp\win\ref_snap.py <tag>` boots the DOS 5 floppy, answers the date
+and time prompts, types `c:` and `win`, and then takes `info registers` plus
+`pmemsave 0 0xa0000` snapshots (`build/refm_<tag>_<i>.bin`) one, two, four and
+eight seconds in. Do not use the QEMU gdbstub for this: attaching stops the vCPU
+and a `c` packet without a pending reply desynchronises the script.
+
+What the reference shows:
+
+* `CS = 0x0FEB` from one second on -> code at linear `0x0FEB0`, the code needle
+  (`WIN100.BIN` file `0x590 + 0x212B`) found at linear `0x11FDB` confirms it.
+* MCB chain around the child: `0FCA M owner=FFFF size=0001` (the kernel's own
+  bootstrap MCB, exactly like ours), `0FCC M owner=0FCD size=001D`,
+  `0FEA M owner=0FCD size=064B`, and the child's `Z` block ending at `0x9FC0`.
+* `cs:6498` (the instance cell) reads `0x749F` and `[instance+0x10]` reads
+  `0xF88B` - but both are *stale* by then (the kernel keeps running and reuses
+  those cells), so post-hoc cell reads cannot be compared with our pre-crash
+  state. That is why the numbers above come from the call site, not from memory.
