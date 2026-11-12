@@ -2677,6 +2677,21 @@ static void install_ivt(Emu *e)
     emu_wb(e, MAGIC_SEG, STUB_OFF, 0xCF);
     emu_wb(e, MAGIC_SEG, (u16)(STUB_OFF + 1), 0x90);
     emu_wb(e, MAGIC_SEG, MAGIC_OFF, 0xCF);
+    /* ---- ROM identification ------------------------------------------ */
+    /* Programs older than the PC/AT sniff two places before they trust the
+     * machine: the ROM date at F000:FFF5 (8 ASCII bytes) and the model byte at
+     * F000:FFFE (FFh PC, FEh XT, FBh XT-286, FCh AT).  Windows 1.x and DR5's
+     * KERNEL.EXE are documented as "IBM XT or AT only", so an all-zero ROM
+     * reads to them as an unknown machine.  Publish an IBM XT identity; the
+     * rest of our ROM area (trampolines at F000:E000+, the IRET stub at FFE0,
+     * the magic marker at FFF0) is left alone. */
+    {
+        static const char rom_date[8] = {'1', '1', '/', '0', '8', '/', '8', '2'};
+        for (int i = 0; i < 8; i++)
+            emu_wb(e, MAGIC_SEG, (u16)(0xFFF5 + i), (u8)rom_date[i]);
+        emu_wb(e, MAGIC_SEG, 0xFFFE, 0xFE);   /* model byte: IBM XT */
+        emu_wb(e, MAGIC_SEG, 0xFFFF, 0x00);
+    }
     /* ---- BIOS data area --------------------------------------------- */
     /* Installers and graphics libraries sniff the adapter from these bytes
      * before they draw anything: an all-zero BDA reads as "MDA, no colour

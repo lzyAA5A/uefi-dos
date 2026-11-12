@@ -247,5 +247,49 @@ In other words, this DR5 `KERNEL.EXE` destroys its own code and stack on any
 standard DOS EXE load.  Windows 1.01 (1985), which is a fixed successor, gets
 much further — see the section above.
 
+### "DR5 needs DOS 2.x and an IBM PC" — both tested, neither is the blocker
+
+DR5's own notes do say DOS 2.x on an IBM XT/AT, so both halves of that were
+checked experimentally rather than argued:
+
+* **DOS version.**  `SETVER KERNEL.EXE` was driven with **2.00, 2.10, 2.11,
+  3.00 and 3.30**; all five runs ended in the same place, and so did a real
+  Compaq **MS-DOS 2.11** boot (previous section).  The reason is structural:
+  the kernel dies inside `BOOTSTRAP` before its **first** `INT 21h`, so no
+  `AH=30h` answer can ever be observed (an `INT` trace of the run is empty,
+  while the same trace of `HELLO.COM` shows its three calls).
+* **"IBM PC or not".**  Two probes could have mattered and neither exists:
+  `KERNEL.EXE` contains no `mov ax,0F000h` and no `1501512 COPR. IBM` string,
+  so it never reads a ROM signature; the one ROM-adjacent call in `BOOTSTRAP`
+  (`0DC5:4A8F`, made before the memory setup and with its result discarded)
+  compares six bytes at `F000:0100` against `DGROUP:0x234`, which holds
+  **`SEGDEB`** — the signature of DR5's own resident kernel debugger, not a
+  machine test.  As a belt-and-braces check the emulator now publishes an IBM
+  XT identity anyway (see below) and DR5 died identically; the crash *address*
+  moves between runs only because the 55 ms timer interrupt lands in the
+  already-corrupted code at different points.
+
+Machine identity is now part of `install_ivt()` in `src/emu/emu.c`: the ROM
+date `11/08/82` at `F000:FFF5` and the model byte `FEh` (IBM XT) at
+`F000:FFFE`, alongside the BDA bytes filled in for SimEarth.  Programs of this
+era read those two places to pick machine-specific patches, and an all-zero
+ROM reads as "unknown machine".
+
+The algebra also rules out any load-time rescue.  `BOOTSTRAP` passes `SS-0x20`
+as the top of memory and the load segment as the bottom, and `55B3` computes
+
+```
+size = (SS - 0x20 - 0x100) - load_seg - 1 = e_ss - 0x121        (paragraphs)
+```
+
+which is independent of where the program is loaded — so `e_ss = 0` always
+yields the observed `0xFEDB`.  A non-zero `e_ss` cannot help either: to make the
+size positive it would have to be at least `0x122`, but the loader must place
+`SS:SP` inside the relocated image (`e_ss*16 + 0x60 >= 0x7092` for the 28 802
+byte file), which forces `e_ss >= 0x703` — and with any `e_ss` in that range the
+4 KB block that `55B3` clears next (`[load+e_ss-0x100, load+e_ss)`) sits on top
+of the code at `load+0xB5…load+0x7082`.  Free block positive and code intact
+are mutually exclusive, so this `KERNEL.EXE` cannot start on any DOS.
+
 Evidence kept in `build/` (not published): `f_kernel.png` (real DOS 2.11),
 `g_dr5.png` (UEFI-DOS), `step_trace.txt`/`limit_dump.txt` (emulator trace).
