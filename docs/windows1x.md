@@ -10,7 +10,7 @@ Versions tested (all original media, nothing redistributed):
 
 | release | media | result |
 | --- | --- | --- |
-| Windows 1.0 Developer Release 5 (Nov 1984) | 3 x 360K | kernel boots and reaches its message loop, screen stays blank |
+| Windows 1.0 Developer Release 5 (Nov 1984) | 3 x 360K | installs, but `KERNEL.EXE` wrecks its own memory before its first `INT 21h` — **identical hang on real Compaq MS-DOS 2.11** (see the DR5 section) |
 | Windows 1.01 (1985) | 5 x 360K | **`SETUP` installs the whole release**; `WIN` starts the kernel, no window drawn yet |
 | Windows 2.03 (1987) | 9 x 360K | not tested yet: it uses the same real-mode core as 1.01, so the same blockers apply |
 | Windows/286 2.10 (1988) | 4 x 1.2M | not attempted: needs 286 protected mode + a real EMM |
@@ -153,3 +153,99 @@ build\hosttest.exe --shell build\w101boot.img "SETVER WIN.COM 3.30" ^
 
 Set `UEFIDOS_KBD_GUARD=ENTER` so unanswered prompts continue, and
 `UEFIDOS_DUMP_VRAM=1` to see the 80x25 screen the installer produced.
+
+DR5 has its own one-shot path (`tools/install_win1x.py`, described below), and
+the real-DOS control experiment is rebuilt with the shipped tools:
+
+```
+rem 360 KB DOS 2.11 boot floppy that also carries the DR5 runtime
+python tools/mkfat12.py build\dr5flop360.img --360k --dir <dr5-flat-dir>
+rem  ... or write the system files first so IBMBIO/IBMDOS stay the first
+rem  two root entries, then copy DOS 2.11's boot sector over sector 0.
+
+rem a plain MS-DOS 5 boot disk whose AUTOEXEC.BAT no longer starts SETUP
+python tools/strip_autoexec.py <msdos5-disk01.img> build\dos5boot.img
+
+rem type into either guest through the QEMU monitor
+python tools/qtype.py --log build\serial.log --text "kernel"
+```
+
+## Windows 1.0 Developer Release 5 (4 Nov 1984)
+
+DR5 is the release Microsoft handed to developers before Windows 1.0 shipped.
+Its runtime is not a DOS program in the usual sense: `KERNEL.EXE` is an MZ stub
+that builds its own MCB chain, relocates its stack and then loads the rest of the
+system (`WINDOWS.EXE`, `GDI.EXE`, `MSDOS.EXE`, `TIMER.EXE`, `KEYBOARD.EXE`,
+`MOUSE.EXE`, `DISPLAY.EXE` = `IBMCOLOR.DIN`, `CURSOR.EXE` = `IBMCOLOR.CIN`).
+`MSWIN.BAT` is just `kernel %1 %2 %3`.
+
+### Installing it (tools, no Microsoft files in this repository)
+
+`tools/install_win1x.py` reproduces the layout `INSTALL.BAT` creates — runtime in
+`\WINDOWS\TEST`, tools in `\WINDOWS\BIN`, docs in `\WINDOWS\DOC`, libraries in
+`\LIB`, the `.DIN`/`.CIN` drivers copied to `DISPLAY.EXE`/`CURSOR.EXE` — on a
+fresh UEFI-DOS image, then writes an `AUTOEXEC.BAT` that starts the kernel:
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File run_win1x.ps1 `
+    -Source "<folder with your extracted DR5 files>"
+```
+
+`start_win1x.bat` is the double-click version (it looks for `win1x-src` next to
+itself, or takes a folder dragged onto it).  The image it builds,
+`build\win1x.img`, is local: `build/` is git-ignored and no Microsoft file is
+published.
+
+Result: UEFI-DOS boots, `SETVER KERNEL.EXE 3.30` is applied, `KERNEL.EXE` starts
+and the machine then sits on a blank screen.
+
+### Why the kernel stops
+
+`KERNEL.EXE` (28 880 bytes) has the header `e_ss = e_sp = 0`, `e_sp = 0x60`,
+`e_minalloc = e_maxalloc = 0`, and its entry stub jumps to `0DC5:3904`
+(`BOOTSTRAP`, straight from `KERNEL.MAP`).  BOOTSTRAP calls the memory setup at
+`0DC5:55B3` with five arguments:
+
+```
+3925  mov es,[0x25e]      ; ES = PSP
+3929  mov ax,es / add ax,0x10      ; arg3 = load segment
+392e  mov bx,ss / sub bx,0x20      ; arg2 = SS - 0x20
+3933  mov cx,es:[0x0002]           ; arg1 = PSP top of memory (0xA000)
+3938  mov dx,0x80                  ; arg0 = command tail
+3940  call 55b3
+3943  or ax,ax / je 3963           ; AX = 0 -> skip the stack move
+```
+
+`55B3` rounds the two segments (`Align`, `0DC5:3C14`), then builds three MCBs:
+
+| block | segment | size field |
+| --- | --- | --- |
+| free | `round4(arg3)` = `0x0D10` | `(end-0x100) - start - 1` |
+| own (4 KB) | `end-0x100` | `0xFF` |
+| last (`'Z'`) | `end = SS-0x20` | `top - end - 1` |
+
+and clears each block (`zero_segments`, `0DC5:4974`).  With `SS = load segment`
+(the MZ header says `e_ss = 0`, so that is what every DOS hands out — DOS and
+UEFI-DOS alike) the first size comes out `0xFEDB`, i.e. **-293 paragraphs**: the
+clear loop then runs 65 243 times, zeroing 16 bytes at the head of every segment
+from `0x0D11` upward — including the interrupt vector table and, six iterations
+in, the stack frame it is running on.  The step trace ends with
+
+```
+0DC5:4999 C2 06 00   ret 6      -> return IP was zeroed -> 0DC5:0000
+0DC5:0000 00 00 00   (executing zeros forever)
+```
+
+**This is not an emulation artefact.**  The same files were installed on a real
+Compaq MS-DOS 2.11 boot floppy (360 KB, built with `tools/mkfat12.py --360k` and
+DOS 2.11's own boot sector) and run in QEMU: `A>kernel` hangs on a blank screen
+exactly like UEFI-DOS, with no output on the screen or on COM1 — DR5's documented
+"external console" — either.  Nothing reaches DOS: the kernel makes **no**
+`INT 21h` call at all before it dies, so no DOS service can fix it.
+
+In other words, this DR5 `KERNEL.EXE` destroys its own code and stack on any
+standard DOS EXE load.  Windows 1.01 (1985), which is a fixed successor, gets
+much further — see the section above.
+
+Evidence kept in `build/` (not published): `f_kernel.png` (real DOS 2.11),
+`g_dr5.png` (UEFI-DOS), `step_trace.txt`/`limit_dump.txt` (emulator trace).

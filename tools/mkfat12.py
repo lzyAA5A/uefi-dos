@@ -28,6 +28,25 @@ MEDIA = 0xF0
 SPT = 18
 HEADS = 2
 
+
+def use_360k():
+    """Switch to a 360 KB 5.25-style geometry: 720 sectors, 2 sectors per
+    cluster, 112 root entries, 2 FAT sectors, media 0xFD."""
+    global TOTAL_SEC, SPC, ROOT_ENT, FAT_SEC, MEDIA, SPT, HEADS
+    global ROOT_LBA, ROOT_SEC, DATA_LBA, MAX_CLUSTERS
+    TOTAL_SEC = 720
+    SPC = 2
+    ROOT_ENT = 112
+    FAT_SEC = 2
+    MEDIA = 0xFD
+    SPT = 9
+    HEADS = 2
+    # re-derive the layout constants that the module body computed for 1.44 MB
+    ROOT_LBA = RESV + NFATS * FAT_SEC
+    ROOT_SEC = (ROOT_ENT * 32 + SEC - 1) // SEC
+    DATA_LBA = ROOT_LBA + ROOT_SEC
+    MAX_CLUSTERS = (TOTAL_SEC - DATA_LBA) // SPC
+
 ROOT_LBA = RESV + NFATS * FAT_SEC          # 19
 ROOT_SEC = (ROOT_ENT * 32 + SEC - 1) // SEC  # 14
 DATA_LBA = ROOT_LBA + ROOT_SEC             # 33
@@ -132,6 +151,10 @@ def main(argv):
     out = argv[1]
     args = argv[2:]
     files = []
+    if args and args[0] == '--360k':
+        use_360k()
+        args = args[1:]
+
     if args and args[0] == '--dir':
         d = args[1]
         for n in sorted(os.listdir(d)):

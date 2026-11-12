@@ -462,6 +462,24 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 软盘上的 `SYS.COM` 现在会拒绝运行。想回到旧行为，`src/uefidos_config.h` 里注释写明了
 两行改法（`UEFIDOS_DOSVER_MAJOR 2`、`..._MINOR 11`、`..._COMPAT_MINOR 10`）。
 
+### Windows 1.x / 2.x
+
+`INT 10h` 的 CGA 模式、`INT 33h` 鼠标驱动、硬件中断注入都是为 Windows 加的。
+**Windows 1.01** 的 `SETUP` 在合并安装卷上能完整装完（识别 CGA、拷完 build/utility
+盘、生成 `WIN.COM`/`WIN100.BIN`/`WIN100.OVL`）；`WIN` 在内核版本门槛被
+`SETVER WIN.COM 3.30` / `SETVER WIN100.BIN 3.30` 满足后能启动内核，但桌面还没画出来，
+缺哪些服务见 [`docs/windows1x.md`](docs/windows1x.md)（列表链里的真 `SFT`、
+`INT 15h`/XMS、可安装显示驱动加载器）。
+
+**Windows 1.0 Developer Release 5（1984-11-04）** 可以用 `tools/install_win1x.py`
+按它 `INSTALL.BAT` 的布局装进 UEFI-DOS 镜像（`start_win1x.bat` 双击启动），但它的
+`KERNEL.EXE` 在自己引导阶段就把自己的代码和栈清零了 —— 在发出第一个 `INT 21h` 之前
+就死了。同一批文件放到**真实 Compaq MS-DOS 2.11** 启动软盘上跑，表现完全一样（黑屏
+挂死，COM1 也没有输出），所以这不是 UEFI-DOS 的问题：这个 DR5 内核在任何标准 DOS
+EXE 装载下都会写坏自己。证据与反汇编见 `docs/windows1x.md`。
+
+Windows/286 2.10 需要 286 保护模式和 EMM，UEFI-DOS 目前没有。
+
 ## 目录结构
 
 ```

@@ -508,9 +508,13 @@ utility disks, writes `WIN.COM`/`WIN100.BIN`/`WIN100.OVL` and finishes with
 kernel once `SETVER WIN.COM 3.30` / `SETVER WIN100.BIN 3.30` satisfy its DOS
 version gate, but the desktop is not drawn yet; `docs/windows1x.md` lists the
 remaining services (a real `SFT` in the list of lists, `INT 15h`/XMS, the
-installable display-driver loader). **Windows 1.0 Developer Release 5** boots its
-kernel into the message loop the same way. Windows/286 2.10 needs 286 protected
-mode and an EMM, which UEFI-DOS does not have.
+installable display-driver loader). **Windows 1.0 Developer Release 5** can be laid
+out on a UEFI-DOS image with `tools/install_win1x.py` (and started with
+`start_win1x.bat`), but its `KERNEL.EXE` destroys its own code and stack in its
+bootstrap before it makes a single `INT 21h` call — the same files hang the same
+way on a real Compaq MS-DOS 2.11 boot floppy, so that one is not on UEFI-DOS.
+Windows/286 2.10 needs 286 protected mode and an EMM, which UEFI-DOS does not
+have.
 
 ### The firmware graphics path that GCC deleted
 

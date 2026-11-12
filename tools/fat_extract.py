@@ -47,13 +47,34 @@ class FatImage:
                 continue
             if lba * SEC + SEC > len(d):
                 continue
-            if d[lba * SEC + 510: lba * SEC + 512] != b'\x55\xAA':
-                continue
-            if d[lba * SEC + 0x36] == 0x29 or d[lba * SEC + 0x26] == 0x29 or \
-               d[lba * SEC:lba * SEC + 3] in (b'FAT',):
+            if self._looks_like_bpb(lba):
                 best = lba
                 break
+        if best == 0 and self._looks_like_bpb(0):
+            best = 0
         return best
+
+    def _looks_like_bpb(self, lba):
+        """A boot sector is only a boot sector if its BPB makes sense.  The old
+        test looked for an extended boot signature at 0x26/0x36, which FAT32
+        volumes do not carry (theirs sits at 0x42), so partitioned FAT32 images
+        were parsed as if the MBR were a BPB and every field came back zero."""
+        d = self.data
+        if lba * SEC + SEC > len(d):
+            return False
+        b = d[lba * SEC: lba * SEC + SEC]
+        if b[510:512] != b'\x55\xAA':
+            return False
+        bps = struct.unpack_from('<H', b, 11)[0]
+        spc = b[13]
+        nfats = b[16]
+        if bps not in (512, 1024, 2048, 4096):
+            return False
+        if spc == 0 or (spc & (spc - 1)) != 0:
+            return False
+        if nfats not in (1, 2):
+            return False
+        return True
 
     def _parse_bpb(self):
         b = self.data[self.part_lba * SEC:]
@@ -70,7 +91,9 @@ class FatImage:
         root_secs = (self.root_entries * 32 + SEC - 1) // SEC
         self.fat_lba = self.part_lba + self.reserved
         self.root_lba = self.fat_lba + self.nfats * self.fat_sectors
-        self.data_lba = self.root_lba + root_secs + (struct.unpack_from('<I', b, 44)[0] if self.root_entries == 0 else 0)
+        # the data area starts right after the FATs (FAT32 has no fixed root);
+        # offset 44 is the root cluster number, not a sector count
+        self.data_lba = self.root_lba + root_secs
         # include hidden sectors for the data start (FAT32 root dir follows boot+FSInfo+backup)
         self.root_cluster = struct.unpack_from('<I', b, 44)[0] if self.root_entries == 0 else 0
         self.cluster_count = (self.total_sectors - (self.reserved + self.nfats * self.fat_sectors + root_secs)) // self.spc
@@ -138,6 +161,8 @@ class FatImage:
 
     def dir_entries(self, cluster):
         """Yield (name, attr, size, first_cluster, raw_name_bytes) for one dir."""
+        if cluster == 0 and self.fs_type == 32:
+            cluster = self.root_cluster      # FAT32: the root dir is a cluster chain
         if cluster == 0:
             base = self.root_lba * SEC
             size = self.root_secs * SEC
