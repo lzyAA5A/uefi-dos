@@ -60,6 +60,7 @@ both inside. `make_release.ps1` rebuilds that package from source.
 | Floppy/disk image mount | `MOUNT A: IMAGE.IMG` exposes a file on `C:` as a read-write drive |
 | Shell | `DIR CD MD RD DEL REN TYPE COPY CLS ECHO VER VOL DATE TIME PROMPT PATH SET MEM HELP APITEST MOUNT UNMOUNT CONFIG FCB DRIVES EXIT SHUTDOWN`, batch files, `AUTOEXEC.BAT` |
 | DOS kernel | 8.3 names (+ VFAT long names), per-drive current directory, DOS error codes, **DOS 4.0 semantics** (see below) |
+| DOS internals | `AH=52h` list of lists with a **walkable SFT chain**, `AH=5D06h`/`5D0Bh` **swappable data area**, `AH=34h` InDOS flag pointer, `AH=50h`/`51h` current PSP, and a real **job file table** at `PSP:18h` — the structures multitaskers (Windows 1.x/2.x, DESQview) swap per task — see [`docs/windows1x.md`](docs/windows1x.md) |
 | 8086 emulator | 8086/80186 real-mode interpreter, 16 MiB emulated RAM, PSP, IVT, `.COM` + MZ `.EXE` loader with relocations, 8087 escapes treated as 8086 no-ops |
 | INT 21h | console, file I/O, find first/next + DTA, dirs, date/time, version (`4.00`), vector get/set, IOCTL, dup, PSP, memory stubs, **EXEC (AH=4Bh)**, **AH=67h**, **AH=5Ch** byte locks, **SHARE modes**, **DOS 4.0 surface: 32h 52h 59h 5Ah 60h 63h 68h 6Ch** |
 | FCB family | AH=0Fh 10h 11h 12h 13h 14h 15h 16h 17h 21h 22h 23h 27h 28h (`src/emu/fcb.c`) |
@@ -506,9 +507,12 @@ on a merged install volume: it detects the CGA adapter, copies the build and
 utility disks, writes `WIN.COM`/`WIN100.BIN`/`WIN100.OVL` and finishes with
 "Microsoft Windows is set up to operate on your computer". `WIN` starts the
 kernel once `SETVER WIN.COM 3.30` / `SETVER WIN100.BIN 3.30` satisfy its DOS
-version gate, but the desktop is not drawn yet; `docs/windows1x.md` lists the
-remaining services (a real `SFT` in the list of lists, `INT 15h`/XMS, the
-installable display-driver loader). **Windows 1.0 Developer Release 5** can be laid
+version gate. `WIN100.BIN` then runs its whole DOS-internals validation — SFT
+chain, swappable data area, InDOS flag, PSP and job file table — before it exits
+with code 1 without loading a driver, so the desktop is still not drawn;
+`docs/windows1x.md` records the disassembled validation chain, the DOS surface
+it needs and the open question (an instance/handle walk at `CS:0E71h`), plus
+`INT 15h`/XMS and the installable display-driver loader as remaining work. **Windows 1.0 Developer Release 5** can be laid
 out on a UEFI-DOS image with `tools/install_win1x.py` (and started with
 `start_win1x.bat`), but its `KERNEL.EXE` destroys its own code and stack in its
 bootstrap before it makes a single `INT 21h` call — the same files hang the same
@@ -649,6 +653,29 @@ start_prebuilt.bat   the launcher shipped as start.bat inside that package
   `A:`..`D:`, MBR partition probing with a superfloppy fallback.
 
 ## Notable bugs found and fixed
+
+The Windows 1.01 bring-up (post-1.1.0) added six DOS structures and turned up
+three more bugs:
+
+- **`AH=25h` used the wrong register for the interrupt number.** The set-vector
+  call takes the number in **`AL`**; the handler computed the IVT slot from
+  `AH` and therefore wrote the vector into slot 37 whatever the caller asked
+  for. Programs that save and restore vectors never noticed; programs that
+  *install* handlers — Windows 1.x does it with `INT 22h`, then reads the vector
+  back — died with `Incorrect DOS version`, which is where 1.01 had been stuck.
+- **`AH=50h` (set current PSP) was a no-op.** It fell through to the "unknown
+  call, report success" default, so `g_dos.psp_seg` stayed 0 and every internal
+  structure that names the current PSP disagreed with the program.
+- **Writing DOS-internal blocks through `emu_wb` breaks under DPMI.** The new
+  SFT/SDA/JFT code first wrote them with `emu_wb(e, MAGIC_SEG, ...)`, which in
+  protected mode resolves `0F000h` as a selector and latches a protection fault;
+  `DPMITEST` lost its 32-bit half (`protected-mode interrupt 3 with no IDT
+  gate`). All of it now writes by linear address, and the regression suite
+  drives `AH=25h/34h/50h/51h/52h/5D06h` plus the `PSP:18h` job file table so the
+  bug cannot come back.
+
+The 1.0.0 batch came from running DOOM 0.99 (see `docs/doom.md`), whose DOS/16M
+loader is a ruthless CPU/DOS conformance test:
 
 The 1.0.0 batch came from running DOOM 0.99 (see `docs/doom.md`), whose DOS/16M
 loader is a ruthless CPU/DOS conformance test:

@@ -200,6 +200,7 @@ void int13_handler(Emu *e);
 void int1a_handler(Emu *e);
 void int2f_handler(Emu *e);
 void int33_handler(Emu *e);   /* INT 33h mouse driver (emu/int33.c) */
+void dos_jft_sync(Emu *e);    /* publish PSP:18h job file table (emu/int21.c) */
 int  fcb_int21(Emu *e, u8 ah);
 void int31_handler(Emu *e);   /* DPMI (emu/dpmi.c) */
 void int60_handler(Emu *e);   /* DPMI real-mode host entry */

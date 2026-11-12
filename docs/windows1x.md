@@ -11,7 +11,7 @@ Versions tested (all original media, nothing redistributed):
 | release | media | result |
 | --- | --- | --- |
 | Windows 1.0 Developer Release 5 (Nov 1984) | 3 x 360K | installs, but `KERNEL.EXE` wrecks its own memory before its first `INT 21h` — **identical hang on real Compaq MS-DOS 2.11** (see the DR5 section) |
-| Windows 1.01 (1985) | 5 x 360K | **`SETUP` installs the whole release**; `WIN` starts the kernel, no window drawn yet |
+| Windows 1.01 (1985) | 5 x 360K | **`SETUP` installs the whole release**; `WIN100.BIN` now passes the entire DOS-internals validation (SFT chain, SDA, InDOS flag, PSP/JFT) and then exits with code 1 before loading a driver — see the 1.01 section |
 | Windows 2.03 (1987) | 9 x 360K | not tested yet: it uses the same real-mode core as 1.01, so the same blockers apply |
 | Windows/286 2.10 (1988) | 4 x 1.2M | not attempted: needs 286 protected mode + a real EMM |
 
@@ -293,3 +293,78 @@ are mutually exclusive, so this `KERNEL.EXE` cannot start on any DOS.
 
 Evidence kept in `build/` (not published): `f_kernel.png` (real DOS 2.11),
 `g_dr5.png` (UEFI-DOS), `step_trace.txt`/`limit_dump.txt` (emulator trace).
+
+## Windows 1.01: what the kernel asks DOS for
+
+`WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
+out how much memory it has and `EXEC`s `WIN100.BIN` (177 488 bytes, MZ with
+`e_cparhdr=0x20`, `e_ss=0x0B`, `e_sp=0x80`).  `WIN100.BIN` is the real-mode
+kernel, and before it loads anything it validates the DOS internals it intends
+to swap per task.  That validation is where it used to die, and every step of it
+needed a structure UEFI-DOS had not published yet.
+
+Disassembly anchor: for `WIN100.BIN`, `CS:0000` is file offset `0x590`.  That is
+proved twice over — the string `"Incorrect DOS version"`, which the kernel
+prints with `CS:6E7Ch` in DX, sits at file offset `0x740Ch`, and the `INT 22h`
+stub the kernel installs at `CS:6E95h` matches file `0x7425h`.  The
+"grab the DOS internals" routine spans `CS:6FF1h..72D0h`:
+
+| kernel code | what it needs from DOS |
+| --- | --- |
+| `CS:7004h..7010h` | `AH=30h` must report a **2.x or 3.x** major version (`AL >= 2 && AL < 4`), so `SETVER WIN.COM 3.30` plus `SETVER WIN100.BIN 3.30` is required while UEFI-DOS reports 4.00 |
+| `CS:7034h..704Ch` | `AH=52h` list of lists: `+4` must be a **dword far pointer** to the SFT chain, which the kernel walks by following each block's first dword until the first word reads `FFFFh` |
+| `CS:7054h..708Fh` | `AH=25h`/`AH=35h` on `INT 22h`, then it **reads the vector back** through the slot it expects (`[CS:002Ah]` = `0x88`) |
+| `CS:70AEh..70E4h` | `AH=5D06h` swappable data area: `+0Ch` current DTA, `+10h` current PSP, `+16h` current drive, `+17h` extended break flag |
+| `CS:716Eh..7176h` | `AH=34h` pointer to the InDOS byte |
+| `CS:727Bh..72A8h` | compares `SDA+10h` with its own PSP, `SDA+0` (critical error flag) with 0, and `SDA+16h` with the drive `AH=19h` reports |
+
+Everything below was added to UEFI-DOS for that (`src/emu/int21.c`):
+
+* `sft_build()` — one SFT block at `MAGIC_SEG:DOS_SFT_OFF` (`0xC800`) whose
+  first dword is `FFFFh:0000h`, entry count at `+4`, then 59-byte entries
+  (`+00` next entry, `+04` handle count, `+06` open mode, `+08` attribute,
+  `+09` device info word, `+0B` starting cluster, `+0D` time, `+0F` date,
+  `+11` position, `+2E` 8.3 name).  `AH=52h` publishes it at `+4` of the list of
+  lists.  Windows keeps its private `INT 22h` inside the unused terminator
+  entry, exactly as it does on real DOS, so that block has to stay writable RAM.
+* `sda_build()` — swappable data area at `MAGIC_SEG:DOS_SDA_OFF` (`0xDC00`)
+  following the documented DOS 3.10-3.30/4.x layout.  `AH=5D06h` returns
+  `DS:SI`, `CX=0x100`, `DX=0x20`; `AH=5D0Bh` returns the DOS 4.0 style list of
+  areas; `AH=1Ah` mirrors a new DTA into `SDA+0Ch`.
+* `AH=34h` returns `ES:BX = MAGIC_SEG:(DOS_SDA_OFF+1)`, the InDOS byte.
+* `AH=50h` sets the current PSP (it used to fall through to "success, do
+  nothing"), `AH=51h` reads it; `g_dos.psp_seg` and the emulator copy move
+  together and `load_com_at`/`load_exe_at` fill `g_dos.psp_seg` for the child.
+* `dos_jft_sync()` — the job file table at `PSP:18h`: each slot holds the SFT
+  index of the open handle (`0FFh` when free), refreshed on every `INT 21h` and
+  right after each open, create and close.
+* All of it writes by **linear address** (`mag_wb`/`mag_ww`/`mag_wd`/`psp_wb`)
+  because `INT 21h` can be reflected from a DPMI client, where
+  `emu_wb(e, MAGIC_SEG, ...)` would treat `0F000h` as a selector and latch a
+  protection fault.  That mistake cost `DPMITEST` its 32-bit half until the
+  regression suite caught it.
+
+Current status: `WIN100.BIN` now walks the whole validation chain (no more
+"Incorrect DOS version"), reads `WIN100.OVL`, sets the PSP to its own segment,
+closes every handle and exits with code 1 — silently, with nothing painted and
+no driver opened.  The last DOS call before the exit is `AH=50h`; the decision is
+taken inside the instance walk at `CS:667Ah -> 0E71h`, which returns 0, and
+`CS:6681h` is the `jmp 0x675Ch` exit path.  The next thing to work out is what
+that instance walk expects (`ES:1Ch` count, `ES:22h` table) and whether the
+kernel gives up because it never loaded a module.
+
+Reproducing:
+
+```powershell
+python tools/fat_extract.py extract "<disk>.IMG" F:\1231\_tmp\win\w101
+python F:\1231\_tmp\win\mk_w101run.py          # hand-built C:\WINDOWS (see below)
+python tools/make_tree_image.py build\w101run.img F:\1231\_tmp\win\w101run --size-mb 64
+build\hosttest.exe --shell build\w101run.img "SETVER WIN.COM 3.30" "SETVER WIN100.BIN 3.30" "CD \WINDOWS" "WIN"
+```
+
+`SETUP` copies the startup files and the fonts but skips `WIN.CNF` and every
+driver, so the image is laid out by hand: `WIN.COM`, `WIN100.BIN`,
+`WIN100.OVL` and `WIN.INI` from the install; `MSDOS.EXE`, `WIN.CNF`,
+`SYSTEM.DRV`, `CGA.DRV`, `KEYBUS.DRV`, `NOMOUSE.DRV`, `MOUSE.DRV`, `COMM.DRV`,
+`EPSON.DRV`, `SPOOLER.EXE`, `WINOLDAP.MOD`, `CGA.GRB`, `CGA.LGO` and the font
+files from the media.

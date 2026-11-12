@@ -342,6 +342,97 @@ static void test_locks(void)
     section_done("byte locks");
 }
 
+/* ---------------- 4.7 DOS internals that multitaskers read ---------------- */
+static u32 rd32(u16 seg, u16 off)
+{
+    return (u32)emu_rw(&g_e, seg, off) |
+           ((u32)emu_rw(&g_e, seg, (u16)(off + 2)) << 16);
+}
+
+static void test_internals(void)
+{
+    section("[4.7] DOS internals: SFT chain, SDA, InDOS flag, PSP and JFT");
+    int cf = 0;
+    /* the host harness runs without a loaded program, so name a scratch
+     * segment as the current PSP before touching PSP-relative structures */
+    u16 saved_psp = g_dos.psp_seg;
+    i21(0x50, 0x5000, SCR_SEG, 0, 0, 0, 0, 0, &cf);
+
+    /* AH=25h takes the interrupt number in AL -- Windows 1.x saves and
+     * reinstalls INT 22h around a DOS session and gives up when the vector
+     * lands in the wrong slot. */
+    i21(0x25, 0x0022, 0, 0, 0x1234, 0, 0, 0, &cf);   /* vector = DS:DX */
+    u16 v_off = emu_rw(&g_e, 0, 0x22 * 4);
+    u16 v_seg = emu_rw(&g_e, 0, 0x22 * 4 + 2);
+    if (!cf && v_off == 0x1234 && v_seg == SCR_SEG)
+        ok("AH=25h installs the vector named in AL");
+    else
+        bad("AH=25h installed the wrong slot", (long)v_off, 0x1234);
+    i21(0x25, 0x0022, 0, 0, 0, 0, 0, 0, &cf);       /* restore */
+
+    /* AH=52h: list of lists -> +4 is a far pointer to the SFT chain, whose
+     * last block starts with FFFFh and carries the entry count at +4. */
+    i21(0x52, 0x5200, 0, 0, 0, 0, 0, 0, &cf);
+    u16 lol_off = g_e.bx, lol_seg = g_e.es;
+    u32 sft = rd32(lol_seg, (u16)(lol_off + 4));
+    u16 s_off = (u16)(sft & 0xFFFF), s_seg = (u16)(sft >> 16);
+    int entries = -1, hops = 0;
+    while (hops++ < 64) {
+        if (emu_rw(&g_e, s_seg, s_off) == 0xFFFF) {
+            entries = (int)emu_rw(&g_e, s_seg, (u16)(s_off + 4));
+            break;
+        }
+        u32 next = rd32(s_seg, s_off);
+        s_off = (u16)(next & 0xFFFF);
+        s_seg = (u16)(next >> 16);
+    }
+    if (entries == g_dos.files_limit)
+        ok("AH=52h publishes a walkable SFT chain with the configured count");
+    else
+        bad("SFT chain walk", (long)entries, (long)g_dos.files_limit);
+
+    /* AH=34h: the InDOS byte that TSRs and multitaskers poll must read 0 */
+    i21(0x34, 0x3400, 0, 0, 0, 0, 0, 0, &cf);
+    if (!cf && emu_rb(&g_e, g_e.es, g_e.bx) == 0)
+        ok("AH=34h returns an InDOS flag that reads zero");
+    else
+        bad("AH=34h InDOS pointer", (long)emu_rb(&g_e, g_e.es, g_e.bx), 0);
+
+    /* AH=5D06h: swappable data area carrying DTA, PSP and current drive */
+    i21(0x5D, 0x5D06, 0, 0, 0, 0, 0, 0, &cf);
+    u16 sda_seg = g_e.ds, sda_off = g_e.si;
+    u16 sda_psp = emu_rw(&g_e, sda_seg, (u16)(sda_off + 0x10));
+    u16 sda_dta = emu_rw(&g_e, sda_seg, (u16)(sda_off + 0x0C));
+    if (!cf && sda_psp == g_dos.psp_seg && sda_dta == g_dos.dta_off)
+        ok("AH=5D06h SDA mirrors the current PSP and DTA");
+    else
+        bad("SDA contents", (long)sda_psp, (long)g_dos.psp_seg);
+
+    /* AH=50h/51h set and read the current PSP */
+    i21(0x50, 0x5000, 0x1234, 0, 0, 0, 0, 0, &cf);
+    i21(0x51, 0x5100, 0, 0, 0, 0, 0, 0, &cf);
+    if (g_e.bx == 0x1234) ok("AH=50h/51h round-trip the current PSP");
+    else bad("AH=50h/51h", (long)g_e.bx, 0x1234);
+    i21(0x50, 0x5000, SCR_SEG, 0, 0, 0, 0, 0, &cf);   /* back to the scratch PSP */
+
+    /* JFT: PSP:18h + handle = the SFT index of that handle */
+    u16 pn = putstr("C:\\JFT.TXT");
+    u16 h = i21(0x3C, 0x0000, 0, 0x20, pn, 0, 0, 0, &cf);
+    if (!cf && emu_rb(&g_e, SCR_SEG, (u16)(0x18 + h)) == (u8)h)
+        ok("PSP:18h job file table names the SFT entry of the open handle");
+    else
+        bad("JFT entry for the new handle",
+            (long)emu_rb(&g_e, SCR_SEG, (u16)(0x18 + h)), (long)h);
+    i21(0x3E, 0x3E00, h, 0, 0, 0, 0, 0, &cf);
+    if (emu_rb(&g_e, SCR_SEG, (u16)(0x18 + h)) == 0xFF)
+        ok("PSP:18h shows a closed handle as free (0FFh)");
+    else
+        bad("JFT slot not freed", (long)emu_rb(&g_e, SCR_SEG, (u16)(0x18 + h)), 0xFF);
+    i21(0x41, 0x4100, 0, 0, pn, 0, 0, 0, &cf);
+    i21(0x50, 0x5000, saved_psp, 0, 0, 0, 0, 0, &cf);  /* restore the harness PSP */
+    section_done("DOS internals");
+}
+
 /* ---------------- 6.1 dual path consistency ---------------- */
 static void test_dual(void)
 {
@@ -456,6 +547,7 @@ int dual_selftest(const char *image)
     test_files();
     test_fcb();
     test_locks();
+    test_internals();
     test_dual();
 
     emu_free(&g_e);

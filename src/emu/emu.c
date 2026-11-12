@@ -2766,23 +2766,35 @@ static void build_psp(Emu *e, u16 psp_seg, const char *argline)
         emu_ww(e, s, (u16)(0x0C + i * 4), seg);
     }
     emu_ww(e, s, 0x16, e->psp_seg ? e->psp_seg : s); /* parent PSP */
-    /* job file table: 20 handles, all "not open" */
-    for (int i = 0; i < 20; i++) emu_wb(e, s, (u16)(0x18 + i), 0xFF);
+    /* job file table: the standard handles 0-4 point at SFT entries 0-4, the
+     * rest are free (0FFh).  DOS keeps the SFT index here, not just a flag. */
+    for (int i = 0; i < 20; i++)
+        emu_wb(e, s, (u16)(0x18 + i), (u8)(i < 5 ? i : 0xFF));
     /* environment: offset 0 = string count word, offset 2 = the program's
        full path (DOS 3+), then the variables, then the DOS 5 "extra
        strings" trailer (count + path again).  DOS extenders depend on the
        path at +2; without it DOS/16M opens "" and gives up. */
     u16 env_seg = 0x0B00;
     u32 env_off = (u32)env_seg * 16;
-    const char *env = "PATH=C:\\";
+    /* Real DOS always exports PATH and COMSPEC; real-mode Windows 1.x parses
+     * COMSPEC (INT 21h AH=29h) before it starts a session, and program
+     * launchers of that era look PATH up in the same block. */
+    static const char *const env_vars[] = {
+        "PATH=C:\\",
+        "COMSPEC=C:\\COMMAND.COM",
+    };
+    const int env_count = (int)(sizeof(env_vars) / sizeof(env_vars[0]));
     const char *prog = g_prog_path[0] ? g_prog_path : "C:\\COMMAND.COM";
     u32 k = 0;
-    e->mem[(env_off + k) & MEM_MASK] = 1; k++;   /* word: 1 string */
+    e->mem[(env_off + k) & MEM_MASK] = (u8)env_count; k++;   /* string count */
     e->mem[(env_off + k) & MEM_MASK] = 0; k++;
     for (const char *p = prog; *p; p++) e->mem[(env_off + k++) & MEM_MASK] = (u8)*p;
     e->mem[(env_off + k++) & MEM_MASK] = 0;
-    for (const char *p = env; *p; p++) e->mem[(env_off + k++) & MEM_MASK] = (u8)*p;
-    e->mem[(env_off + k++) & MEM_MASK] = 0;
+    for (int vi = 0; vi < env_count; vi++) {
+        for (const char *p = env_vars[vi]; *p; p++)
+            e->mem[(env_off + k++) & MEM_MASK] = (u8)*p;
+        e->mem[(env_off + k++) & MEM_MASK] = 0;
+    }
     e->mem[(env_off + k++) & MEM_MASK] = 0;
     e->mem[(env_off + k) & MEM_MASK] = 1; k++;   /* extra strings: 1 */
     e->mem[(env_off + k) & MEM_MASK] = 0; k++;
@@ -2865,6 +2877,7 @@ static int load_com_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
     e->bp = 0; e->si = 0; e->di = 0;
     e->ax = 0; e->bx = 0; e->cx = 0; e->dx = 0;
     e->psp_seg = psp_seg;
+    g_dos.psp_seg = psp_seg;        /* DOS keeps its own copy for the SDA */
     g_dos.dta_seg = psp_seg;        /* DOS default DTA is PSP:0080h */
     g_dos.dta_off = 0x80;
     arena_setup(e, psp_seg, 0x100u + size);
@@ -2914,6 +2927,7 @@ static int load_exe_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
     e->ax = 0; e->bx = 0; e->cx = 0; e->dx = 0;
     e->bp = 0; e->si = 0; e->di = 0;
     e->psp_seg = psp_seg;
+    g_dos.psp_seg = psp_seg;        /* DOS keeps its own copy for the SDA */
     g_dos.dta_seg = psp_seg;        /* DOS default DTA is PSP:0080h */
     g_dos.dta_off = 0x80;
     arena_setup(e, psp_seg, modsize);
@@ -3483,6 +3497,7 @@ int emu_exec_program(Emu *e, const char *prog, const char *args)
     memcpy(&saved, e, sizeof(Emu));
     u16 s_dta_seg = g_dos.dta_seg, s_dta_off = g_dos.dta_off;
     u16 s_mem_base = g_dos.mem_base, s_mem_top = g_dos.mem_top;
+    u16 s_psp = g_dos.psp_seg;
     dos_handle s_handles[DOS_HANDLE_MAX];
     memcpy(s_handles, g_dos.handles, sizeof(s_handles));
 
@@ -3505,6 +3520,7 @@ int emu_exec_program(Emu *e, const char *prog, const char *args)
     g_dos.dta_off = s_dta_off;
     g_dos.mem_base = s_mem_base;
     g_dos.mem_top = s_mem_top;
+    g_dos.psp_seg = s_psp;
     memcpy(g_dos.handles, s_handles, sizeof(s_handles));
     g_exec_depth--;
     return code;

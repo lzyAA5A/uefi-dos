@@ -123,6 +123,13 @@ static int dos_weekday(int y, int m, int d)
 #define DOS_LOL_OFF  0xC000u   /* INT 21h AH=52h: list of lists */
 #define DOS_DPB_OFF  0xC100u   /* INT 21h AH=32h: one DPB per mounted drive */
 #define DOS_DPB_LEN  32
+#define DOS_SFT_OFF  0xC800u   /* SFT chain (list of lists +4 points here) */
+#define DOS_SFT_STRIDE 0x3Bu   /* DOS 3.1+/4.0 SFT entry: 0x35 + name */
+#define DOS_SFT_MAX  24
+#define DOS_SFT_END  0x0000FFFFu  /* offset FFFFh / segment 0000h */
+#define DOS_SDA_OFF  0xDC00u   /* swappable data area, INT 21h AH=5D06h */
+#define DOS_SDA_LEN  0x100
+#define DOS_SDA_LIST 0xDD00u   /* DOS 4.0 style SDA list, AH=5D0Bh */
 
 static int boot_drive(void)
 {
@@ -309,6 +316,143 @@ static u16 dpb_chain(Emu *e)
     return head;
 }
 
+static void ext_error(u16 code, u8 *cls, u8 *act, u8 *locus);
+
+/* The DOS-internal blocks below (SFT, swappable data area, job file table)
+ * live at fixed real-mode addresses.  INT 21h can also be called from a
+ * protected-mode DPMI client, where emu_wb(e, MAGIC_SEG, ...) would interpret
+ * 0F000h as a selector and latch a protection fault, so these writes go by
+ * linear address instead. */
+static void mag_wb(Emu *e, u16 off, u8 v)
+{
+    u32 lin = ((u32)MAGIC_SEG << 4) + off;
+    if (lin < e->ram_size) e->mem[lin] = v;
+}
+
+static u8 mag_rb(Emu *e, u16 off)
+{
+    u32 lin = ((u32)MAGIC_SEG << 4) + off;
+    return lin < e->ram_size ? e->mem[lin] : 0;
+}
+
+static void mag_ww(Emu *e, u16 off, u16 v)
+{
+    mag_wb(e, off, (u8)v);
+    mag_wb(e, (u16)(off + 1), (u8)(v >> 8));
+}
+
+static void mag_wd(Emu *e, u16 off, u32 v)
+{
+    mag_ww(e, off, (u16)v);
+    mag_ww(e, (u16)(off + 2), (u16)(v >> 16));
+}
+
+static void psp_wb(Emu *e, u16 seg, u16 off, u8 v)
+{
+    u32 lin = ((u32)seg << 4) + off;
+    if (lin < e->ram_size) e->mem[lin] = v;
+}
+
+/* ---- System File Table ---------------------------------------------- *
+ * DOS 3.1+/4.x keep one SFT entry per open handle and chain them with a far
+ * pointer in the first four bytes of each entry; the list of lists points at
+ * the first block, and the last block's link is FFFFh:0000h.  Multitaskers walk
+ * that chain (Windows 1.x/2.x and DESQview do) to size their handle tables and
+ * to keep private state in the unused terminator entry, which is why the
+ * terminator has to stay writable RAM.  Handles map one to one onto entries, so
+ * the table is simply rebuilt whenever AH=52h asks for it.
+ *
+ * Field offsets follow the documented DOS 3.1-4.0 entry: +00 next entry,
+ * +04 handle count, +06 open mode, +08 attribute, +09 device info word,
+ * +0B starting cluster, +0D time, +0F date, +11 current position, +2E 8.3 name.
+ */
+static void sft_entry_write(Emu *e, int h, u16 off, u32 next)
+{
+    dos_handle *H = &g_dos.handles[h];
+    int used = (h < 5) || H->used;
+    u16 info = 0;
+
+    mag_wd(e, off, next);
+    mag_ww(e, (u16)(off + 0x04), (u16)(used ? 1 : 0));
+    mag_ww(e, (u16)(off + 0x06), used ? (u16)H->open_mode : 0);
+    mag_wb(e, (u16)(off + 0x08), used ? H->attr : 0);
+    if (H->console == 1) info = 0x0080;             /* CON */
+    else if (H->console == 2) info = 0x0082;        /* PRN / AUX */
+    else if (used) info = (u16)(H->drive + 1);      /* disk file: drive number */
+    mag_ww(e, (u16)(off + 0x09), info);
+    mag_ww(e, (u16)(off + 0x0B), used && !H->console ? (u16)H->cluster : 0);
+    mag_ww(e, (u16)(off + 0x0D), 0);                /* time stamp */
+    mag_ww(e, (u16)(off + 0x0F), 0);                /* date stamp */
+    mag_wd(e, (u16)(off + 0x11), used ? H->pos : 0);
+    for (int i = 0; i < 11; i++)
+        mag_wb(e, (u16)(off + 0x2E + i), used && !H->console ? H->name11[i] : 0);
+}
+
+/* Refresh the job file table at PSP:18h.  DOS stores, for each of the 20
+ * handle slots, the SFT index of the open file (0FFh when the slot is free);
+ * our SFT entries are numbered exactly like the handles, so the entry is its
+ * own index.  Programs that read the PSP directly instead of asking DOS --
+ * Windows 1.x does exactly that while it builds its own handle table -- use
+ * it to decide which handles are live, so it has to stay current after every
+ * open, create and close. */
+void dos_jft_sync(Emu *e)
+{
+    u16 psp = g_dos.psp_seg;
+    if (!psp) return;
+    for (int i = 0; i < 20; i++) {
+        int used = (i < 5) || (i < g_dos.files_limit && g_dos.handles[i].used);
+        psp_wb(e, psp, (u16)(0x18 + i), used ? (u8)i : 0xFF);
+    }
+}
+
+static u16 sft_build(Emu *e)
+{
+    int n = g_dos.files_limit;
+    if (n < 6) n = 6;
+    if (n > DOS_SFT_MAX) n = DOS_SFT_MAX;
+    mag_wd(e, DOS_SFT_OFF, DOS_SFT_END);                  /* end of the chain */
+    mag_ww(e, (u16)(DOS_SFT_OFF + 4), (u16)n);
+    for (int i = 0; i < n; i++) {
+        u16 off = (u16)(DOS_SFT_OFF + 6 + i * DOS_SFT_STRIDE);
+        u32 next = (i + 1 < n)
+                 ? (((u32)MAGIC_SEG << 16) | (u16)(off + DOS_SFT_STRIDE))
+                 : DOS_SFT_END;
+        sft_entry_write(e, i, off, next);
+    }
+    return DOS_SFT_OFF;
+}
+
+/* ---- Swappable data area (INT 21h AH=5D06h / 5D0Bh) ----------------- *
+ * Offsets are the documented DOS 3.10-3.30 (and 4.x) layout: +00 critical
+ * error flag, +01 InDOS, +02 drive of last critical error, +03 error locus,
+ * +04 extended error, +06 suggested action, +07 error class, +0C current DTA,
+ * +10 current PSP, +16 current drive, +17 extended break flag.  Windows 1.01
+ * grabs this area and swaps the DTA/PSP/drive fields per application.
+ */
+static void sda_build(Emu *e)
+{
+    for (int i = 0; i < DOS_SDA_LEN; i++)
+        mag_wb(e, (u16)(DOS_SDA_OFF + i), 0);
+    mag_wb(e, (u16)(DOS_SDA_OFF + 0x00), 0x00);
+    mag_wb(e, (u16)(DOS_SDA_OFF + 0x01), 0x00);
+    mag_wb(e, (u16)(DOS_SDA_OFF + 0x02), 0xFF);
+    if (g_dos.last_error_valid && g_dos.last_error) {
+        u8 cls = 0, act = 0, locus = 0;
+        ext_error(g_dos.last_error, &cls, &act, &locus);
+        mag_wb(e, (u16)(DOS_SDA_OFF + 0x03), locus);
+        mag_ww(e, (u16)(DOS_SDA_OFF + 0x04), g_dos.last_error);
+        mag_wb(e, (u16)(DOS_SDA_OFF + 0x06), act);
+        mag_wb(e, (u16)(DOS_SDA_OFF + 0x07), cls);
+    }
+    mag_ww(e, (u16)(DOS_SDA_OFF + 0x0C), g_dos.dta_off);
+    mag_ww(e, (u16)(DOS_SDA_OFF + 0x0E), g_dos.dta_seg);
+    mag_ww(e, (u16)(DOS_SDA_OFF + 0x10), g_dos.psp_seg);
+    mag_ww(e, (u16)(DOS_SDA_OFF + 0x12), 0xFFFE);
+    mag_ww(e, (u16)(DOS_SDA_OFF + 0x14), 0x0000);
+    mag_wb(e, (u16)(DOS_SDA_OFF + 0x16), (u8)dos_current_drive());
+    mag_wb(e, (u16)(DOS_SDA_OFF + 0x17), 0x00);
+}
+
 static void ext_error(u16 code, u8 *cls, u8 *act, u8 *locus)
 {
     switch (code) {
@@ -374,6 +518,7 @@ void int21_handler(Emu *e)
 {
     trace_call(e, 0x21);
     u8 ah = (u8)(e->ax >> 8);
+    dos_jft_sync(e);
     /* DOS 4.0 FCB call family (AH=0Fh..17h, 21h..23h, 27h, 28h) lives in fcb.c */
     if (fcb_int21(e, ah)) return;
     switch (ah) {
@@ -499,12 +644,21 @@ void int21_handler(Emu *e)
     case 0x1A:
         g_dos.dta_seg = e->ds;
         g_dos.dta_off = e->dx;
+        /* Keep the swappable data area in step: Windows 1.x saves and restores
+         * the DTA through SDA+0Ch when it switches between applications. */
+        mag_ww(e, (u16)(DOS_SDA_OFF + 0x0C), g_dos.dta_off);
+        mag_ww(e, (u16)(DOS_SDA_OFF + 0x0E), g_dos.dta_seg);
         set_ok(e);
         return;
     case 0x25: {
+        /* AH=25h: set the interrupt vector.  The interrupt number travels in
+         * AL (not AH) -- getting this wrong quietly satisfies programs that
+         * only save vectors and breaks every one that installs its own
+         * handler, which is what Windows 1.x does with INT 22h. */
+        u8 n = (u8)(e->ax & 0xFF);
         u16 off = e->dx, seg = e->ds;
-        emu_ww(e, 0, (u16)(((e->ax >> 8) & 0xFF) * 4), off);
-        emu_ww(e, 0, (u16)(((e->ax >> 8) & 0xFF) * 4 + 2), seg);
+        emu_ww(e, 0, (u16)(n * 4), off);
+        emu_ww(e, 0, (u16)(n * 4 + 2), seg);
         set_ok(e);
         return;
     }
@@ -545,6 +699,11 @@ void int21_handler(Emu *e)
                 mn = on;
             }
             e->ax = (u16)(((mn & 0xFF) << 8) | (mj & 0xFF));
+#ifdef UEFIDOS_HOST
+            if (getenv("UEFIDOS_TRACE_DOSVER"))
+                fprintf(stderr, "[ver] %s -> %d.%02d (AX=%04X)\n",
+                        emu_current_program(), mj, mn, (unsigned)e->ax);
+#endif
         }
         set_ok(e);
         return;
@@ -649,6 +808,7 @@ void int21_handler(Emu *e)
         int h;
         int rc = dos_open_ex(path, open_mode, share, &h);
         if (rc != FAT_OK) { set_err(e, (u8)dos_error_code(rc)); return; }
+        dos_jft_sync(e);
         set_ok(e);
         e->ax = (u16)h;
         return;
@@ -660,6 +820,7 @@ void int21_handler(Emu *e)
         int rc = dos_creat_ex(path, e->cx & 0xFF,
                               (e->ax & 0xFF) <= 4 ? (int)(e->ax & 0xFF) : 0, 2, &h);
         if (rc != FAT_OK) { set_err(e, (u8)dos_error_code(rc)); return; }
+        dos_jft_sync(e);
         set_ok(e);
         e->ax = (u16)h;
         return;
@@ -667,6 +828,7 @@ void int21_handler(Emu *e)
     case 0x3E: {
         int rc = dos_close(e->bx);
         if (rc != FAT_OK) { set_err(e, (u8)dos_error_code(rc)); return; }
+        dos_jft_sync(e);
         set_ok(e);
         return;
     }
@@ -940,6 +1102,24 @@ void int21_handler(Emu *e)
         set_ok(e);
         return;
     }
+    case 0x34:
+        /* AH=34h: address of the InDOS flag, a byte that is non-zero while a
+         * DOS call is active.  In every DOS 2+ that byte is SDA+1, and
+         * multitaskers/TSRs poll it before re-entering DOS.  Windows 1.x keeps
+         * the pointer and tests the flag while its scheduler runs. */
+        e->es = MAGIC_SEG;
+        e->bx = (u16)(DOS_SDA_OFF + 0x01);
+        set_ok(e);
+        return;
+    case 0x50:
+        /* AH=50h: set the current PSP (DOS 2+).  Shells and environments set
+         * it around EXEC, and Windows 1.x sets it to its own PSP and then
+         * verifies the result through the swappable data area (SDA+10h), so
+         * the emulator and the DOS kernel copies have to move together. */
+        e->psp_seg = e->bx;
+        g_dos.psp_seg = e->bx;
+        set_ok(e);
+        return;
     case 0x51: case 0x62: e->bx = e->psp_seg; set_ok(e); return;
     case 0x56: {
         char oldp[DOS_MAX_PATH], newp[DOS_MAX_PATH];
@@ -994,16 +1174,54 @@ void int21_handler(Emu *e)
     }
     case 0x52: {
         /* AH=52h: pointer to the DOS "list of lists" (ES:BX).  We model the
-         * header fields that portable tools read: +0 MCB chain (none), +2 the
-         * DPB chain, +4 the first SFT (file tables are not exposed). */
+         * header fields that portable tools read: +0 the MCB chain, +2 the DPB
+         * chain, +4 a far pointer to the SFT chain (see sft_build above). */
         u16 lol = DOS_LOL_OFF;
         u16 dpbs = dpb_chain(e);
-        for (int i = 0; i < 0x40; i++) emu_wb(e, MAGIC_SEG, (u16)(lol + i), 0);
-        emu_ww(e, MAGIC_SEG, (u16)(lol + 0x00), g_dos.mem_base); /* first MCB */
-        emu_ww(e, MAGIC_SEG, (u16)(lol + 0x02), dpbs);    /* first DPB */
-        emu_ww(e, MAGIC_SEG, (u16)(lol + 0x04), 0);       /* first SFT */
+        u16 sft = sft_build(e);
+        for (int i = 0; i < 0x40; i++) mag_wb(e, (u16)(lol + i), 0);
+        mag_ww(e, (u16)(lol + 0x00), g_dos.mem_base);     /* first MCB */
+        mag_ww(e, (u16)(lol + 0x02), dpbs);               /* first DPB */
+        mag_wd(e, (u16)(lol + 0x04), ((u32)MAGIC_SEG << 16) | sft); /* first SFT */
         e->es = MAGIC_SEG;
         e->bx = lol;
+        set_ok(e);
+        return;
+    }
+    case 0x5D: {
+        /* AH=5Dh: DOS-internal interface.  AL=06h hands out the swappable data
+         * area that multitaskers save and restore around a task switch (Windows
+         * 1.x and 2.x swap the DTA/PSP per application this way); AL=0Bh is the
+         * DOS 4.0 form returning a list describing the same area. */
+        u8 sub = (u8)(e->ax & 0xFF);
+        if (sub == 0x06 || sub == 0x0B) {
+            sda_build(e);
+            e->ds = MAGIC_SEG;
+            e->cx = (u16)DOS_SDA_LEN;      /* bytes to swap while inside DOS */
+            e->dx = 0x20;                  /* bytes that must always be swapped */
+            if (sub == 0x06) {
+                e->si = (u16)DOS_SDA_OFF;
+            } else {
+                mag_ww(e, (u16)DOS_SDA_LIST, 1);                  /* one area */
+                mag_wd(e, (u16)(DOS_SDA_LIST + 2),
+                       ((u32)MAGIC_SEG << 16) | (u16)DOS_SDA_OFF);
+                mag_ww(e, (u16)(DOS_SDA_LIST + 6),
+                       (u16)(DOS_SDA_LEN | 0x8000));              /* swap always */
+                e->si = (u16)DOS_SDA_LIST;
+            }
+            set_ok(e);
+            return;
+        }
+        if (sub == 0x07) {                 /* read the InDOS flag */
+            e->dx = mag_rb(e, (u16)(DOS_SDA_OFF + 0x01));
+            set_ok(e);
+            return;
+        }
+        if (sub == 0x08) {                 /* set the InDOS flag */
+            mag_wb(e, (u16)(DOS_SDA_OFF + 0x01), (u8)(e->dx & 0xFF));
+            set_ok(e);
+            return;
+        }
         set_ok(e);
         return;
     }

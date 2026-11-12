@@ -26,7 +26,10 @@ FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以
 为此还加了一个 DOS 层特性：**`SETVER`**（按程序设置 DOS 版本）。UEFI-DOS 报告的是
 MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 `SETVER WIN.COM 3.30`（命令行或 `CONFIG.SYS`）是逃生口，而不是把所有人的版本降下去。
-有了它，**Windows 1.01 的 `SETUP` 能装完整个发行版**；运行时卡在哪、还缺什么，见
+有了它，**Windows 1.01 的 `SETUP` 能装完整个发行版**；`WIN100.BIN` 现在能走完它对 DOS
+内部结构的整套校验（SFT 链、SDA、InDOS 标志、PSP、作业文件表），随后在加载驱动之前以退出码 1
+结束，所以桌面还没画出来——校验链的逐条反汇编、它需要的 DOS 表面，以及卡住的那个
+实例/句柄遍历（`CS:0E71h`）都记在
 [`docs/windows1x.md`](docs/windows1x.md)。
 
 ## 立刻跑起来（不需要编译器）
@@ -54,6 +57,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 | 软盘/磁盘镜像挂载 | `MOUNT A: IMAGE.IMG` 把 `C:` 上的镜像文件变成可读写驱动器 |
 | 命令解释器 | `DIR CD MD RD DEL REN TYPE COPY CLS ECHO VER VOL DATE TIME PROMPT PATH SET MEM HELP APITEST MOUNT UNMOUNT CONFIG FCB DRIVES EXIT SHUTDOWN`、批处理、`AUTOEXEC.BAT` |
 | DOS 内核 | 8.3 文件名（+ VFAT 长文件名）、按驱动器维护当前目录、DOS 错误码、**DOS 4.0 语义**（见下） |
+| DOS 内部结构 | `AH=52h` 列表的列表里带**可遍历的 SFT 链**、`AH=5D06h`/`5D0Bh` **可换出数据区（SDA）**、`AH=34h` InDOS 标志指针、`AH=50h`/`51h` 当前 PSP，以及 `PSP:18h` 的**作业文件表**——Windows 1.x/2.x、DESQview 这类多任务环境按任务换出的正是这些结构 |
 | 8086 模拟器 | 8086/80186 实模式解释器、16 MiB 模拟内存、PSP、IVT、带重定位的 `.COM` 与 MZ `.EXE` 加载器、8087 转义按 8086 空转处理 |
 | INT 21h | 控制台、文件 I/O、查找首/次 + DTA、目录、日期时间、版本（4.00）、中断向量读写、IOCTL、句柄复制、PSP、内存桩、**EXEC（AH=4Bh）**、**AH=67h**、**AH=5Ch** 字节锁、**SHARE 模式**、**DOS 4.0 面：32h 52h 59h 5Ah 60h 63h 68h 6Ch** |
 | FCB 调用族 | AH=0Fh 10h 11h 12h 13h 14h 15h 16h 17h 21h 22h 23h 27h 28h（`src/emu/fcb.c`） |
