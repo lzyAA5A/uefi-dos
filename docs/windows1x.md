@@ -751,6 +751,27 @@ the measurement the next round starts from, and it is the last structural unknow
 (strip = 27 paragraphs, `GlobalAlloc` fails, `AH=4C AL=1`) and the reference run (strip spanning the
 whole lower memory, `GlobalAlloc` returns `0x0FCD`).
 
+### Negative result: a big strip alone is not enough
+
+To test whether the reference geometry is the whole story, the arena builder was nudged so that the
+owner-0 block spans the whole lower memory (patch at `CS:737E`: `sub %di,%ax ; dec %ax` ->
+`mov $0x9FBE,%ax`, so the strip becomes `load+2 .. 0x9FBE` instead of 27 paragraphs). The run still
+ends with `AH=4C AL=1` after exactly the same 77 DOS calls, so a large allocatable block by itself
+does not unlock the startup: the block's own links (`next`, `self`, the `+0xA` free-list pointer) and
+the heap header that `CS:73AB` installs have to be mutually consistent as well. The reference run's
+geometry is therefore necessary but not sufficient, and reproducing it faithfully means reproducing
+`CS:72D1` + `CS:73AB` *together* with the image actually sitting where `instance` claims it is.
+
+Status of the whole Windows 1.01 objective after these rounds, stated plainly: the kernel still exits
+with `AH=4C AL=1` under UEFI-DOS right after drawing the MICROSOFT splash, because its first
+`GlobalAlloc` (30 paragraphs for the module database) fails against the 27-paragraph strip that its
+own KERNSTUB geometry produces, and the failure path frees the block and returns the bogus handle 1,
+which the caller installs as a segment. On real MS-DOS 5 the same call succeeds because the kernel is
+running from a copy at the top of memory with its PSP (and hence `load`) still low, so the strip spans
+tens of thousands of paragraphs. Everything else about the two runs — DOS version, module name length,
+the request size, the arena builder arguments except that one pair, the walk's return value — is
+identical and measured.
+
 ## Windows 1.01: what the kernel asks DOS for
 
 `WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
