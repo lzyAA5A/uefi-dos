@@ -1102,3 +1102,104 @@ What the reference shows:
   `0xF88B` - but both are *stale* by then (the kernel keeps running and reuses
   those cells), so post-hoc cell reads cannot be compared with our pre-crash
   state. That is why the numbers above come from the call site, not from memory.
+
+## The kernel's private arena, decoded instruction by instruction
+
+This section records what `CS:670F` and `CS:72D1` actually do, because the
+module-database allocation is rejected by *their* data structures, not by DOS.
+
+### The gate at CS:670F
+
+```
+6709  push %ax / mov $0x670f,%ax / push %ax / lret   ; the jump trick (true lret)
+670f  push %ss / call 0x3398
+6713  mov %ss,%cs:0x18 / mov %ss,%cs:0x16            ; remember the stack segment
+671d..6734  install INT 3Fh (handler 0x1369, old vector kept in cs:0x86/0x88)
+6738  mov %cs:0x6498,%es                             ; ES = instance (set at 0x6506/0x650a)
+673d  cmpw $0x0,%es:0x0a                             ; [instance+0x0A] is NE+0x0A = ne_crc
+6743  jne 0x674c                                     ; non-zero -> mov ax,4C01h / int 21h
+6745  mov $0x64b4,%ax / push %ax / jmp 0x69e8        ; the real startup continues
+```
+
+So the kernel refuses to start when the 32-bit checksum field of the in-memory NE
+header is non-zero, and it decides that from `[instance+0x0A]` - i.e. it really does
+believe `instance` points at the module header. This is the same test we can see
+failing at `CS:675C` in our runs only if the values below are wrong.
+
+### CS:72D1 rebuilds the arena from three numbers
+
+Inputs (pushed by `CS:658B`): `AX = load segment`, `BX = instance`,
+`CX = [instance+0x10]` (= `ne_heap`), `DX = [PSP+2]` (= top of memory).
+With our measured values `load = 0x0D10`, `instance = 0x0D30`, `ne_heap = 0x0200`,
+`top = 0x9FC0` the routine computes
+
+```
+72d1  si = (load + 1) & ~1              = 0x0D10     ; bootstrap block
+72d8  di = (si + 2) & ~1                = 0x0D12     ; header/heap block
+72df  cx = (ne_heap + 0x0F) >> 4        = 0x0020     ; heap paragraphs
+72ea  cx = -(cx - top) & 0xFFFE         = 0x9FA0     ; heap segment = top - heap_paras
+72f1  dx = (top - 1) & 0xFFFE           = 0x9FBE     ; last block
+72f5  ax = (instance - 1) & 0xFFFE      = 0x0D2E     ; end of the header block
+```
+
+and then writes five blocks (`[0]` type, `[1]` owner, `[3]` size, `[6]`/`[8]` links):
+
+| segment | type | owner | size | [+6] | [+8] next |
+| --- | --- | --- | --- | --- | --- |
+| 0x0D10 | `M` | FFFF | 0001 | 0x0D10 | 0x0D12 |
+| 0x0D12 | `M` | **0000** | **001B** | 0x0D10 | 0x0D2E |
+| 0x0D2E | `M` | FFFF | `(heap_seg - 0x0D2E - 1)` = 0x9271 | 0x0D2E | 0x9FA0 |
+| 0x9FA0 | `M` | FFFF | `(0x9FBE - 0x9FA0 - 1)` = 0x1D | 0x9FA0 | 0x9FBE |
+| 0x9FBE | `Z` | FFFF | 0001 | - | itself |
+
+The `0x0D12` block is the one the kernel later uses as its **local heap**
+(`DS = 0x9FA0` in the trace is the *top* block; the heap header ends up in the
+`0x0D12` block when `ne_heap` is small, and in the top block when it is large).
+
+Note the owner field of the `0x0D12` block is written by `7384 mov %bx,0x1(%bx)`
+with `BX = 0`, so it is **0**. In the real MS-DOS reference dump the equivalent
+block carries a *self segment* (`0FCC M owner=0FCD size=001D`), which means the
+kernel (or a later pass of its allocator) rewrites that field with the block's own
+data segment. That difference is the most likely reason the allocator walk below
+never accepts a block under UEFI-DOS.
+
+### Why the allocation is rejected (trace, not guesswork)
+
+`UEFIDOS_TRACE_WINDOW=5300-5c00` on the flat installation with a 640 KB-visible
+arena shows the module-database request and the whole search:
+
+```
+#1757 0D49:54FA BX=001C            ; 28 paragraphs = the 444-byte module database
+#1759 0D49:551F                    ; or bx,bx -> search
+#1760 0D49:594F                    ; walk: es=[di+6], then repeat es=[es+8]
+#1779 0D49:5AA0 ES=0D12            ; grow attempt on the header block
+#1810 0D49:5A82 ES=0D2E AX=DX=9272 ; split attempt on the 599 KB free block
+#1857 0D49:5A82 ES=9FA0 AX=DX=001E ; split attempt on the top block (29 paragraphs!)
+#1999 0D49:5AA0 ES=0D12            ; grow again
+#2424 0D49:54FA BX=0000            ; second pass: BX=0 -> xchg ax,cx / test 2,cl -> fail
+#2429 0D49:5519                    ; xor dx,dx / xor ax,ax  ==  allocation failed
+```
+
+The split helper only accepts a block whose header satisfies
+
+```
+5a84  cmp %di,%es:0x1(%di)     ; the block's owner word must equal DI (the heap base)
+5a88  jne 0x5a96               ; otherwise: es = [es+8] and keep walking
+5a8a  call 0x5aa0              ; owner matched -> size test / grow
+5a8f  jae 0x5a9d               ; success only if size+1 >= request
+```
+
+With every block owned by `FFFF` or `0000` and `[es+8]` pointing at the *next
+block segment*, the walk burns its `CX` counter and returns the failure path. The
+29-paragraph top block would have been big enough (`0x1E >= 0x1C`), so the
+rejection really is the owner/link convention, not the size.
+
+### What is left to change
+
+Make the arena the kernel builds agree with what its allocator walks: the block at
+`load+2` has to carry its own data segment in the owner field (and the heap has to
+be big enough for the 435-byte module database). Our DOS cannot write that field -
+the kernel does - so the remaining question is which value the kernel *expects* and
+why it computes `owner = 0` here while the reference run ends up with
+`owner = block+1`. The next probe is `UEFIDOS_WATCH=0D130-0D16F` to catch every
+write to that header between `CS:72D1` and the first `GlobalAlloc`.
