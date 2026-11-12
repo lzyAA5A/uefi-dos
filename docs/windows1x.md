@@ -685,6 +685,41 @@ So the next thing to establish is which of these two branches our run takes and 
 `[cs:0x103]` holds — our emulator does answer `AH=48 BX=FFFFh` with a largest-block value, but the
 comparison at `CS:5F9` and the `0x4A1` copy are the two places where the relocation can be skipped.
 
+### The KERNSTUB decoded: `instance = load + 0x20` is by design, and the entry already runs high
+
+The 512-byte DOS stub at image `0x000..0x200` (file `0x200..0x400`) is short and now fully read:
+
+```
+0000 push %cs ; pop %ds            ; DS = CS = load
+0002 mov $0x130,%si ; add $0x1ff,%si ; and $0xfe00,%si   ; si = 0x200 -> the NE header
+000d cmpw $0x454e,(%si) ; jne error                      ; 'NE'
+0013 mov %ds,%ax ; cli ; mov %ax,%ss ; mov %si,%sp ; sti ; SS:SP = load:0x0200
+001b mov 0xe(%si),%bx ; dec %bx ; jl 0x46                 ; number of auto-data segments - 1
+0021 shl x3 ; add 0x22(%si),%bx ; mov (%bx,%si),%ax       ; segment-table entry -> sector
+002c cmpw $0,0x32(%si) ; jne ; movw $9,0x32(%si)          ; default align shift
+0037 mov 0x32(%si),%cx ; sub $4,%cx ; shl %cl,%ax
+003f mov %cs,%di ; sub $0x20,%di ; add %ax,%di            ; DI = load - 0x20 + sector<<(align-4)
+0046 ... same computation for the movable-entry segment into DX
+0066 push %dx ; push 0x14(%si) ; mov %di,%ds ; lret       ; far-return to ne_csip with DS = DGROUP
+```
+
+With `align = 4` and `seg[0].sector = 0x40` the destination is `load - 0x20 + 0x40 = load + 0x20`
+paragraphs, i.e. the NE header itself: **`instance` is the module's DGROUP by construction**, not an
+artefact. `SS:SP` is forced to `load:0x0200`, so `instance = SS + (SP >> 4) = load + 0x20` follows
+from the stub, and the 27-paragraph strip is what DOS gives anybody who loads this file at `load`.
+
+The stub itself performs no copy: the only memory move is `rep movs` at CS `0x6827`, which is part of
+the MCB shrink helper, not a relocation.
+
+An entry probe (patch at `CS:64E5`, the NE entry, recording `CS`) reports `CS = 0x74B9`, the same
+value the arena-builder probe sees (`CS = 0x74B9`, `instance = 0x74A0`). So on the real machine the
+kernel **already executes at the top of memory when its first NE instruction runs** — the copy, if
+there is one, happens before the entry point, i.e. on the loader side (`WIN.COM`/DOS placement),
+not inside the kernel. That reopens the question as a *placement* question rather than a kernel-code
+question, and it is the next thing to pin down: `WIN.COM` shrinks itself with `AH=4A` to
+`0x8B` paragraphs (`CS:5EE`) and then `EXEC`s `C:\WIN100.BIN` (`AH=4B`); what block DOS hands the
+child in each case is measurable by recording the child's `PSP+2` and its real `CS` at the entry.
+
 ## Windows 1.01: what the kernel asks DOS for
 
 `WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
