@@ -299,6 +299,58 @@ are mutually exclusive, so this `KERNEL.EXE` cannot start on any DOS.
 Evidence kept in `build/` (not published): `f_kernel.png` (real DOS 2.11),
 `g_dr5.png` (UEFI-DOS), `step_trace.txt`/`limit_dump.txt` (emulator trace).
 
+### The patched arena crashes on real MS-DOS 5: the patch route is refuted
+
+The two-byte experiment (`ne_heap` 0x0200 -> 0x9000 at file 0x410 plus the heap block's owner
+immediate at `CS:7343`) makes the module database allocate inside UEFI-DOS, so it looked like
+a candidate fix. The same patched `WIN100.BIN` was therefore run on the reference machine -
+real MS-DOS 5.00, Windows tree exposed as a vvfat hard disk, `win` typed through the QEMU
+monitor (`ref_dos5_hd.py`, screenshot `build/ref_own.png`) - and it dies during boot:
+
+```
+Microsoft Windows
+Version 1.01
+Copyright (c) Microsoft Corporation, 1985. All Rights Reserved.
+Microsoft is a registered trademark of Microsoft Corp. Incorrect DOS version
+...
+FatalExit code = 8
+stack overflow
+```
+
+Two independent conclusions:
+
+1. **The patched values are wrong, not merely different.** A bigger `ne_heap` with a free-owned
+   heap block makes the kernel overrun its own stack on the machine where it normally works, so
+   `ne_heap = 0x0200` and `owner = FFFF` on the pool blocks are both correct.
+2. **The arena is not where we diverge.** On real MS-DOS 5 the kernel's arena shows the module
+   database at `0FCC M owner=0FCD size=001D` (29 paragraphs = 464 bytes, i.e. the 435-byte
+   request) and a heap of `0FEA M owner=0FCD size=064B` (1611 paragraphs = 25 KB) owned by the
+   same segment. A 25 KB heap cannot come from the NE header's 0x0200 field, so on the real
+   machine `[instance+0x10]` was **overwritten with available memory before the heap was built**
+   - which is exactly what the `CS:66F8..6705` block does:
+
+   ```
+   66f8 les %ss:0x2,%bx
+   66fd mov %bp,%es:0x10(%bx)      ; available memory -> [instance+0x10]
+   6702 mov %bp,%es:0x0e(%bx)      ; and -> [instance+0x0E]
+   6705 ...                        ; then the 670F gate / 6745 -> 64B4
+   ```
+
+   Our run never executes `0x66E0..0x675B` (proved with `UEFIDOS_TRACE_WINDOW=66e0-6760`: only
+   the exit path `0x675C mov $1,%al / call 0x38DD` is logged). We arrive at the module
+   instantiation with the pristine `ne_heap`, the 428-byte heap, and the database request that
+   cannot fit - and the walk that would have patched the field is exactly what the failed
+   allocation prevents. It is a deadlock in the boot *path*, not a DOS service difference.
+
+So the remaining question changed shape: not "how do we make the allocator accept the block",
+but **why does the real kernel execute `CS:66F8` before the instantiation while we reach
+`CS:6642` directly**. On real MS-DOS 5 the recorded translation-block order starts with
+`670F -> 6713 -> 6745 -> 64B4 -> 64BB (lcall *CS:006Eh) -> 64C6 -> 64CA`, i.e. the gate runs
+before the inner block; in our run the same code is entered from `CS:63AD` via a `ret` and the
+gate is skipped entirely. That entry difference is the next thing to chase, with the
+instrumented-kernel-on-real-DOS route (a COM1 logger patched into `CS:73AB`) as the way to see
+the reference values at the exact instant.
+
 ## Windows 1.01: what the kernel asks DOS for
 
 `WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
