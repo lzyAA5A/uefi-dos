@@ -3510,7 +3510,22 @@ int emu_exec_program(Emu *e, const char *prog, const char *args)
         plat_free(img);
         return -2;
     }
+    /* DOS gives the child the first free block above the caller, so put the new
+     * PSP right after the caller's own block (the caller normally shrinks its
+     * block with AH=4Ah before an EXEC, exactly like WIN.COM does).  Programs
+     * that walk the arena see the same layout a real DOS produces; the old
+     * fixed 2000h:0010h address made real-mode Windows 1.x place its own module
+     * header inside its loaded image. */
     u16 psp = (u16)(0x2000 + 0x1000 * depth);
+    if (g_dos.mem_base && depth == 0) {
+        u16 caller_block = (u16)(g_dos.mem_base + 1);
+        u16 caller_size = emu_rw(e, g_dos.mem_base, 3);
+        u32 cand = (u32)caller_block + (u32)caller_size + 1u;
+        if ((cand & 1u) && cand + 1 < (u32)DOS_MEM_TOP) cand++;
+        /* the image plus its PSP has to fit below the top of memory */
+        u32 need = 0x10u + ((u32)size + 15u) / 16u + 0x100u;
+        if (cand > (u32)caller_block && cand + need < (u32)DOS_MEM_TOP) psp = (u16)cand;
+    }
 
     /* snapshot the parent context; the child runs in a new segment */
     Emu saved;

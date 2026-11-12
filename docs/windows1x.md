@@ -467,3 +467,19 @@ New host probes used for this (both `#ifdef UEFIDOS_HOST`, env-gated):
 `UEFIDOS_TRACE_EXEC=1` prints every `INT 21h AH=4Bh` (path, env seg, command-line
 far pointer, first bytes, caller PSP, caller DS) and every failing `AH=48h`
 (requested and largest-free paragraphs).
+
+### Also changed: the EXEC'd child gets the first free block above its caller
+
+`emu_exec_program()` used to put every child at the fixed address
+`PSP = 2000h + 1000h*depth`.  Real DOS hands the child the first free block
+above the caller (that is why `WIN.COM` shrinks its own block with
+`INT 21h AH=4Ah BX=0089h` before it EXECs `WIN100.BIN`), so the child PSP is now
+`caller_psp + caller_block_paragraphs + 1`, rounded up to even, as long as the
+image still fits below `A000h`; otherwise the old fixed address is used.
+
+With this, `WIN.COM`'s child PSP moved from `2000h` to `0D8Ah` — exactly the
+address DOS would pick, and the "bytes after the tail" the probe prints now come
+from the program's own data instead of the space Windows had just zeroed.  It
+did **not** by itself unblock the kernel (see the section above: the heap is
+still sized from the same image word), but the arena layout a program sees now
+matches a real DOS, and all 30 regression checks stay green.
