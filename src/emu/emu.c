@@ -2989,7 +2989,7 @@ static int is_mz(const u8 *img, u32 size)
 
 /* Conventional-memory ceiling seen by DOS programs (segment A000h = 640 KB).
  * Everything a program allocates lives below it, like on a real PC. */
-#define DOS_MEM_TOP 0xA000u
+#define DOS_MEM_TOP 0x9FC0u
 
 /* DOS hands a freshly loaded program ONE block covering everything from its
  * PSP to the top of conventional memory; the program shrinks it with INT 21h
@@ -3013,6 +3013,9 @@ static void arena_setup(Emu *e, u16 psp_seg, u32 image_bytes)
     u16 mcb = (u16)(psp_seg - 1);
     g_dos.mem_base = mcb;
     g_dos.mem_top = top;
+    /* PSP+2 has to agree with the arena ceiling: real DOS reports 9FC0h there
+       (it keeps the last 64 paragraphs), and programs size buffers from it. */
+    emu_ww(e, psp_seg, 0x02, top);
     emu_wb(e, mcb, 0, 'Z');                  /* single block, last in chain */
     emu_ww(e, mcb, 1, psp_seg);              /* owned by this program */
     emu_ww(e, mcb, 3, (u16)((u32)top - (u32)psp_seg - 1u));
@@ -3371,6 +3374,22 @@ int emu_run(Emu *e)
     }
     video_flush_force(e);
     dump_vram(e);
+#ifdef UEFIDOS_HOST
+    {
+        /* UEFIDOS_DUMP_MEM=<path>: write the low 640 KB as the program ends.
+           Comparing this with a real-DOS pmemsave dump is how compatibility
+           differences are located. */
+        const char *dm = getenv("UEFIDOS_DUMP_MEM");
+        if (dm && *dm) {
+            FILE *f = fopen(dm, "wb");
+            if (f) {
+                size_t n = e->ram_size < 0xA0000u ? (size_t)e->ram_size : 0xA0000u;
+                fwrite(e->mem, 1, n, f);
+                fclose(f);
+            }
+        }
+    }
+#endif
     g_dos.last_error = 0;
     e->last_exit_code = (u16)e->exit_code;
     return e->exit_code;

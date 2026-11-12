@@ -445,6 +445,7 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_KBD_MAX_POLLS=n` | 轮询多少次后投递 `ESC`，让"等按键"循环结束（默认 100000） |
 | `UEFIDOS_PSP_SEG=0x260` | 覆盖加载段，用于按固定 PSP 链接的程序 |
 | `UEFIDOS_DUMP_VRAM=1` | 把模拟的 80×25 屏 dump 到 `build/vram_dump.txt`（带列标尺） |
+| `UEFIDOS_DUMP_MEM=file` | 程序结束时把低端 640 KB 写文件（与真 DOS 下 QEMU `pmemsave` 的结果逐字节对比） |
 | `UEFIDOS_TRACE_INTS=1`、`UEFIDOS_TRACE_VRAM=n`、`UEFIDOS_TRACE_STEPS=n`、`UEFIDOS_TRACE_WINDOW=CS:LO-HI`、`UEFIDOS_TRACE_PORTS=1` | 中断、显存写入、单步、地址窗口、端口 I/O 跟踪，输出在 `build/` |
 | `UEFIDOS_TRACE_PSP=1`、`UEFIDOS_TRACE_EXEC=1` | 打印每个新 PSP 的命令行尾部（及其后 16 字节）、每次 `INT 21h AH=4Bh`（路径、环境段、命令行远指针、调用者 PSP/DS），以及失败的 `AH=48h` 请求 |
 

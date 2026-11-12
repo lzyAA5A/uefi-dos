@@ -483,3 +483,66 @@ from the program's own data instead of the space Windows had just zeroed.  It
 did **not** by itself unblock the kernel (see the section above: the heap is
 still sized from the same image word), but the arena layout a program sees now
 matches a real DOS, and all 30 regression checks stay green.
+
+## Reference dump analysis: what the real MS-DOS 5 run does that we do not
+
+Method: boot real MS-DOS 5.00 with the Windows 1.01 tree as a `vvfat` hard disk,
+type `c:` and `win`, and `pmemsave 0 655360` five times at one-second intervals
+(`_tmp/win/ref_memdump2.py`, analysis in `_tmp/win/an_mem*.py`).  UEFI-DOS is
+dumped with the new host knob `UEFIDOS_DUMP_MEM=<file>`, which writes the low
+640 KB as `emu_run()` returns, i.e. exactly at the moment the program stops.
+
+Facts established from the real dump (all reproducible):
+
+| item | real MS-DOS 5.00 | UEFI-DOS |
+| --- | --- | --- |
+| `WIN100.BIN` load segment | `0FB2h` (CS base linear `0FEB0h`) | `0D10h` |
+| PSP top-of-memory (`PSP+2`) | `9FC0h` (DOS 5 keeps 64 paragraphs) | `A000h` |
+| first `mov ss` in the stub | `SS=load_seg, SP=0200h` | same |
+| kernel's arena MCB signature | not at `load_seg:0` | `'M'` at `0D10h:0` |
+| kernel's own "Z" block | not at `9FFEh` | `'Z'` at `9FFEh` |
+| kernel's `CS:[6498]` (instance) | `749Fh` | `0D30h` = `load+20h` |
+| `[instance+10h]` (module heap) | `F88Bh` (a large word) | `0200h` (`ne_heap` of the image) |
+| module heap placed at | top of conventional memory | `9FE1h` (same place) |
+| heap bytes available / wanted | enough / `1BCh` | `428` / `444` |
+
+The chain that stops the kernel in UEFI-DOS (every step from
+`UEFIDOS_TRACE_WINDOW`):
+
+1. `CS:6506h..650Eh` computes the instance as `SS + (SP>>4)` and stores it in
+   `CS:[6498h]`.  Both runs arrive here with `SS = load_seg`, `SP = 0200h`, so
+   the instance is `load+20h` — which is **inside the loaded image**.
+2. `CS:6590h..65ACh` calls the arena builder `CS:73ABh -> CS:72D1h` with
+   (top=`A000h`, load_seg, instance, `ES:[instance+10h]`).  The last value is
+   the module's heap size: `0200h` from the image, because in our run the
+   instance points at the image's own `NE` header (`image+200h`).
+3. `CS:72D1h` builds the kernel's private MCB chain and puts the module heap at
+   the top of conventional memory (`9FE1h`, 464 bytes derived from `0200h`),
+   leaving `428` usable bytes.
+4. `CS:6642h -> CS:2085h` wants `1BCh` = 444 bytes for the first `GlobalAlloc`
+   of the module database.  428 < 444 by 16 bytes, so `CS:212Bh -> 98Ah ->
+   54FAh` returns 0, `CS:216Bh` turns that into `AX=1`, the caller only rejects
+   zero, `ES` becomes `0001h`, the module walk `CS:0E71h` finds `es:001Ch = 0`
+   and `CS:675Ch` calls the C runtime `exit(1)` — no `INT 10h` ever happens.
+
+In the real run the instance is `749Fh`, a segment that is **not** inside the
+loaded image: a relocated copy of the image lives at `7480h` (its first bytes
+are the image's first bytes) and `7480h + 2B40h = 9FC0h` is exactly the top of
+memory, i.e. the copy is placed flush against the top.  `SS` is `747Fh`, one
+paragraph below that copy, so `SS + (SP>>4) = 749Fh` — the instance points into
+free/relocated memory, and the word at `+10h` (`F88Bh`) is large, so the first
+allocation succeeds.  In other words: **the kernel relocates itself before it
+sizes its heap, and in our run that relocation does not happen.**
+
+The relocation is not an `INT 21h AH=48h/4Ah` call — the code image contains no
+`B4 48 CD 21` / `B4 4A CD 21` sequence at all.  The stub at `load_seg:0` that
+runs before the far jump only sets `SS:SP = load:0200h`, scans for the `NE`
+signature at `image+200h` and returns through `load:0080h`.  So the relocation
+lives in the `CS` image and is skipped because of something it reads — the
+remaining candidates are `PSP+2` (`9FC0h` vs `A000h`, the one value that is
+known to differ) or a value derived from the DOS data area.
+
+Next step: make the reported top-of-memory `9FC0h` and, if that alone does not
+move the instance, trace the `CS` window `0x0000..0x64E5` with
+`UEFIDOS_TRACE_WINDOW=0D49:0000-64E5` (a large but bounded trace) to find the
+branch that decides whether to relocate.
