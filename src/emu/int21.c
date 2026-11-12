@@ -1884,6 +1884,32 @@ void int1a_handler(Emu *e)
         break;
     }
 }
+/* INT 15h - the AT-style BIOS services.  A 640 KB machine with no XMS driver has
+ * nothing useful to report, but the call has to exist and has to answer the way the
+ * BIOS does: programs and DOS extenders probe AH=88h / AH=C0h and take a completely
+ * different path when the vector only points at an IRET stub. */
+void int15_handler(Emu *e)
+{
+    u8 ah = (u8)(e->ax >> 8);
+    switch (ah) {
+    case 0x88:     /* extended memory size in KB: none installed */
+        e->ax = 0;
+        e->flags = (u16)(e->flags & ~F_CF);
+        break;
+    case 0x86:     /* wait CX:DX microseconds: nothing to wait for a guest */
+        e->flags = (u16)(e->flags & ~F_CF);
+        break;
+    case 0x84:     /* joystick support: no joystick */
+        e->dx = 0;
+        e->flags = (u16)(e->flags & ~F_CF);
+        break;
+    default:       /* everything else (C0h, 87h, 83h, 91h, joystick reads) */
+        e->ah = 0x86;
+        e->flags |= F_CF;
+        break;
+    }
+}
+
 void int13_handler(Emu *e)
 {
     trace_call(e, 0x13);

@@ -1316,6 +1316,46 @@ the first one that the real DOS run and this one would also share if the arena m
 means the module lookup at `CS:0B1F` does not accept the record our instantiate produced
 (flags `0x0040`, no segment loaded yet). The next round starts there.
 
+#### The next wall: the first module segment needs 32 KB
+
+With the database allocated, the walk calls `CS:0B1F` with the record at `DB:0x40`
+(`flags = 0x0040`, and `+0x46` bumped to `0x0840` by the caller's `addw $0x800,es:0x6(si)`).
+That routine is the module-segment loader:
+
+```
+b26  bx = %es:0x4(%si)        ; record flags
+b2a  ax = %es:0x6(%si)        ; record size field (0x0840)
+b2e  cmp %si,%es:0x8          ; is this the "self" record?
+b5c  test $0x2,%bl / jne ...  ; already loaded?
+b63..b67  push es / push bx / push ax / push cx=0 / call 0x98A   ; GlobalAlloc
+b6a  or ax,ax / je  -> return 0
+```
+
+With a 36 KB heap it still returns 0. The request it passes to the allocator is
+
+```
+0D49:0B67 AX=7EE0 BX=0040 CX=0000 ... call 0x98A     ; 32,480 bytes
+0D49:0B6A AX=0000 ...                                ; failed
+```
+
+32,480 bytes is more than the whole `ne_heap` window the arena gives the kernel even when
+the NE field is raised to `0x9000`, so the module segment is meant to come out of the big
+free pool - the one our arena marks `owner=FFFF`. The reference dump shows exactly that
+shape: the loaded module segments sit in blocks owned by module segments
+(`1636 M owner=9100`, `1732 M owner=2A75`), i.e. on real DOS the allocator did see the pool
+as available. So the owner word on the pool blocks, not their size, is the whole
+remaining difference - the same word that stops the module database one screen earlier.
+
+Two more facts measured here and worth keeping:
+
+* The kernel never calls `INT 15h`: adding a real `INT 15h` (AH=88h -> 0 KB, AH=86h wait,
+  AH=84h no joystick, everything else `AH=86h`/CF=1, hooked like the other BIOS vectors)
+  changes the INT trace not at all - 77 calls before and after. It is still the right thing
+  to have (extenders and games probe it), it just is not what stops Windows.
+* `CS:0x0B1F` and `CS:0x0E71` are the pair to watch: the walk decides *which* record, the
+  loader is what actually asks for memory, and both end in the private allocator at
+  `CS:0x98A -> CS:0x54FA -> CS:0x594F`.
+
 ## The kernel's private arena, decoded instruction by instruction
 
 This section records what `CS:670F` and `CS:72D1` actually do, because the

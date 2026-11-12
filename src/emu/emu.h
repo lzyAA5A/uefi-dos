@@ -201,6 +201,7 @@ void int10_handler(Emu *e);
 void int16_handler(Emu *e);
 void int13_handler(Emu *e);
 void int1a_handler(Emu *e);
+void int15_handler(Emu *e);   /* INT 15h BIOS services (AH=88h/86h/84h) */
 void int2f_handler(Emu *e);
 void int33_handler(Emu *e);   /* INT 33h mouse driver (emu/int33.c) */
 void dos_jft_sync(Emu *e);    /* publish PSP:18h job file table (emu/int21.c) */

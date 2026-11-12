@@ -1823,6 +1823,7 @@ static void dos_service_call(Emu *e, int intn)
     else if (intn == 0x10) int10_handler(e);
     else if (intn == 0x16) int16_handler(e);
     else if (intn == 0x13) int13_handler(e);
+    else if (intn == 0x15) int15_handler(e);
     else if (intn == 0x1A) int1a_handler(e);
     else if (intn == 0x2F) int2f_handler(e);
     else if (intn == 0x31) int31_handler(e);
@@ -2629,6 +2630,7 @@ do_int: {
             else if (intn == 0x10) int10_handler(e);
             else if (intn == 0x16) int16_handler(e);
             else if (intn == 0x13) int13_handler(e);
+            else if (intn == 0x15) int15_handler(e);
             else if (intn == 0x1A) int1a_handler(e);
             else if (intn == 0x2F) int2f_handler(e);
             else if (intn == 0x31) int31_handler(e);
@@ -2669,7 +2671,7 @@ u16 emu_pop16(Emu *e) { return pop16(e); }
 /* ------------------------------------------------------------------ */
 static int hooked_int(int n)
 {
-    return n == 0x10 || n == 0x13 || n == 0x16 || n == 0x1A || n == 0x20 ||
+    return n == 0x10 || n == 0x13 || n == 0x15 || n == 0x16 || n == 0x1A || n == 0x20 ||
            n == 0x21 || n == 0x27 || n == 0x2F || n == 0x31 || n == 0x33 ||
            n == 0x60;
 }
