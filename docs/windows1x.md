@@ -1231,6 +1231,91 @@ has now been tested and rejected. The next question is internal to the kernel's 
 owned by the module segment (`0FCC M owner=0FCD size=001D`). Reproducing *that* ownership
 transfer - not the block size - is what remains.
 
+### The allocator's predicate, and a second wall behind it
+
+Tracing `CS:5A84..5AE4` with full registers during the failing request gives the exact
+rule the kernel's own allocator applies, and it is not a size test first:
+
+```
+5a84: cmp %di,%es:0x1(%di)      ; is the block's owner word equal to DI ?
+5a88: jne 0x5A96                ;   no  -> skip to the next block (mov %es:(%bx),%es)
+5a8a: call 0x5AA0               ;   yes -> try to satisfy (size compare at 0x5AE2)
+5ae2: cmp %dx,%ax / ret         ; AX = size+1, DX = request, caller uses jae
+```
+
+with `DI = 0000h` throughout, so a block is only even considered when its owner word is
+**0**. The observed walk on our arena:
+
+| block | owner | size (paras) | flags | verdict |
+|---|---|---|---|---|
+| `0D12` (instance block, `load+0x2`) | `0000` | `001B` = 27 | `D1` | considered, too small |
+| `0D2E` (free tail) | `FFFF` | `9271` | `00` | skipped (owner) |
+| `9FA0` (**the kernel's own heap**) | `FFFF` | `001D` = 29 | `00` | skipped (owner) |
+| `9FBE` (`Z`) | `FFFF` | `0001` | `00` | skipped |
+
+The request is converted as `DX = (bytes >> 4) + 2`: 435 bytes -> 29 paragraphs, and the
+comparison at `0x5AE2` needs `size+1 >= 29`, i.e. a **29-paragraph** block. The instance
+block offers 27, the heap block offers exactly the 29 that is needed - but its owner is
+`FFFF`, so the walk never looks at it. That is the whole wall: one word.
+
+Two-byte experiment that proves it: in a scratch image set `ne_heap` = `0x0240`
+(file `0x410`) **and** change the heap block's owner immediate at `CS:7343`
+(`movw $0xFFFF,0x1(%di)`) to `0x0000`. The allocation then succeeds:
+
+```
+0D49:2123 DI=01B3 ...                      ; request 435 bytes
+0D49:212E AX=9F9D BX=0008 ES=9FBA ...      ; allocator returns the heap block
+0D49:6645 AX=9F9D ES=9F9D DS=9F9C ...      ; instantiate returns a real segment
+```
+
+…and the run **still** exits with code 1, because the next check fails: `CS:667A call
+0E71h` - the module walk - returns `AX=0000` after ~23,000 steps even with the database
+segment present (`ES=9F9D`), and `CS:667F jne 0x6684` is not taken, so control falls into
+`CS:6681 jmp 675Ch` (exit). So the allocation was never the only wall; the walk is a
+second, independent one, and this is the first time our runs have been able to reach it.
+
+#### What the real MS-DOS 5 arena shows
+
+The reference MCB walk (`build/rd4.bin`) puts the same two blocks in a different state:
+
+```
+0FCC  M  owner=0FCD  size=001D     ; the module database, 29 paragraphs, owned by 0FCD
+0FEA  M  owner=0FCD  size=064B     ; 1611 paragraphs (25 KB) owned by the same segment
+```
+
+`0FCD = load+3` for `load = 0FCAh`, i.e. the database landed exactly in the `load+0x2`
+block and got the 29 paragraphs the request needs; the block behind it is a 25 KB heap,
+not the 464-byte one our run builds. A 25 KB heap can only come from `[instance+0x10]`
+having been written with the *available memory* before the heap was built - which is what
+`CS:66F8..6705` does (`mov %bp,%es:0x10(%bx)`). So on real DOS that patch runs **before**
+the heap init at `CS:658B`, while our run reaches `CS:658B` first and builds a heap from
+the raw NE field `0x0200`.
+
+That ordering, plus the owner word, is the remaining difference. Next: make the walk at
+`CS:0E71` succeed (it is now reachable) and find which DOS-observable state it depends on.
+
+#### The walk, once the database finally exists
+
+With the module database allocated (scratch patch above) the walk gets past its first gate:
+`0E8A cmp %si,%es:0x1C` compares the requested module index with the database's count field,
+and the database is now properly filled - `[DB+0x1C] = 1`, `[DB+0x22] = 0x40`, and the first
+0x40 bytes of the block are a copy of the module's NE header. The walk then:
+
+```
+0E91..0E9B  si = [DB+0x22] + (index-1)*10 = 0x40        ; the module record
+0EA0        testw $0x400,%es:0x4(%si)                   ; [DB:0x44] = 0x0040 -> clear
+0EA6        je 0x0EC8
+0EC8        bx = %es:0x4(%si)  = 0x0040                 ; flags word
+0ECC        test $0x2,%bl -> clear
+0ED1        push bx / push es / push si / call 0x0B1F
+0ED7        or ax,ax -> AX = 0                          ; module lookup returns 0
+```
+
+so it returns 0 and the bootstrap still exits with code 1. That is the third wall, and it is
+the first one that the real DOS run and this one would also share if the arena matched - it
+means the module lookup at `CS:0B1F` does not accept the record our instantiate produced
+(flags `0x0040`, no segment loaded yet). The next round starts there.
+
 ## The kernel's private arena, decoded instruction by instruction
 
 This section records what `CS:670F` and `CS:72D1` actually do, because the
