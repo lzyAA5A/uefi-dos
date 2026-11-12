@@ -720,6 +720,37 @@ question, and it is the next thing to pin down: `WIN.COM` shrinks itself with `A
 `0x8B` paragraphs (`CS:5EE`) and then `EXEC`s `C:\WIN100.BIN` (`AH=4B`); what block DOS hands the
 child in each case is measurable by recording the child's `PSP+2` and its real `CS` at the entry.
 
+### The startup sequence decoded (`CS:64E5 .. 65AC`)
+
+```
+64e5 mov %es,%cs:0x10          ; cs:0x10 = PSP (ES at entry) — the value the arena later calls "load"
+64ef movw $0,es:0x42
+64f6 mov %cx,%ax ; shr $4,%ax ; mov %ax,cs:0x649a
+6500 mov %sp,%bx ; shr $4,%bx
+6506 mov %ss,%ax ; add %bx,%ax ; mov %ax,cs:0x6498      ; instance = SS + (SP>>4)
+650e mov %cs,%ax ; mov $0x7460,%bx ; mov $0x76e0,%si ; sub %bx,%si
+6518 shr $4,%bx ; add %bx,%ax ; mov %bx,cs:0x64b2     ; switch the stack to CS+0x746 / SP=0x280
+6529 xor %bp,%bp
+652b mov %si,%ss:0x0e ; mov %sp,%ss:0x0c ; sub $0x200,%si ; mov %si,%ss:0x0a
+653e mov %es:0xfe,%ax           ; WIN.COM wrote 'XW' or 'GW' into the tail
+6542 cmp $0x5758,%ax ; je 0x6551 ; cmp $0x5747,%ax ; jne 0x655c
+654c/6551 incw %cs:0x1c         ; count the marker
+6556 jmp 0x658a                 ; -> heap prep
+6559 jmp 0x675c                 ; exit(1)  (reached with CX==0 after the arena build)
+655c ... rebuild the PSP tail with "C:WIN100.BIN" (AH=19h for the drive) -> 0x658a
+658b mov %cs:0x10,%es           ; heap prep: ES = PSP ...
+```
+
+There is **no relocation in this path**: the entry stores the PSP in `cs:0x10`, derives `instance` from
+`SS:SP`, switches to its own stack and goes straight to the heap prep. Combining that with the probes
+(the entry `CS` and the arena-builder `CS` are both `0x74B9`, i.e. the copy that runs is the high one)
+means the image that the builder sees high up is a copy created **before** the entry point executes —
+so the remaining question is on the loader side: which block `WIN.COM`'s `EXEC` actually gives
+`WIN100.BIN`, and what `PSP+2` (top of memory) and the child's initial `CS` are in each case. That is
+the measurement the next round starts from, and it is the last structural unknown between our run
+(strip = 27 paragraphs, `GlobalAlloc` fails, `AH=4C AL=1`) and the reference run (strip spanning the
+whole lower memory, `GlobalAlloc` returns `0x0FCD`).
+
 ## Windows 1.01: what the kernel asks DOS for
 
 `WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
