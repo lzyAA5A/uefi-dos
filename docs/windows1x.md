@@ -191,10 +191,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File run_win1x.ps1 `
     -Source "<folder with your extracted DR5 files>"
 ```
 
-`start_win1x.bat` is the double-click version (it looks for `win1x-src` next to
-itself, or takes a folder dragged onto it).  The image it builds,
-`build\win1x.img`, is local: `build/` is git-ignored and no Microsoft file is
-published.
+`start_win1x.bat` is the double-click version and needs no arguments: it takes a
+folder dragged onto it, else looks for `win1x-src` next to itself, else picks up
+an already installed tree (see the Windows 1.01 section below).  `-Source` and
+`-Installed` force either side; `UEFIDOS_WIN1X_SRC` / `UEFIDOS_WIN1X_INSTALLED`
+set them from the environment.  The image it builds, `build\win1x.img`, is
+local: `build/` is git-ignored and no Microsoft file is published — and the
+script injects the freshly built `BOOTX64.EFI`/`BOOTIA32.EFI` into `EFI\BOOT`,
+because an installed `C:\WINDOWS` tree has no boot loader of its own (without it
+the firmware silently falls through to its built-in UEFI Shell).
 
 Result: UEFI-DOS boots, `SETVER KERNEL.EXE 3.30` is applied, `KERNEL.EXE` starts
 and the machine then sits on a blank screen.
@@ -353,14 +358,24 @@ taken inside the instance walk at `CS:667Ah -> 0E71h`, which returns 0, and
 that instance walk expects (`ES:1Ch` count, `ES:22h` table) and whether the
 kernel gives up because it never loaded a module.
 
-Reproducing:
+Reproducing — quickest path, double-click `start_win1x.bat` (it auto-detects the
+media / installed tree, writes the `SETVER` + `WIN` AUTOEXEC.BAT, drops the UEFI
+loaders into the image and boots QEMU).  Or hand-run the same steps:
 
 ```powershell
 python tools/fat_extract.py extract "<disk>.IMG" F:\1231\_tmp\win\w101
 python F:\1231\_tmp\win\mk_w101run.py          # hand-built C:\WINDOWS (see below)
-python tools/make_tree_image.py build\w101run.img F:\1231\_tmp\win\w101run --size-mb 64
+powershell -NoProfile -ExecutionPolicy Bypass -File run_win1x.ps1 -Installed F:\1231\_tmp\win\w101run
 build\hosttest.exe --shell build\w101run.img "SETVER WIN.COM 3.30" "SETVER WIN100.BIN 3.30" "CD \WINDOWS" "WIN"
 ```
+
+`run_win1x.ps1` looks for `-Source` (win1x-src, or a folder dragged onto the
+.bat), then for an installed tree (`win1x-src\installed`, else the scratch
+`_tmp\win\w101run`).  `UEFIDOS_WIN1X_SRC` / `UEFIDOS_WIN1X_INSTALLED` override
+both.  The image it builds is `build\win1x.img`, and the ISO-free boot is the
+firmware's own `EFI\BOOT` path — the tree gets the freshly built
+`BOOTX64.EFI`/`BOOTIA32.EFI` injected because an installed `C:\WINDOWS` tree does
+not carry them.
 
 `SETUP` copies the startup files and the fonts but skips `WIN.CNF` and every
 driver, so the image is laid out by hand: `WIN.COM`, `WIN100.BIN`,

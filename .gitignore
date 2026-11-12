@@ -38,3 +38,6 @@ tools/compat_test.ps1
 tools/repro_hang.ps1
 # screenshots of third-party programs
 docs/shots/
+
+# Windows media / installed trees used for local testing (Microsoft files)
+win1x-src/
