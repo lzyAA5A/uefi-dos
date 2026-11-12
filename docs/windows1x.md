@@ -1403,6 +1403,45 @@ python tools\make_tree_image.py build\w203.img  w203 --size-mb 64
 build\hosttest.exe --shell build\w203.img 'SETUP'          # keys: ENTER, H, ENTER...
 ```
 
+#### Arena state at the 32 KB allocation, and where the walk actually goes
+
+With the heap term raised and the heap block's owner byte cleared (`exp_own2.py`), the module
+database lands and the arena at the moment `CS:0B1F` asks for 32,480 bytes looks like this
+(`UEFIDOS_DUMP_AT=0D49:0B63`, walking the descriptor chain from `load`):
+
+```
+seg 0D10 M own=FFFF size=0001 fl=00 self=0D10 next=0D12
+seg 0D12 M own=0000 size=001B fl=D1 self=0D10 next=0D2E    ; the instance/header block, free
+seg 0D2E M own=FFFF size=8991 fl=00 self=0D12 next=96C0    ; the pool (system-owned, correct)
+seg 96C0 M own=96C1 size=001D fl=00 self=0D2E next=96DE    ; heap head, now owned by the DB segment
+seg 96DE M own=0000 size=08DF fl=FF self=96C0 next=9FBE    ; 2271 paragraphs = 36 KB, FREE
+seg 9FBE Z own=FFFF size=0001 fl=00 self=96DE next=9FBE
+```
+
+So space is not the problem: a 2271-paragraph block with `owner = 0` exists and the request
+needs 2032 paragraphs. Tracing the walk for exactly that request (`CS:5A84..5AE4`,
+`DX=07F0` = 2032) shows what really happens:
+
+```
+... 0D49:5AA0 ... ES=FFE0  DX=07F0     ; the walk is following a "next" link into segment FFE0h
+... 0D49:5AA0 ... ES=F000  DX=07F0     ; and then into F000h - outside the arena entirely
+```
+
+i.e. for requests that need the *big* block the allocator follows the heap's internal
+free-list (the node pointer at `[heap+0x0A]`, and the merge arithmetic at `0x5AC2..0x5AD9`
+subtracts the word at `[block+0x1E]`), and those links in our arena point at `FFE0h`/`F000h`
+instead of at the free block. The free-list is installed by `CS:73AB` from the heap size we
+compute, so a mismatch there sends the search off the end of the arena while the *small*
+allocations (the database, 435 bytes) still succeed through the block chain.
+
+That is a much sharper statement of the remaining problem than "the owner word":
+
+* small allocations: block chain + `owner == 0` test -> works once the heap block is free-owned;
+* large allocations: the heap free list -> our list head points outside the arena;
+* the kernel marks its pool blocks `FFFF` on purpose (freeing them makes it allocate over its
+  own image and crash into zeroed memory at `0DC5:1E80`, `SS=0D10 SP=000A`), so the only
+  legal way forward is to make `CS:73AB`'s heap bookkeeping match what the kernel expects.
+
 ## The kernel's private arena, decoded instruction by instruction
 
 This section records what `CS:670F` and `CS:72D1` actually do, because the
