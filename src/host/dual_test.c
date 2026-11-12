@@ -415,6 +415,18 @@ static void test_internals(void)
     else bad("AH=50h/51h", (long)g_e.bx, 0x1234);
     i21(0x50, 0x5000, SCR_SEG, 0, 0, 0, 0, 0, &cf);   /* back to the scratch PSP */
 
+    /* AH=36h reports free space; installers (Windows 1.01 SETUP among them)
+     * give up when the figure comes back as zero. */
+    i21(0x36, 0x3600, 0, 0, 0x0003, 0, 0, 0, &cf);   /* C: */
+    u16 sec_per_cluster = g_e.ax, free_clus = g_e.bx, bytes_per_sec = g_e.cx;
+    printf("  ..   AH=36h: %u sectors/cluster, %u bytes/sector, %u free clusters"
+           " (~%lu KB free)\n", sec_per_cluster, bytes_per_sec, free_clus,
+           (unsigned long)((u32)free_clus * sec_per_cluster * bytes_per_sec / 1024u));
+    if (!cf && free_clus > 0 && bytes_per_sec == 512)
+        ok("AH=36h reports a non-empty free-space figure");
+    else
+        bad("AH=36h free-space report", (long)free_clus, 1);
+
     /* JFT: PSP:18h + handle = the SFT index of that handle */
     u16 pn = putstr("C:\\JFT.TXT");
     u16 h = i21(0x3C, 0x0000, 0, 0x20, pn, 0, 0, 0, &cf);

@@ -755,21 +755,22 @@ void int21_handler(Emu *e)
         return;
     }
     case 0x36: {
-        int d = (e->dx & 0xFF) - 1;
-        if (d < 0) d = dos_current_drive();
-        if (d < 0 || d >= DOS_MAX_DRIVES || !g_dos.drives[d].mounted) { e->ax = 0xFFFF; set_ok(e); return; }
-        fat_vol *v = &g_dos.drives[d].vol;
-        e->ax = v->spc;
-        e->cx = 512;
-        e->dx = (u16)(v->cluster_count > 0xFFFF ? 0xFFFF : v->cluster_count);
-        /* count free clusters (bounded scan) */
-        u32 freec = 0;
-        for (u32 cl = 2; cl < v->cluster_count + 2 && cl < 30000; cl++) {
-            u32 nxt;
-            if (fat_next_cluster(v, cl, &nxt)) break;
-            if (nxt == 0xFFFFFFFDu) freec++;
+        /* AH=36h: free space on a drive.  DL=0 means "the current drive".
+         * AX=sectors/cluster, BX=free clusters, CX=bytes/sector, DX=total
+         * clusters, AX=FFFFh for an invalid drive.  The free count has to come
+         * from the volume itself: installers (Windows 1.01 SETUP among them)
+         * check it before every write, and a zero here truncates the install. */
+        int d = (e->dx & 0xFF) ? (int)(e->dx & 0xFF) - 1 : dos_current_drive();
+        if (d < 0 || d >= DOS_MAX_DRIVES || !g_dos.drives[d].mounted) {
+            e->ax = 0xFFFF;
+            set_ok(e);
+            return;
         }
-        e->bx = (u16)(freec > 0xFFFF ? 0xFFFF : freec);
+        fat_vol *v = &g_dos.drives[d].vol;
+        e->ax = (u16)v->spc;
+        e->bx = (u16)(v->free_count > 0xFFFFu ? 0xFFFFu : v->free_count);
+        e->cx = (u16)v->bytes_per_sector;
+        e->dx = (u16)(v->cluster_count > 0xFFFFu ? 0xFFFFu : v->cluster_count);
         set_ok(e);
         return;
     }
