@@ -1356,6 +1356,53 @@ Two more facts measured here and worth keeping:
   loader is what actually asks for memory, and both end in the private allocator at
   `CS:0x98A -> CS:0x54FA -> CS:0x594F`.
 
+### Windows 2.03 (1987/88): Setup runs, the copy stage stops on WIN.CNF
+
+The 2.03 media (nine 360 KB disks) flattens to 172 files and its `SETUP.EXE` is a much
+more demanding DOS client than 1.01's, so it is a useful compatibility probe on its own.
+Under UEFI-DOS it starts, paints and drives its whole question-and-answer flow:
+
+```
+SETUP PROGRAM for Microsoft Windows Version 2
+ ...
+           WHEN YOU'RE READY TO                            PRESS
+           Continue Setup                                  ENTER
+           Exit without completing Setup               CONTROL+X
+ ...
+           Install on 1 high capacity disk (1.2MB or more)   1
+           Install on 2 5.25" disks (360KB)                  2
+           Install on 2 3.5" disks (720KB)                   3
+           Install on a hard disk                            H
+ ...
+ Windows will now be set up on your hard disk in the directory shown below.
+   C:\WINDOWS
+```
+
+That is three screens further than any earlier Windows build we tried, so text-mode
+console, keyboard, `SETUP.INF` parsing and the directory prompts all work. The copy stage
+then stops immediately:
+
+```
+[open-fail] C:\WINDOWS\WIN.OLD  (abs WINDOWS\WIN.OLD)
+[open-fail] C:\WINDOWS\WIN.COM  (abs WINDOWS\WIN.COM)
+Error: Can't open WIN.CNF (FILES= may be too small or disk full).
+```
+
+The error text is SETUP's own guess at the cause; the trace shows the two `WIN.OLD` /
+`WIN.COM` opens failing with "file not found" as expected (they are the "does an old
+install exist" probes), and then no `INT 21h` open at all for `WIN.CNF` - SETUP reaches
+for it through a path that our DOS does not complete, which is the next thing to chase.
+Raising `FILES=` to 60 and pre-copying the media into `C:\WINDOWS` both leave the message
+unchanged, so it is neither the handle table nor a relative-path problem.
+
+Reproducing:
+
+```
+python tools\fat_extract.py extract "D1_Setup.img"  w203     # ... D2..D9 as well
+python tools\make_tree_image.py build\w203.img  w203 --size-mb 64
+build\hosttest.exe --shell build\w203.img 'SETUP'          # keys: ENTER, H, ENTER...
+```
+
 ## The kernel's private arena, decoded instruction by instruction
 
 This section records what `CS:670F` and `CS:72D1` actually do, because the
