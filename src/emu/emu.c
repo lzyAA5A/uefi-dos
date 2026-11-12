@@ -419,20 +419,47 @@ static u32 lin_of(Emu *e, u16 sel, u32 off, u32 n)
     return lin & MEM_MASK;
 }
 
+/* Real-mode address map of a plain 640 KB PC.
+ *
+ * Conventional memory ends at 9FFFFh.  The upper memory area (C0000h-EFFFFh)
+ * is adapter ROM: writes are dropped and reads return FFh, so a program cannot
+ * quietly keep data in a region that is not RAM on real hardware -- real-mode
+ * Windows 1.x rebuilds the DOS arena itself and relies on that behaviour (it
+ * puts a bootstrap MCB at segment FFFEh, which a real machine silently
+ * discards).  The F0000h-FFFFFh window is UEFI-DOS's own service area (magic
+ * vectors, SFT, SDA, DPB, PS/2 ROM identity bytes), so it stays writable.
+ * Extended memory (>= 100000h) needs an XMS driver we do not provide, so it
+ * reads as FFh too.
+ *
+ * Protected mode is deliberately exempt: DPMI's flat selectors resolve through
+ * our own descriptors to the real backing store (the DPMI LDT/IDT/GDT live at
+ * 0F00000h and the client may own megabytes). */
+static int noram_lin(const Emu *e, u32 lin)
+{
+    if (e->cr0 & CR0_PE) return 0;
+    if (lin >= 0x100000u) return 1;
+    return lin >= 0xC0000u && lin < 0xF0000u;
+}
+
 u8 emu_rb(Emu *e, u16 seg, u16 off)
 {
-    return e->mem[lin_of(e, seg, off, 1)];
+    u32 a = lin_of(e, seg, off, 1);
+    if (noram_lin(e, a)) return 0xFF;
+    return e->mem[a];
 }
 
 /* 32-bit-offset variants used by 386 code paths */
 u8 emu_rb32(Emu *e, u16 seg, u32 off)
 {
-    return e->mem[lin_of(e, seg, off, 1)];
+    u32 a = lin_of(e, seg, off, 1);
+    if (noram_lin(e, a)) return 0xFF;
+    return e->mem[a];
 }
 void emu_wb32(Emu *e, u16 seg, u32 off, u8 v)
 {
     u32 a = lin_of(e, seg, off, 1);
     if (e->pm_fault) return;
+    if (noram_lin(e, a)) return;             /* ROM / absent RAM: write dropped */
     watch_write(e, a, v);
     e->mem[a] = v;
     if (e->gfx_w) {
@@ -490,6 +517,7 @@ void emu_wb(Emu *e, u16 seg, u16 off, u8 v)
 {
     u32 a = lin_of(e, seg, off, 1);
     if (e->pm_fault) return;
+    if (noram_lin(e, a)) return;             /* ROM / absent RAM: write dropped */
     watch_write(e, a, v);
     e->mem[a] = v;
     if (e->gfx_w) {
