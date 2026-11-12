@@ -351,6 +351,65 @@ gate is skipped entirely. That entry difference is the next thing to chase, with
 instrumented-kernel-on-real-DOS route (a COM1 logger patched into `CS:73AB`) as the way to see
 the reference values at the exact instant.
 
+### Ground truth from the real machine: the boot path is the same, the load address is not
+
+Instead of guessing which branch the reference run takes, the kernel itself was instrumented:
+each of ten boot-path instructions was replaced by a `jmp` to a stub in the image's zero
+padding that ORs a bit into a word in the BIOS data area tail (`linear 0x04E2`) and increments
+a hit counter, replays the relocated instruction and jumps back. One `pmemsave 0 0xa0000`
+after `win` then says exactly which points ran.
+
+Sites and the resulting mask (real MS-DOS 5.00, `build/refm_tr_*.bin`, mask `0x0237`):
+
+| CS offset | instruction | bit | hit |
+|---|---|---|---|
+| 0x64E5 | NE entry (`mov cs:[0x10],es`) | 0x0001 | yes |
+| 0x653E | `mov ax,es:[0xFE]` - the XW/GW command-tail check | 0x0002 | yes |
+| 0x6551 | `incw cs:0x1c` (XW/GW path taken) | 0x0004 | yes |
+| 0x655C | rebuild-command-line fallback | 0x0008 | **no** |
+| 0x658B | heap prep (`mov cs:0x10 -> ES`, then the 73AB arguments) | 0x0010 | yes |
+| 0x6642 | `call 0x2085` module instantiate | 0x0020 | yes |
+| 0x6664 | `call 0x0BAA` | 0x0040 | **no** |
+| 0x66FC | `les ss:2,bx` - the `[instance+0x10] = BP` patch | 0x0080 | **no** |
+| 0x670F | the gate (`push ss` + `call 0x3398`) | 0x0100 | **no** |
+| 0x73AB | the private arena/heap builder | 0x0200 | (mask bit set) |
+
+Two conclusions that change the picture:
+
+1. **The boot path is not the difference.** Real MS-DOS 5 executes exactly the sequence our
+   emulator executes - entry, XW check, heap prep, module instantiate - and it too never
+   reaches the `0x66FC` field patch or the `0x670F` gate. So our run is not taking a "wrong
+   branch"; both take the same one, and both are refused by the module-database allocation.
+2. **The load address is the difference.** In that reference run the kernel ran with
+   `CS = 0x74B9`, which (the stub's own arithmetic `dest = CS - 0x20 + seg_sector`) makes the
+   MZ image base `0x7480` and, with the image being `0x2B40` paragraphs, exactly
+   `0x9FC0 = top of memory`. Our emulator runs the same kernel at `CS = 0x0D49`, i.e. image
+   base `0x0D10`, right above `COMMAND.COM`. The *code offsets* are identical (CS:0x64E5 is
+   image `0x6875` in both runs, since `image = CSoff + 0x390`), so everything up to and
+   including the allocation is executing the same bytes at the same relative addresses.
+
+What this buys: the `instance` computation `instance = SS + (SP>>4)` with `SS = load` and
+`SP = 0x200` (set by the KERNSTUB at `0x13..0x1A`) yields `load + 0x20` in both runs, so
+`[instance+0x10]` reads image `0x210` = `NE+0x10` = the `ne_heap` field (`0x0200`) in both.
+Either the reference run's heap really is 428 bytes as well - and the database request must
+then be smaller there - or the kernel rewrites that field somewhere not covered by these ten
+sites. That is the next measurement, and it needs the builder's frame arguments rather than
+the caller's addresses.
+
+#### Instrumentation channels: what works and what does not
+
+* **Works**: patching code with a 5-byte `jmp` into the image's zero padding (`CS:7454`;
+  image `0x77E4..0x7A80` is unused), replaying the relocated bytes, and writing results
+  either to BDA bits (`0x04E0`/`0x04E2`) or into image padding; read back with QEMU
+  `pmemsave 0 0xa0000`. The channel was proven by instrumenting the NE entry, where the
+  recorded `CS` came back as `0x74B9`.
+* **Fails**: COM1 logging (the port ends up carrying binary fragments of the kernel image, so
+  the guest was executing data - the write goes out while the display driver is live);
+  `INT 10h AH=0Eh` logging (Windows installs its own INT 10h for graphics mode, and the
+  teletype calls shred the splash screen into CP437 garbage); BDA cells at `0x04E0`/`0x04F0`
+  are rewritten by the BIOS/Windows within seconds, so single-cell results are unreliable -
+  prefer image padding plus a signature scan of the whole dump.
+
 ## Windows 1.01: what the kernel asks DOS for
 
 `WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
