@@ -480,6 +480,7 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_PSP_SEG=0x260` | load-segment override for programs linked for a fixed PSP |
 | `UEFIDOS_DUMP_VRAM=1` | dump the emulated 80×25 screen to `build/vram_dump.txt` with a column ruler |
 | `UEFIDOS_TRACE_INTS=1`, `UEFIDOS_TRACE_VRAM=n`, `UEFIDOS_TRACE_STEPS=n`, `UEFIDOS_TRACE_WINDOW=CS:LO-HI`, `UEFIDOS_TRACE_PORTS=1` | interrupt, video-write, single-step, address-window and port-I/O traces under `build/` |
+| `UEFIDOS_TRACE_PSP=1`, `UEFIDOS_TRACE_EXEC=1` | print every new PSP's command tail (and the bytes after it) and every `INT 21h AH=4Bh` (path, environment segment, command-line far pointer, caller PSP/DS) plus failing `AH=48h` requests |
 
 The last 64 steps are dumped to `build/limit_dump.txt` when a program hits the
 instruction limit.

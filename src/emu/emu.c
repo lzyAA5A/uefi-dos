@@ -2823,6 +2823,26 @@ static void build_psp(Emu *e, u16 psp_seg, const char *argline)
     e->mem[((u32)s * 16 + 0x81 + len) & MEM_MASK] = '\r';
     len++;
     e->mem[((u32)s * 16 + 0x80) & MEM_MASK] = (u8)len;
+#ifdef UEFIDOS_HOST
+    /* Host-only probe: real-mode Windows 1.x derives the name of its overlay
+       from the command tail, so a mismatched tail makes it open the wrong
+       file.  UEFIDOS_TRACE_PSP=1 prints the tail and the bytes after it. */
+    if (getenv("UEFIDOS_TRACE_PSP")) {
+        u32 base = (u32)s * 16 + 0x80;
+        int n = e->mem[base & MEM_MASK];
+        fprintf(stderr, "[psp] seg=%04X len=%d tail=", (unsigned)s, n);
+        for (int i = 1; i <= n && i < 128; i++) {
+            u8 c = e->mem[(base + (u32)i) & MEM_MASK];
+            fputc((c >= 0x20 && c < 0x7F) ? c : '.', stderr);
+        }
+        fprintf(stderr, " after=");
+        for (int i = 0; i < 16; i++) {
+            u8 c = e->mem[(base + (u32)(n + 1 + i)) & MEM_MASK];
+            fputc((c >= 0x20 && c < 0x7F) ? c : '.', stderr);
+        }
+        fprintf(stderr, "\n");
+    }
+#endif
 }
 
 int emu_init(Emu *e)

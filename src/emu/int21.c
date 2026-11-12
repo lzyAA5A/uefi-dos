@@ -1025,6 +1025,11 @@ void int21_handler(Emu *e)
         u16 ds = 0, max_free = 0;
         if (!arena_alloc(e, e->bx, &ds, &max_free)) {
             e->bx = max_free;
+#ifdef UEFIDOS_HOST
+            if (getenv("UEFIDOS_TRACE_EXEC"))
+                fprintf(stderr, "[mem] 48h need=%04X fail max=%04X psp=%04X\n",
+                        (unsigned)e->bx, (unsigned)max_free, (unsigned)g_dos.psp_seg);
+#endif
             set_err(e, 8);                       /* insufficient memory */
             return;
         }
@@ -1055,13 +1060,34 @@ void int21_handler(Emu *e)
         u16 poff = e->bx;
         u16 cmd_off = emu_rw(e, pseg, (u16)(poff + 2));
         u16 cmd_seg = emu_rw(e, pseg, (u16)(poff + 4));
+#ifdef UEFIDOS_HOST
+        /* Host-only probe: a wrong command tail makes real-mode Windows 1.x
+           derive the wrong overlay name, so print what the caller passed. */
+        if (getenv("UEFIDOS_TRACE_EXEC")) {
+            u16 env = emu_rw(e, pseg, poff);
+            u16 seg2 = cmd_seg ? cmd_seg : e->ds;
+            fprintf(stderr, "[exec] prog=%s env=%04X cmd=%04X:%04X bytes=",
+                    prog, (unsigned)env, (unsigned)cmd_seg, (unsigned)cmd_off);
+            for (int i = 0; i < (cmd_off ? 10 : 0); i++)
+                fprintf(stderr, "%02X ", emu_rb(e, seg2, (u16)(cmd_off + i)));
+            fprintf(stderr, " psp=%04X ds=%04X\n", (unsigned)g_dos.psp_seg, (unsigned)e->ds);
+        }
+#endif
         if (cmd_off) {
             u16 seg = cmd_seg ? cmd_seg : e->ds;
             u8 n = emu_rb(e, seg, cmd_off);
             if (n > 126) n = 126;
-            for (u16 i = 0; i < n; i++)
-                args[i] = (char)emu_rb(e, seg, (u16)(cmd_off + 1 + i));
-            args[n] = 0;
+            /* DOS's count-prefixed command line ends with CR (13h); the CR is
+               NOT part of the arguments.  Copying it through put a stray CR in
+               the child's PSP tail and real-mode Windows 1.x derives its overlay
+               file name from that tail, so it opened the wrong file. */
+            u8 len = 0;
+            for (u16 i = 0; i < n; i++) {
+                u8 c = emu_rb(e, seg, (u16)(cmd_off + 1 + i));
+                if (c == '\r' || c == 0) break;
+                args[len++] = (char)c;
+            }
+            args[len] = 0;
         }
         int code = emu_exec_program(e, prog, args);
         if (code < 0) {

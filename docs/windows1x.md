@@ -383,3 +383,87 @@ driver, so the image is laid out by hand: `WIN.COM`, `WIN100.BIN`,
 `SYSTEM.DRV`, `CGA.DRV`, `KEYBUS.DRV`, `NOMOUSE.DRV`, `MOUSE.DRV`, `COMM.DRV`,
 `EPSON.DRV`, `SPOOLER.EXE`, `WINOLDAP.MOD`, `CGA.GRB`, `CGA.LGO` and the font
 files from the media.
+
+## Reference run: Windows 1.01 on real MS-DOS 5.00 (and where UEFI-DOS still diverges)
+
+To tell "our DOS is wrong" apart from "the installed tree is wrong", the same
+files were booted under a real MS-DOS 5.00 in QEMU, with the tree exposed as a
+hard disk by QEMU's `vvfat` driver:
+
+    python _tmp\win\ref_dos5_hd.py 22 "c:;win" 25
+
+(`-fda build\dos5boot.img -hda fat:rw:<dir>`; the tree directory must contain
+the *whole* media set plus the installed runtime files, i.e. 153 files.)
+
+**Result: Windows 1.01 runs.** `C:\> win` paints the MS-DOS Executive window
+with its `File View Special` menu bar, the drive/document panel and the
+directory listing, in CGA graphics.  Two things follow from that:
+
+* the media, `WIN100.BIN`/`WIN100.OVL` (both produced by SETUP) and the whole
+  file set are fine — the black screen seen earlier came from an *incomplete*
+  tree (a `C:\WINDOWS` holding only the 24 files SETUP copied), not from bad
+  binaries;
+* UEFI-DOS is what diverges: on the very same input it never reaches `INT 10h`.
+
+### Bug fixed: the EXEC command tail carried a stray CR (INT 21h AH=4Bh)
+
+`INT 21h AH=4Bh` reads the count-prefixed command line from the parameter
+block.  That string **ends with CR (0Dh)**, and the old handler copied the CR
+through into the child's argument string, so `build_psp()` wrote the child's
+tail as `" \r\r"` instead of `" \r"`.  Real-mode Windows 1.x derives the name of
+its overlay from that tail — it rewrites the last three characters to `OVL` and
+opens the result — so the stray CR made it open the wrong file, fall into the
+"try the next name" path (`incb %es:(%si)` at `CS:661Dh` bumps a byte of the
+name) and carry on with a garbage module segment.
+
+`src/emu/int21.c` (case 0x4B) now stops at CR/NUL:
+
+    u8 len = 0;
+    for (u16 i = 0; i < n; i++) {
+        u8 c = emu_rb(e, seg, (u16)(cmd_off + 1 + i));
+        if (c == '\r' || c == 0) break;
+        args[len++] = (char)c;
+    }
+    args[len] = 0;
+
+Verified with the host probe `UEFIDOS_TRACE_PSP=1` (new, see the harness table):
+the child PSP tail went from `len=3 " \r\r"` to `len=1 "\r"`, and the first open
+in `WIN100.BIN`'s startup went from `AX=FFFFh` (failure, retry path) to
+`AX=0005h` (handle 5, straight through `CS:6635h`).
+
+### What still stops it inside UEFI-DOS
+
+With the tail fixed, `WIN100.BIN` gets one step further and then aborts inside
+its own memory setup — no DOS call is involved, so nothing in the trace looks
+wrong:
+
+1. `CS:65ACh` calls `73ABh`, which calls `72D1h`; that routine **rebuilds the
+   MCB chain itself** from `(load_seg=2010h, instance=2030h, top=0A000h)` and
+   returns the heap anchor segment, stored at `CS:0002h` (`= 9FE1h` in our run).
+2. The anchor is fine, but `73ABh` sizes the first free heap block from
+   `instance+10h`, and in our run `[2030h:0010h] = 0200h`, i.e. 512 bytes ⇒
+   `((0x200+0Fh)>>4 - 3) & ~3 - 0x20` gives a **428-byte** heap.
+3. The kernel's first `GlobalAlloc` asks for `1BCh` (444 bytes) — larger than
+   428 — so `53 89h` finds no block, `54 FAh` returns 0, and `98 Ah` returns 0.
+4. The loader's failure path (`CS:216Bh`: `xor ax,ax; inc ax`) then returns
+   **1**, which the caller accepts as a segment (`CS:6649h` only rejects 0), so
+   `ES` becomes `0001h` and the module walk at `0E71h` sees `es:001Ch = 0` and
+   fails ⇒ `CS:675Ch` ⇒ `exit(1)`.
+
+So the remaining question is precise: **what should `[instance+10h]` be?** On
+real DOS the same instruction sequence ends up with a multi-hundred-kilobyte
+arena (the reference dump of the low 640 KB shows dozens of MCBs owned by
+Windows PSPs, i.e. Windows allocating its segments through `INT 21h AH=48h`;
+our run makes *no* `AH=48h` call at all).  `AH=48h BX=FFFFh` answers correctly
+here (`BX=9275h`), so the free-block reporting is not the difference — the
+value is computed inside the kernel from its own instance header, which means
+the divergence is either the address/size of the block our EXEC hands the child
+(`emu_exec_program()` uses a fixed `PSP = 2000h + 1000h*depth` instead of the
+first free block above the parent) or an instruction the kernel uses while
+building that header.
+
+New host probes used for this (both `#ifdef UEFIDOS_HOST`, env-gated):
+`UEFIDOS_TRACE_PSP=1` prints each PSP's command tail plus the 16 bytes after it;
+`UEFIDOS_TRACE_EXEC=1` prints every `INT 21h AH=4Bh` (path, env seg, command-line
+far pointer, first bytes, caller PSP, caller DS) and every failing `AH=48h`
+(requested and largest-free paragraphs).
