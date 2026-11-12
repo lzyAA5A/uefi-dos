@@ -410,6 +410,36 @@ the caller's addresses.
   are rewritten by the BIOS/Windows within seconds, so single-cell results are unreliable -
   prefer image padding plus a signature scan of the whole dump.
 
+### Instrumenting the reference run: what the channels cost, and the one number still missing
+
+Getting numbers out of a kernel that has already switched the display to graphics is the hard
+part of this investigation, so the working recipe is worth recording:
+
+* **Works**: `jmp` from the instrumented instruction into the image's zero padding
+  (`CS:7454`, image `0x77E4..0x7A80`), replay the relocated bytes, `jmp` back; store results
+  in the BIOS "inter-application communication area" `linear 0x04F0..0x04FF` with `DS = 0` or
+  `ES = 0` (absolute addressing) and read them back with `pmemsave 0 0xa0000`.
+  That area survived a complete boot (the marker signature `55 A5` written there at the NE
+  entry was still intact 25 s later), and it proved the reference run's kernel executes with
+  **`CS = 0x74B9`** - image base `0x7480`, flush against the top of memory.
+* **Fails**: `CS`-relative stores (a stub that does `mov ds,cs` and writes `CS:0x04F0`
+  actually writes image `0x880`, which the kernel's own arena initialisation zeroes later);
+  the BIOS data area at `0x04E0..0x04EF` (the BIOS and Windows rewrite it, which is why the
+  first marker run reported a mask of `0xE47F` with 18 thousand hits - noise);
+  COM1 (the port ended up carrying fragments of the kernel image, i.e. the guest was
+  executing data); `INT 10h AH=0Eh` (Windows hooks INT 10h for graphics mode and the
+  teletype calls shred the splash).
+* **Reached on the real machine**: the arena/heap builder at `CS:73AB` *is* called - a stub
+  there logged its first call - which finally proves the reference kernel goes through the
+  same private-arena path we do. The first call passes **all-zero arguments** (an early
+  probe), so the logged frame must target a later call, not the first.
+
+So the single number still missing is the argument set of the *real* builder call (top / load /
+instance / heap term). Logging every call and reading the last one closes that gap, and it is
+the next thing to run: with it we either learn that the reference heap term really is
+`0x0200` - in which case the divergence is the *request* size, not the heap - or we get the
+larger number the 25 KB reference heap implies.
+
 ## Windows 1.01: what the kernel asks DOS for
 
 `WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
