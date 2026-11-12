@@ -888,6 +888,66 @@ That is the single open question left, and it is now narrow enough to attack dir
 the code that re-enters `CS:64E5h` (or the DOS call sequence that produces a high `PSP+0x10`
 while the image is high), and everything else in the startup is already accounted for.
 
+### Follow-up: what the `' !'` invocation actually does, and WIN.COM's embedded LOGO module
+
+Driving WIN.COM with a command tail that starts with `' !'` (`WIN !`) satisfies
+`cmpw $0x2120,%cs:0x81` and reaches the code at `CS:712h..742h`. Traced on our side
+(104 DOS calls versus 89 for plain `win`):
+
+```
+ 1  AH=4Ah BX=0089  -> ok            ; shrink itself
+ 2  AH=48h BX=FFFF  -> error 8       ; largest free block = 9233h
+ 3  AH=48h BX=5D35  -> ok            ; reserve (max - 3500h) paragraphs = 381 KB
+ 4  AH=30h ...                       ; then straight to
+10  AH=4Bh  "C:\WIN100.BIN"          ; ... the ordinary EXEC
+```
+
+So the `' !'` path is a **memory reservation**, not a high load: it parks `max-0x3500`
+paragraphs so that the child's block is smaller, and the child is still EXECed at the
+normal `PSP+0x10`. The kernel then starts (AH=52h SFT, AH=5Dh SDA, AH=34h all present in
+the trace) and exits `AH=4Ch AL=1` exactly as before. Note also that no `INT 10h` mode set
+happens in this run, so no splash is drawn — the `' !'` route is a different display path.
+
+While reading the loader it turned out that WIN.COM is itself a stub: the call at `CS:745h`
+(and `CS:74Ah`) does
+
+```
+74a: mov $4,%di / jmp 757      ; 745: mov $7,%di
+757: push ds ; si = cs ; ax = (0x89F)>>4 ; si += ax ; ds = si
+     cmpw $0x4F4C,(%si) ; cmpw $0x4F47,0x2(%si)   ; "LOGO"
+     push cs / push 77E / push ds / push di / lret
+77e: pop ds ; ret
+```
+
+i.e. it checks for the signature `"LOGO"` at `CS+0x89` paragraphs and far-jumps to entry 4
+or 7 of that embedded module, returning to `CS:77Eh`. The signature is really there, at
+**file offset 1936 = 0x790** (exactly `CS+0x890`):
+
+```
+0x790: 4C 4F 47 4F            "LOGO"
+0x794: E9 C0 00               jmp +0C0h          <- entry 4 (used when the tail is empty)
+0x797: 33 C0                  xor %ax,%ax        <- entry 7 (used by the normal path)
+0x799: 8E C0                  mov %ax,%es
+0x79B: A0 19 00               mov 0x19,%al
+0x79E: 26 A2 10 04            mov %al,%es:0x410
+0x7A2: A0 18 00               mov 0x18,%al
+0x7A5: CD 10                  int $0x10          ; set the video mode from the module's data
+0x7A7: CB                     lret
+```
+
+So entry 7 (`CS:745h`) is a *video mode* request, not a loader: it issues `INT 10h` with
+the mode byte stored in the LOGO module, which is why the plain path leaves the mode set to
+the kernel itself and the traced run shows no `INT 10h` at all when the mode byte means
+text. Entry 4 (`jmp +0C0h`) is the empty-tail initialisation route.
+
+None of this places the image high, so the contradiction above stands unchanged: on the
+reference machine the kernel executes at `CS=74B9h` while the PSP that the builder is told
+about is still `0FBAh`, and no code in WIN.COM or in the kernel up to `CS:212Bh` produces
+that. The next experiment has to observe the reference machine **at the NE entry**
+(`CS:64E5h`), recording `CS`, `SS:SP`, `ES` (the child PSP) and a sequence counter, so that
+"low instance first, then a high copy" and "only ever a high instance entered in-process"
+can be told apart in one run.
+
 ### Negative result: a big strip alone is not enough
 
 To test whether the reference geometry is the whole story, the arena builder was nudged so that the
