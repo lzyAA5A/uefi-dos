@@ -1,5 +1,75 @@
 # Running Microsoft Windows 1.x under UEFI-DOS
 
+## Status at a glance (hand-over summary)
+
+**Goal of this line of work:** make a real, unmodified Windows 1.01 reach its desktop
+under UEFI-DOS. **State: not achieved.** UEFI-DOS starts `WIN.COM`, the kernel runs,
+paints the MICROSOFT splash in CGA graphics (mode 6 / 640x200), and then exits with
+`AH=4C AL=1` before it sets any graphics mode of its own or reaches its first window.
+
+**The blocker in one paragraph.** `WIN100.BIN` (177,488 B, NE header at file 0x400,
+`ne_heap` at file 0x410) is loaded as an EXE; its MZ stub (file 0x200..0x400) sets
+`SS:SP = load:0200h` and jumps to `CS:64E5`, so the kernel computes
+`instance = SS + (SP>>4) = load + 0x20` — the NE header itself — and then builds its
+private arena with `CS:72D1`, where the only block the allocator accepts (owner word
+`0`, see `CS:5A84 cmp %di,%es:0x1(%di)` with `DI=0`) spans `load+2 .. instance-1`, i.e.
+**27 paragraphs**. The very first thing the kernel asks for is a 30-paragraph
+(435-byte) module database (`CS:2123` builds `DI = 0x19D + lenbyte + 1`, `CS:212B call
+0x98A`; the allocator converts it to `DX = (bytes>>4)+2 = 29` and needs
+`block_size+1 >= 29`). 28 < 29, so `CS:2165` frees the block and returns the bogus
+handle **1**; the caller `CS:664D mov es,ax` installs `ES=0001h` (the IVT), the module
+walk `CS:0E71` then reads an empty table and returns 0, and `CS:6681 jmp 675C` runs the
+C runtime `exit(1)`. `CS:670F` (the gate that leads to `CS:64B4`/`0x69E8`, the real
+startup) is never reached, and `INT 10h` is never called by the kernel (the splash is
+painted by the KERNSTUB-era code path before this).
+
+**Why real MS-DOS 5.00 gets further.** On the reference machine the same kernel runs
+from a copy near the top of memory (`CS=0x74B9`, image base `0x7480 = 0x9FC0 - 0x2B40`)
+while its PSP — and therefore the `load` argument — is still low (`0x0FCA`), so the
+owner-0 block spans `0x0FCC .. 0x749E` ≈ 25,809 paragraphs and the module database
+lands at `0x0FCD` (`MCB 0FCC M owner=0FCD size=001D`, heap `0FEA M owner=0FCD size=064B`).
+Everything else measured is identical between the two runs: DOS version seen by the
+kernel, module name length, the request size (`DI=0x1B3`), the other three builder
+arguments, and the walk returning 0 in both.
+
+**What is proven, with the tool that proved it**
+
+| finding | how |
+| --- | --- |
+| instance = `load+0x20` on BOTH machines | entry-stub disassembly + probe 10 (`AX=0x74A0, BX=0x0FCA, CX=0x0200, DX=0x9FC0`) |
+| request is 30 paragraphs, strip is 27 | `UEFIDOS_TRACE_WINDOW=5a80-5af0` (`5AA4 AX=001B`, `5AE2 DX=001E`) |
+| failure path returns handle 1 | `UEFIDOS_TRACE_WINDOW=6500-6770` (`0DD5:664F AX=0001`) |
+| making one block owner-0 makes the alloc succeed | patch `ne_heap` file 0x410 → 0x240 + owner immediate file `0x590+0x7343` → 0 (`CS:212E AX=9F9D`) |
+| a big block alone is NOT enough | `CS:737E` patched to `mov $0x9FBE,%ax` → still 77 DOS calls, still `AH=4C AL=1` |
+| the walk is not the discriminator | probe 9: real machine also returns `AX=0` at `CS:667A` |
+| kernel never calls AH=48/49/4A | complete INT trace of the run |
+
+**How to reproduce (all local, nothing redistributed)**
+
+1. Flatten the 1.01 media plus the SETUP-produced runtime into one tree, e.g.
+   `F:\1231\_tmp\win\w101full`; the flat layout is what works on real DOS too.
+2. `python tools\make_tree_image.py build\w101flat.img F:\1231\_tmp\win\w101full --size-mb 64`
+3. Host harness (does not run AUTOEXEC.BAT, so pass the commands):
+   `build\hosttest.exe --shell build\w101flat.img 'SETVER WIN100.BIN 3.30' 'WIN100.BIN'`
+   with `UEFIDOS_TRACE_INTS=1`, `UEFIDOS_TRACE_WINDOW=6500-6770` (+`UEFIDOS_TRACE_STEPS`),
+   `UEFIDOS_DUMP_AT=0D49:6642`, `UEFIDOS_GFX_DUMP=build\w101.ppm`, `UEFIDOS_HARD_STEPS=20000000`.
+4. Reference machine: `python ref_snap.py <tag>` in `F:\1231\_tmp\win` with
+   `REF_HD` pointing at the tree; it boots `build\dos5boot.img` as A:, exposes the tree as
+   C: through `-drive file=fat:rw:DIR,if=ide,index=0,media=disk,format=raw` (the
+   `-hda fat:rw:` form is invalid), types `ret`,`ret`,`c:`,`win`, and dumps 640 KB every
+   few seconds to `build\refm_<tag>_<i>.bin`.
+5. Screenshots: `tools\gfx_shot.ps1` / `tools\gfx_burst.ps1` (QEMU needs a real display
+   backend for `screendump`, `-display none` silently produces nothing).
+
+**What the next person should do.** Reproduce the reference geometry — the kernel
+executing from a copy flush against the top of its own block while PSP/`load` stay low —
+together with the arena that `CS:72D1` builds and the heap header `CS:73AB` installs, so
+that the owner word, the `next`/`self`/`+0xA` links and the heap free list all agree.
+The alternative, cheaper line of attack that has not been tried: find what makes the
+*loader* (WIN.COM or the stub) place the image where the reference has it, since the
+KERNSTUB provably does no copying and `WIN.COM`'s own relocation primitive is gated on a
+command tail beginning with `' !'`.
+
 Windows 1.0/1.01 are *real-mode* DOS programs: they need a text screen, the CGA
 graphics hardware, a `INT 33h` mouse driver, the timer and keyboard interrupts,
 and a DOS version they consider "old enough".  This document records what had
