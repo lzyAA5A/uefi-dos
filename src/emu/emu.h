@@ -159,6 +159,9 @@ int  emu_init(Emu *e);
 void emu_free(Emu *e);
 int  emu_load_program(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char *argline);
 int  emu_exec_program(Emu *e, const char *prog, const char *args);
+/* tail128: the caller's 128-byte command-tail buffer (PSP:0080h..00FFh) to be
+ * copied verbatim into the child PSP, or NULL to synthesise one from args. */
+int  emu_exec_program_ex(Emu *e, const char *prog, const char *args, const u8 *tail128);
 int  emu_run(Emu *e);
 
 u8   emu_rb(Emu *e, u16 seg, u16 off);

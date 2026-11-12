@@ -649,3 +649,122 @@ anchor cell `CS:0002h`.  The arena the kernel hand-writes in our run is
 top of memory, which is one structural difference from the real run worth
 checking against the search's block walk.
 
+
+## Windows 1.01 renders its splash screen (post-1.1.0)
+
+Status: **`WIN` switches to CGA 640x200 and draws the "MICROSOFT" logo**, then the
+kernel still exits with code 1.  Before the two fixes below it never reached a
+single `INT 10h`.
+
+### Bug 1 — EXEC must copy the whole 128-byte command tail
+
+`INT 21h AH=4Bh` used to copy only the count-prefixed string and to stop at the
+first CR (`src/emu/int21.c`, case `0x4B`).  Real DOS copies the caller's entire
+`PSP:0080h..00FFh` tail buffer into the child PSP, and pre-3.0 software hides
+data there: `WIN.COM` runs `mov word ptr [00FEh],'XW'` (`a3 fe 00`, file offset
+`0x321`) before it EXECs `WIN100.BIN`, and the kernel checks that word at
+`CS:653Eh`:
+
+```
+653E: mov ax,es:[0xFE]       ; ES = own PSP
+6542: cmp ax,0x5758 ('XW') ; je 0x6551   -> mark "started by WIN.COM", skip the
+6547: cmp ax,0x5747 ('GW') ; jne 0x655C     command-line rebuild at 0x655C
+```
+
+Without the marker the kernel rebuilt its own command line, and every later step
+worked from that longer name.  `emu_exec_program_ex()` now takes the caller's
+raw tail (`build_psp_ex(..., const u8 *tail128)`), so the 128 bytes go across
+verbatim.
+
+### Bug 2 — the tail count byte excludes the terminating CR
+
+DOS puts the character count at `PSP:0080h` **without** the trailing CR, so a
+bare command line is `count=0` with the CR at `0081h`; UEFI-DOS wrote `count=1`
+(the CR counted).  `WIN.COM` appends the overlay path at `0081h+count` and never
+updates the count:
+
+```
+WIN.COM 0x43E: mov di,0x80
+        0x443: mov al,[di]        ; existing count
+        0x445: add al,cl          ; + 13 (path length)
+        0x44D: jle 0x451          ; clamp to keep count+13 <= 126
+        0x453: mov al,[di]
+        0x455: inc di
+        0x456: add di,ax          ; <-- append point = 0081h + count
+        0x458: mov al,0x0D / stosb
+        0x45B: mov ax,cx   / stosb
+        0x465: AH=19h, 'A'+drive, ':'     ; "C:"
+        0x471: rep movsb                  ; "WIN100.BIN"
+```
+
+With `count=1` everything moved two bytes and the kernel's own reader
+(`CS:0x65E5..0x6603`, which walks `count`, string, string and rewrites the last
+three characters of the second string to `OVL`) picked up a 29-30 character
+expanded path instead of `C:WIN100.BIN`.
+
+Verification: `tools/make_tailtest.py` assembles `TAILCHK.COM`, which prints the
+three interesting cells; `run_tests.ps1` asserts both forms:
+
+```
+C:\> TAILCHK
+COUNT=00 C81=0D FE=0000
+C:\> TAILCHK ABC
+COUNT=04 C81=20 FE=0000
+```
+
+For Windows itself the dump of the child PSP now reads
+`00 | 0D 0D "C:WIN100.OVL"` with `'XW'` at `00FEh` — the same layout a real
+MS-DOS 5.00 child gets (see the reference dump below).
+
+### What is still missing: 16 bytes of local heap
+
+With the tail right, the kernel's module-database allocation
+(`CS:2123h`, `call 0x98A` -> `GlobalAlloc`) asks for `DI = 0x1BB..0x1BC` (443-444)
+bytes and fails.  The heap it carves for itself is `ne_heap` from the image's own
+NE header (`[instance+0x10]` = `0x0200`), which leaves 428 usable bytes at
+`0D12h:0` (`'M' owner=0000h size=001Bh`), followed by a 582 KB free block
+(`'M' owner=FFFFh size=8E3Bh`) that the kernel's own allocator refuses because it
+only re-uses blocks it owns (`CS:5A84h`: `cmp di,[es:di+1]`).
+
+Under real MS-DOS 5.00 the same call asks for **425** bytes, because there the
+module name is the short tail name `C:WIN100.BIN` (13 characters) instead of the
+expanded path.  So the remaining gap is the kernel's name expansion, not the
+arena: the arena, the SFT, the SDA and the EXEC contract are now all correct.
+
+Reference arena under real MS-DOS 5.00 (`pmemsave` of a running Windows, MCB walk
+of the dump; `rd4.bin`):
+
+```
+0B57 M owner=0008 size=02A4    COMMAND.COM
+0DFC M owner=0DFD size=0116    WIN.COM
+0F13 M owner=0F2A size=0003
+0F17 M owner=0000 size=0000
+0F18 M owner=0DFD size=0010
+0F29 M owner=0F2A size=008B
+0FB5 M owner=0FBA size=0003
+0FB9 Z owner=0FBA size=9006    WIN100.BIN owns everything up to 9FC0h
+```
+
+and the reference child PSP (`0FBAh`): `0080h` = `00`, then `0D 0D "C:WIN100.OVL"`,
+`00FEh` = `'XW'`.
+
+### Reproducing
+
+```powershell
+# host harness, no firmware needed
+$env:UEFIDOS_HARD_STEPS='80000000'
+build\hosttest.exe --shell build\w101dbg.img 'SETVER WIN.COM 3.30' `
+    'SETVER WIN100.BIN 3.30' 'CD \WINDOWS' 'WIN'
+# -> "gfx: mode set 640x200x8", the logo, then back to text
+
+# real firmware: boot the install and burst-screenshot the window
+powershell -File run_win1x.ps1 -Installed F:\1231\_tmp\win\w101run -Rebuild -Headless -TimeoutSec 55
+powershell -File tools\gfx_burst.ps1 -StartSec 22 -Count 50 -IntervalMs 350
+python tools\ppm2png.py build\burst\shot002.ppm build\shot_w101_qemu.png
+```
+
+`tools/gfx_burst.ps1` + `tools/qburst.py` exist because the splash is on screen
+for well under a second: a single timed `screendump` misses it, so the tools keep
+one monitor connection open and fire 40-60 dumps.  `tools/gfx_burst.ps1` quotes
+the *path* inside `-drive`/`-serial` values (`file:"C:\x.img"`); quoting the whole
+`file=...` token makes QEMU read `file=C:\x` as a character-device driver name.

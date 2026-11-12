@@ -12,8 +12,12 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.1.0** —— 30 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.1.1** —— 31 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
+
+1.1.1 修的是 DOS 的 EXEC 命令行约定：调用方 `PSP:0080h..00FFh` 那 **128 字节
+原样**复制给子进程（`WIN.COM` 的 `'XW'` 标记就藏在这里），且计数字节不含结尾 CR。
+这两处对上之后，**Windows 1.01 能在 CGA 640×200 下把启动画面画出来**。
 
 1.1.0 补的是「实模式 GUI 需要的硬件」：`INT 10h` 现在支持 **CGA 模式 4/5/6**
 （`B800` 的奇偶场交错位图，`AH=0Bh` 与 `3D8h`/`3D9h` 端口选择调色板），有了完整的
@@ -34,7 +38,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.0.zip)
+[**下载 `UEFI-DOS-1.1.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.1.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -474,9 +478,32 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 `INT 10h` 的 CGA 模式、`INT 33h` 鼠标驱动、硬件中断注入都是为 Windows 加的。
 **Windows 1.01** 的 `SETUP` 在合并安装卷上能完整装完（识别 CGA、拷完 build/utility
 盘、生成 `WIN.COM`/`WIN100.BIN`/`WIN100.OVL`）；`WIN` 在内核版本门槛被
-`SETVER WIN.COM 3.30` / `SETVER WIN100.BIN 3.30` 满足后能启动内核，但桌面还没画出来，
-缺哪些服务见 [`docs/windows1x.md`](docs/windows1x.md)（列表链里的真 `SFT`、
-`INT 15h`/XMS、可安装显示驱动加载器）。
+`SETVER WIN.COM 3.30` / `SETVER WIN100.BIN 3.30` 满足后启动内核，**内核现在会把它的
+启动画面画出来**：切到 CGA 640×200、画出 “MICROSOFT” logo，然后才以退出码 1 结束。
+在它之前挡着的是两个 EXEC 的真 bug，都已修掉：
+
+* `INT 21h AH=4Bh` 原来只拷“计数 + 字符串”，遇到第一个 CR 就截断。DOS 会把调用方
+  **整个 128 字节命令行缓冲区**（`PSP:0080h..00FFh`）原样复制给子进程，而 3.0 之前的
+  软件就往那里藏数据：`WIN.COM` 把字 `'XW'` 写在 `PSP:00FEh`，Windows 内核
+  （`CS:653Eh`）没有这个标记就拒绝启动。
+* 命令行**计数字节不含结尾的 CR**，所以光命令的 count 是 0（CR 仍在 `0081h`），不是 1。
+  `WIN.COM` 用 `0081h+count` 定位它要追加的覆盖文件名、且从不回写 count；差一个字节就
+  把路径推后两字节，内核于是拼出一个 30 字符的模块名，而不是 13 字符的 `C:WIN100.BIN`。
+
+现在只差 16 字节：内核的模块数据库要 443 字节，而它自己的局部堆（`ne_heap` = 512 字节
+→ 可用 428）只有 428；真 MS-DOS 5.00 下同样的请求是 425 字节，因为内核用的是短的
+tail 名字。追踪、arena/堆转储对照和还开着的疑点都在
+[`docs/windows1x.md`](docs/windows1x.md)。`TAILCHK.COM` 回归（`COUNT=00 C81=0D`）
+防止 tail 语义再漂回去。
+
+**Windows 1.0 Developer Release 5（1984-11-04）** 可以用 `tools/install_win1x.py`
+按它 `INSTALL.BAT` 的布局装进 UEFI-DOS 镜像（`start_win1x.bat` 双击启动），但它的
+`KERNEL.EXE` 在自己引导阶段就把自己的代码和栈清零了 —— 在发出第一个 `INT 21h` 之前
+就死了。同一批文件放到**真实 Compaq MS-DOS 2.11** 启动软盘上跑，表现完全一样（黑屏
+挂死，COM1 也没有输出），所以这不是 UEFI-DOS 的问题：这个 DR5 内核在任何标准 DOS
+EXE 装载下都会写坏自己。证据与反汇编见 `docs/windows1x.md`。
+
+Windows/286 2.10 需要 286 保护模式和 EMM，UEFI-DOS 目前没有。
 
 **Windows 1.0 Developer Release 5（1984-11-04）** 可以用 `tools/install_win1x.py`
 按它 `INSTALL.BAT` 的布局装进 UEFI-DOS 镜像（`start_win1x.bat` 双击启动），但它的

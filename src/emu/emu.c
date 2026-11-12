@@ -2772,7 +2772,14 @@ const char *emu_current_program(void)
 int emu_unsupported_ops;
 int emu_unsupported_quiet;
 
-static void build_psp(Emu *e, u16 psp_seg, const char *argline)
+/* DOS's EXEC copies the caller's whole 128-byte command-tail buffer
+ * (PSP:0080h..00FFh) into the child's PSP -- the count byte at 0080h is the
+ * string length, but the remaining bytes come along verbatim.  That matters
+ * because pre-3.0 software hides data there: WIN.COM of real-mode Windows 1.x
+ * stores the word 'XW' at PSP:00FEh and the kernel refuses to boot without it
+ * (CS:653Eh).  `tail128` is that buffer; when NULL the tail is synthesised
+ * from `argline` the way DOS would for a normal command line. */
+static void build_psp_ex(Emu *e, u16 psp_seg, const char *argline, const u8 *tail128)
 {
     u16 s = psp_seg;
     /* terminate stub: INT 20h (the magic-vector hook ends the program) */
@@ -2840,6 +2847,18 @@ static void build_psp(Emu *e, u16 psp_seg, const char *argline)
     emu_wb(e, s, 0x6C, 0x00);
     /* command tail */
     u32 len = 0;
+    if (tail128) {
+        /* verbatim copy of the caller's 128-byte tail buffer */
+        for (u32 i = 0; i < 128u; i++)
+            e->mem[((u32)s * 16 + 0x80 + i) & MEM_MASK] = tail128[i];
+    } else {
+    /* DOS's count byte is the number of characters BEFORE the terminating CR,
+       so a bare command line has count 0 with the CR sitting at 0081h.  Getting
+       this wrong breaks programs that append to their own tail: WIN.COM of
+       real-mode Windows 1.x writes the overlay path at 0081h+count and never
+       updates the count, and the Windows kernel then walks count, string,
+       string to find that path (it rewrites the last three characters to
+       "OVL").  A count of 1 put everything two bytes too far. */
     if (argline && *argline) {
         e->mem[((u32)s * 16 + 0x81) & MEM_MASK] = ' ';
         len = 1;
@@ -2849,8 +2868,8 @@ static void build_psp(Emu *e, u16 psp_seg, const char *argline)
         }
     }
     e->mem[((u32)s * 16 + 0x81 + len) & MEM_MASK] = '\r';
-    len++;
     e->mem[((u32)s * 16 + 0x80) & MEM_MASK] = (u8)len;
+    }
 #ifdef UEFIDOS_HOST
     /* Host-only probe: real-mode Windows 1.x derives the name of its overlay
        from the command tail, so a mismatched tail makes it open the wrong
@@ -2872,6 +2891,9 @@ static void build_psp(Emu *e, u16 psp_seg, const char *argline)
     }
 #endif
 }
+
+/* build_psp_ex() is called by load_com_at/load_exe_at with either a
+ * synthesised tail (NULL) or the caller's raw 128-byte tail buffer. */
 
 int emu_init(Emu *e)
 {
@@ -2913,10 +2935,11 @@ static u16 rd16p(const u8 *p)
     return (u16)(p[0] | (p[1] << 8));
 }
 
-static int load_com_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char *args)
+static int load_com_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char *args,
+                       const u8 *tail128)
 {
     if (size > 0xFF00u) return 1;
-    build_psp(e, psp_seg, args);
+    build_psp_ex(e, psp_seg, args, tail128);
     u32 base = (u32)psp_seg * 16;
     for (u32 i = 0; i < size; i++) e->mem[(base + 0x100 + i) & MEM_MASK] = img[i];
     e->cs = e->ds = e->es = e->ss = psp_seg;
@@ -2932,7 +2955,8 @@ static int load_com_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
     return 0;
 }
 
-static int load_exe_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char *args)
+static int load_exe_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char *args,
+                       const u8 *tail128)
 {
     if (size < 0x1C) return 1;
     u16 e_crlc = rd16p(img + 0x06);
@@ -2950,7 +2974,7 @@ static int load_exe_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
      * "large" DOS executable, e.g. SimEarth's 125 KB SIMEARTH.EXE.) */
     u32 modparas = (modsize + 15u) / 16u;
     if ((u32)psp_seg + 0x10u + modparas + 0x10u >= 0xA000u) return 1;
-    build_psp(e, psp_seg, args);
+    build_psp_ex(e, psp_seg, args, tail128);
     u16 load_seg = (u16)(psp_seg + 0x10);
     u32 base = (u32)load_seg * 16;
     for (u32 i = 0; i < modsize; i++) e->mem[(base + i) & MEM_MASK] = img[hdr + i];
@@ -3021,10 +3045,16 @@ static void arena_setup(Emu *e, u16 psp_seg, u32 image_bytes)
     emu_ww(e, mcb, 3, (u16)((u32)top - (u32)psp_seg - 1u));
 }
 
+static int load_program_at_ex(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char *args,
+                              const u8 *tail128)
+{
+    if (is_mz(img, size)) return load_exe_at(e, psp_seg, img, size, args, tail128);
+    return load_com_at(e, psp_seg, img, size, args, tail128);
+}
+
 static int load_program_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char *args)
 {
-    if (is_mz(img, size)) return load_exe_at(e, psp_seg, img, size, args);
-    return load_com_at(e, psp_seg, img, size, args);
+    return load_program_at_ex(e, psp_seg, img, size, args, NULL);
 }
 
 /* Instruction budget for one emu_run() call.  Overridable on the host harness
@@ -3542,7 +3572,7 @@ int emu_shell_exec(const char *name, const char *args)
 /* ------------------------------------------------------------------ */
 static int g_exec_depth = 0;
 
-int emu_exec_program(Emu *e, const char *prog, const char *args)
+int emu_exec_program_ex(Emu *e, const char *prog, const char *args, const u8 *tail128)
 {
     char path[DOS_MAX_PATH];
     if (locate_program(prog, path, sizeof(path))) return -1;
@@ -3594,7 +3624,7 @@ int emu_exec_program(Emu *e, const char *prog, const char *args)
     memcpy(s_handles, g_dos.handles, sizeof(s_handles));
 
     g_exec_depth++;
-    int lr = load_program_at(e, psp, img, size, args);
+    int lr = load_program_at_ex(e, psp, img, size, args, tail128);
     plat_free(img);
     if (lr) {
         g_exec_depth--;
@@ -3616,4 +3646,9 @@ int emu_exec_program(Emu *e, const char *prog, const char *args)
     memcpy(g_dos.handles, s_handles, sizeof(s_handles));
     g_exec_depth--;
     return code;
+}
+
+int emu_exec_program(Emu *e, const char *prog, const char *args)
+{
+    return emu_exec_program_ex(e, prog, args, NULL);
 }

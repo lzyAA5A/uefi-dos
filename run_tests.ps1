@@ -155,6 +155,13 @@ Run-Check 'bundled tools: SUM checksum + HEX dump of a file (INT 21h handles)' {
 # games ignored the cursor keys entirely.
 $env:UEFIDOS_KBD = 'DOWN,UP,RIGHT,LEFT,ESC'
 $env:UEFIDOS_KBD_MAX_POLLS = '20000'
+# DOS fills the child PSP tail at 0080h: the count byte excludes the trailing
+# CR (a bare command line is count 0), and bytes past it are the caller's tail
+# buffer verbatim.  WIN.COM of real-mode Windows 1.x depends on both.
+Run-Check 'DOS: command tail is built like DOS (count excludes CR)' {
+    & $HostExe --shell (Join-Path $Build 't_tools.img') 'TAILCHK' 'TAILCHK ABC'
+} @('COUNT=00 C81=0D', 'COUNT=04 C81=20', 'TAILCHK-DONE')
+
 Run-Check 'keyboard: arrow keys arrive as BIOS scan codes (INT 16h)' {
     & $HostExe --shell (Join-Path $Build 't_tools.img') 'KEYTEST'
 } @('S=50 A=00', 'S=48 A=00', 'S=4D A=00', 'S=4B A=00', 'S=01 A=1B', 'KEYTEST-DONE')

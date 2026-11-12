@@ -13,8 +13,14 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.1.0** — 30 of 30 automated checks pass on the Windows host harness
+Version **1.1.1** — 31 of 31 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
+
+1.1.1 fixes the EXEC command-tail contract DOS has and UEFI-DOS did not:
+the whole 128-byte `PSP:0080h..00FFh` buffer is copied verbatim (that is
+where `WIN.COM` hides its `'XW'` marker) and the count byte excludes the
+terminating CR. With those two right, **Windows 1.01 draws its splash
+screen** in CGA 640x200 before it stops.
 
 1.1.0 is about the hardware a real-mode GUI needs. `INT 10h` now speaks the
 **CGA modes 4/5/6** (the even/odd-interleaved bitmap at `B800`, palette
@@ -36,7 +42,7 @@ still missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.1.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.0.zip)
+[**Download `UEFI-DOS-1.1.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.1.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -433,7 +439,7 @@ Long Name Report.txt         31 13:12  11-11-26
 
 ## Regression suite
 
-`run_tests.ps1` builds everything and runs 30 checks: FAT32 read/write selftest;
+`run_tests.ps1` builds everything and runs 31 checks: FAT32 read/write selftest;
 host shell DIR/TYPE/VER/COM/EXE/EXEC/video plus native-API and upcall demos;
 host shell write path; floppy-image `A:` mount; FAT12 write on a 2.11 image;
 FAT12 read of 2.11 and MS-DOS 5 images; two QEMU/OVMF boot smoke tests (x86_64
@@ -510,17 +516,27 @@ on a merged install volume: it detects the CGA adapter, copies the build and
 utility disks, writes `WIN.COM`/`WIN100.BIN`/`WIN100.OVL` and finishes with
 "Microsoft Windows is set up to operate on your computer". `WIN` starts the
 kernel once `SETVER WIN.COM 3.30` / `SETVER WIN100.BIN 3.30` satisfy its DOS
-version gate. `WIN100.BIN` then runs its whole DOS-internals validation — SFT
-chain, swappable data area, InDOS flag, PSP and job file table — before it exits
-with code 1 without loading a driver, so the desktop is still not drawn;
-`docs/windows1x.md` records the disassembled validation chain, the DOS surface
-it needs and the open question (an instance/handle walk at `CS:0E71h`), plus
-`INT 15h`/XMS and the installable display-driver loader as remaining work. The
-current status in one line: the kernel builds its own arena and a 17 KB module
-heap, then its own first `GlobalAlloc(0x1BCh)` still returns 0, so it takes its
-`exit(1)` path before any `INT 10h`; the reference run under real MS-DOS 5.00
-differs in that the kernel has already relocated itself against the top of
-memory by then (see the probe table in `docs/windows1x.md`). **Windows 1.0 Developer Release 5** can be laid
+version gate — and **the kernel now paints its splash screen**: it switches to
+CGA 640x200, draws the "MICROSOFT" logo and only then exits with code 1. Two
+EXEC bugs stood between "nothing at all" and that picture, both fixed:
+
+* `INT 21h AH=4Bh` copied just the count-prefixed string and stopped at the first
+  CR. DOS copies the caller's **whole 128-byte command-tail buffer**
+  (`PSP:0080h..00FFh`) into the child's PSP, and pre-3.0 software hides data
+  there: `WIN.COM` stores the word `'XW'` at `PSP:00FEh`, and the Windows kernel
+  refuses to boot without that marker (`CS:653Eh`).
+* The tail **count byte excludes the terminating CR**, so a bare command line has
+  count 0 (the CR still sits at `0081h`), not count 1. `WIN.COM` appends the
+  overlay path at `0081h+count` and never updates the count, so being one byte
+  off pushed the path two bytes too far and the kernel rebuilt a 30-character
+  module name instead of the 13-character `C:WIN100.BIN`.
+
+What is left is 16 bytes: the kernel's module-database allocation asks for 443
+bytes and its own local heap (`ne_heap` = 512 bytes → 428 usable) has 428. Under
+real MS-DOS 5.00 the same request is 425 bytes because the kernel keeps the short
+tail name; `docs/windows1x.md` holds the trace, the arena/heap dump comparison
+and the open question. The `TAILCHK.COM` regression (`COUNT=00 C81=0D`) keeps the
+tail semantics from drifting back. **Windows 1.0 Developer Release 5** can be laid
 out on a UEFI-DOS image with `tools/install_win1x.py` (and started with
 `start_win1x.bat`), but its `KERNEL.EXE` destroys its own code and stack in its
 bootstrap before it makes a single `INT 21h` call — the same files hang the same

@@ -1073,23 +1073,36 @@ void int21_handler(Emu *e)
             fprintf(stderr, " psp=%04X ds=%04X\n", (unsigned)g_dos.psp_seg, (unsigned)e->ds);
         }
 #endif
+        u8 tail[128];
+        for (int i = 0; i < 128; i++) tail[i] = 0;
+        u8 n = 0;
         if (cmd_off) {
             u16 seg = cmd_seg ? cmd_seg : e->ds;
-            u8 n = emu_rb(e, seg, cmd_off);
+            n = emu_rb(e, seg, cmd_off);
             if (n > 126) n = 126;
-            /* DOS's count-prefixed command line ends with CR (13h); the CR is
-               NOT part of the arguments.  Copying it through put a stray CR in
-               the child's PSP tail and real-mode Windows 1.x derives its overlay
-               file name from that tail, so it opened the wrong file. */
+            /* DOS copies the caller's whole 128-byte command-tail buffer
+               (PSP:0080h..00FFh) into the child's PSP: the count byte is the
+               string length, but every byte it covers comes along verbatim --
+               and so do the bytes beyond it, which is where pre-3.0 software
+               hides data (WIN.COM of Windows 1.x puts 'XW' at PSP:00FEh and the
+               kernel refuses to boot without it).  The old code also stopped at
+               the first CR, which truncated WIN.COM's tail to nothing: its tail
+               is CR plus the overlay path, so the count byte says 13 and the
+               first character is 13h. */
+            for (u16 i = 0; i < 128u; i++)
+                tail[i] = emu_rb(e, seg, (u16)(cmd_off + i));
+            /* the arguments string is the tail without its leading CR and
+               without the trailing CR DOS appends; it is only used for the
+               synthesised-tail fallback */
             u8 len = 0;
             for (u16 i = 0; i < n; i++) {
-                u8 c = emu_rb(e, seg, (u16)(cmd_off + 1 + i));
-                if (c == '\r' || c == 0) break;
+                u8 c = tail[i + 1];
+                if (c == '\r' || c == 0) continue;
                 args[len++] = (char)c;
             }
             args[len] = 0;
         }
-        int code = emu_exec_program(e, prog, args);
+        int code = emu_exec_program_ex(e, prog, args, cmd_off ? tail : NULL);
         if (code < 0) {
             set_err(e, code == -1 ? 2 : 0x0B);
             return;

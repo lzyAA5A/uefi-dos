@@ -113,6 +113,7 @@ try {
             @{ script = 'tools/make_fcb_test.py'; what = 'FCB test program' },
             @{ script = 'tools/make_tools.py';    what = 'bundled utility set' }
     @{ script = 'tools/make_keytest.py';  what = 'keyboard scan-code probe' }
+    @{ script = 'tools/make_tailtest.py'; what = 'command-tail (PSP:0080h) probe' }
         @{ script = 'tools/make_gfx_test.py'; what = 'graphics mode probes (mode 13h + VESA)' }
         @{ script = 'tools/make_video_test.py'; what = 'CGA mode 4 and INT 33h mouse probes' }
         @{ script = 'tools/make_dos4_test.py'; what = 'DOS 4.0 conformance probe' }
@@ -142,7 +143,7 @@ try {
 
         $programs = @('HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM',
                       'UPCALL.COM','DTATEST.COM','I2FTEST.COM','DPMITEST.COM','FCBTEST.COM',
-                      'INFO.COM','CLOCK.COM','HEX.COM','SUM.COM','CAL.COM','KEYTEST.COM',
+                      'INFO.COM','CLOCK.COM','HEX.COM','SUM.COM','CAL.COM','KEYTEST.COM','TAILCHK.COM',
                             'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM',
                             'CGATEST.COM','MOUSETST.COM')
         # the native SDK examples are PE images, not DOS programs: optional
