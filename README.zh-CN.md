@@ -12,7 +12,7 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.1.2** —— 31 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.1.3** —— 32 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
 1.1.1 修的是 DOS 的 EXEC 命令行约定：调用方 `PSP:0080h..00FFh` 那 **128 字节
@@ -38,7 +38,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.2.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.2.zip)
+[**下载 `UEFI-DOS-1.1.3.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.2.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -490,9 +490,15 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
   `WIN.COM` 用 `0081h+count` 定位它要追加的覆盖文件名、且从不回写 count；差一个字节就
   把路径推后两字节，内核于是拼出一个 30 字符的模块名，而不是 13 字符的 `C:WIN100.BIN`。
 
-现在只差 16 字节：内核的模块数据库要 443 字节，而它自己的局部堆（`ne_heap` = 512 字节
-→ 可用 428）只有 428；真 MS-DOS 5.00 下同样的请求是 425 字节，因为内核用的是短的
-tail 名字。追踪、arena/堆转储对照和还开着的疑点都在
+第三个决定性的调用是 `INT 21h AH=47h`（取当前目录）：我们在路径前多加了一个反斜杠，
+且根目录返回 `AX=0000`，而真 MS-DOS 5 返回的是不带前导反斜杠的路径与 `AX=0100h`。
+Windows 把这个答案拼进 overlay 名字，于是名字多了分隔符、长了 8 字节，模块数据库的
+请求也跟着变大。修好格式、并把同一批文件平铺到根目录（真 DOS 参考跑就是这么摆的）后，
+内核跑到 129 次 DOS 调用并把启动 logo 画了出来。`INT 21h AH=57h`（取文件日期时间）之前也是
+个返回 0 的空壳；现在句柄携带目录项时间戳，SFT 也一并发布。剩下的分歧是：
+内核打开 `WIN100.OVL`、取了时间戳、然后不读就关掉并仍以 1 退出，因为它自己的局部堆
+（`ne_heap` = 512 字节 → 可用 428）比该布局下模块表要的 435 字节少了几个字节。追踪与
+arena/堆转储对照都在
 [`docs/windows1x.md`](docs/windows1x.md)。`TAILCHK.COM` 回归（`COUNT=00 C81=0D`）
 防止 tail 语义再漂回去。
 

@@ -53,6 +53,10 @@ Run-Check 'host shell: DIR/TYPE/VER/external COM/EXE/EXEC/VRAM/native API/upcall
     & $HostExe --shell (Join-Path $Build 't_shell.img') "DIR" "TYPE HELLO.TXT" "VER" "HELLO" "TELETYPE" "MZEXE" "RUNNER" "VRAM" "APITEST" "UPCALL" "DTATEST" "I2FTEST" "DPMITEST"
 } @('EFI', '<DIR>', 'Hello UEFI-DOS!', 'UEFI-DOS Version', 'Hello from 8086 code!', 'TELETYPE OK!', 'Hello from MZ EXE!', 'RUNNER DONE!', 'VIDEO-OK!', 'APITEST: size', 'API-OK', 'UEFI-DOS native API v1.01', 'UPCALL-OK','DTA-OK','INT2F-OK','DPMI-HOST-OK','PM16-OK','PM32-DOS-OK','RMREFLECT-OK','DOSMEM-OK','REFLECTED-21H-OK','TICKS-OK', 'SHELLDONE')
 
+Run-Check 'DOS: AH=47h cwd format (no drive, no leading backslash) and AH=57h timestamps' {
+    & $HostExe --shell (Join-Path $Build 't_shell.img') "CWDCHK"
+} @('CWDCHK-DONE', 'SUB    CF=0 AX=0100 [CWDTMP]', 'ROOT   CF=0 AX=0100 []', 'SUB-C:  CF=0 AX=0100 [CWDTMP]')
+
 Run-Check 'host shell: MD/COPY/TYPE/DEL/RD write path' {
     & $HostExe --shell (Join-Path $Build 't_shell.img') "MD T2" "COPY HELLO.TXT T2\A.TXT" "TYPE T2\A.TXT" "DEL T2\A.TXT" "RD T2"
 } @('1 file(s) copied', 'Hello UEFI-DOS!', 'SHELLDONE')

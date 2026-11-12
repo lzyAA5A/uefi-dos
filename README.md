@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.1.2** — 31 of 31 automated checks pass on the Windows host harness
+Version **1.1.3** — 32 of 32 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
 
 1.1.1 fixes the EXEC command-tail contract DOS has and UEFI-DOS did not:
@@ -42,7 +42,7 @@ still missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.1.2.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.2.zip)
+[**Download `UEFI-DOS-1.1.3.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.2.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -439,7 +439,7 @@ Long Name Report.txt         31 13:12  11-11-26
 
 ## Regression suite
 
-`run_tests.ps1` builds everything and runs 31 checks: FAT32 read/write selftest;
+`run_tests.ps1` builds everything and runs 32 checks: FAT32 read/write selftest;
 host shell DIR/TYPE/VER/COM/EXE/EXEC/video plus native-API and upcall demos;
 host shell write path; floppy-image `A:` mount; FAT12 write on a 2.11 image;
 FAT12 read of 2.11 and MS-DOS 5 images; two QEMU/OVMF boot smoke tests (x86_64
@@ -531,11 +531,18 @@ EXEC bugs stood between "nothing at all" and that picture, both fixed:
   off pushed the path two bytes too far and the kernel rebuilt a 30-character
   module name instead of the 13-character `C:WIN100.BIN`.
 
-What is left is 16 bytes: the kernel's module-database allocation asks for 443
-bytes and its own local heap (`ne_heap` = 512 bytes → 428 usable) has 428. Under
-real MS-DOS 5.00 the same request is 425 bytes because the kernel keeps the short
-tail name; `docs/windows1x.md` holds the trace, the arena/heap dump comparison
-and the open question. The `TAILCHK.COM` regression (`COUNT=00 C81=0D`) keeps the
+A third call decided how far the boot got: `INT 21h AH=47h` (get current
+directory) prepended a backslash and returned `AX=0000` where real MS-DOS 5
+writes the bare path and `AX=0100h`. Windows joins that answer into its overlay
+name, so the name grew by two separators and 8 bytes, and the module-database
+request grew with it. With the format fixed and the same files laid out in a
+flat root (what the real-DOS reference run does), the kernel issues 129 DOS calls
+and paints the splash. `INT 21h AH=57h` (get file date/time) was also a stub
+answering zeros; handles now carry the directory timestamp and the SFT publishes
+it. `docs/windows1x.md` holds the traces, the reference dumps and what is still
+open: the kernel opens `WIN100.OVL`, timestamps it, closes it without reading a
+byte and still exits 1, because its local heap (`ne_heap` = 512 bytes → 428
+usable) is a few bytes short of the 435 its module table wants in that layout. The `TAILCHK.COM` regression (`COUNT=00 C81=0D`) keeps the
 tail semantics from drifting back. **Windows 1.0 Developer Release 5** can be laid
 out on a UEFI-DOS image with `tools/install_win1x.py` (and started with
 `start_win1x.bat`), but its `KERNEL.EXE` destroys its own code and stack in its

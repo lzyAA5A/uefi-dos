@@ -728,6 +728,8 @@ int dos_open_ex(const char *path, int open_mode, int share, int *out)
     H->attr = d.raw[11];
     H->cluster = fat_entry_cluster(&d);
     H->size = fat_entry_size(&d);
+    H->time = (u16)(d.raw[22] | ((u16)d.raw[23] << 8));
+    H->date = (u16)(d.raw[24] | ((u16)d.raw[25] << 8));
     H->pos = 0;
     H->open_mode = (u8)open_mode;
     H->share_mode = (u8)share;
@@ -870,6 +872,8 @@ int dos_creat_ex(const char *path, int attr, int share, int open_mode, int *out)
     H->attr = (u8)(d.raw[11] ? d.raw[11] : 0x20);
     H->cluster = fat_entry_cluster(&d);
     H->size = fat_entry_size(&d);
+    H->time = (u16)(d.raw[22] | ((u16)d.raw[23] << 8));
+    H->date = (u16)(d.raw[24] | ((u16)d.raw[25] << 8));
     H->pos = 0;
     H->open_mode = (u8)open_mode;
     H->share_mode = (u8)share;

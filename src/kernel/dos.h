@@ -66,6 +66,11 @@ typedef struct dos_handle {
     u32 cluster;
     u32 size;
     u32 pos;
+    /* directory timestamp, so INT 21h AH=57h can hand it back (Windows 1.x
+     * asks for it right after opening its overlay and reads nothing when the
+     * answer looks stale) */
+    u16 time;
+    u16 date;
     /* DOS 4.0 SHARE support: what the opener granted, what it asked for, and
      * the byte ranges it locked (INT 21h AH=5Ch). */
     u16 psp;              /* owning PSP (compat mode is per-PSP) */

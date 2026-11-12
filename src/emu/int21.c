@@ -381,8 +381,8 @@ static void sft_entry_write(Emu *e, int h, u16 off, u32 next)
     else if (used) info = (u16)(H->drive + 1);      /* disk file: drive number */
     mag_ww(e, (u16)(off + 0x09), info);
     mag_ww(e, (u16)(off + 0x0B), used && !H->console ? (u16)H->cluster : 0);
-    mag_ww(e, (u16)(off + 0x0D), 0);                /* time stamp */
-    mag_ww(e, (u16)(off + 0x0F), 0);                /* date stamp */
+    mag_ww(e, (u16)(off + 0x0D), used ? H->time : 0);   /* time stamp */
+    mag_ww(e, (u16)(off + 0x0F), used ? H->date : 0);   /* date stamp */
     mag_wd(e, (u16)(off + 0x11), used ? H->pos : 0);
     for (int i = 0; i < 11; i++)
         mag_wb(e, (u16)(off + 0x2E + i), used && !H->console ? H->name11[i] : 0);
@@ -1001,23 +1001,36 @@ void int21_handler(Emu *e)
         return;
     }
     case 0x47: {
-        /* AH=47h: current directory WITHOUT the drive letter, with a leading
-         * backslash, and an empty string in the root.  Programs concatenate
-         * "X:" in front of it, so handing back "C:\SIMEARTH" made SimEarth ask
-         * for "C:\C:\SIMEARTH\GR.OVL" and then give up on its overlays. */
-        int d = dos_current_drive();
-        const char *cwd = (d >= 0 && d < DOS_MAX_DRIVES) ? g_dos.drives[d].cwd : "";
-        int n = 0;
-        if (cwd[0]) {
-            emu_wb(e, e->ds, (u16)(e->si + n), (u8)'\\');
-            n++;
-            while (cwd[n - 1] && n < DOS_MAX_PATH - 1) {
-                emu_wb(e, e->ds, (u16)(e->si + n), (u8)cwd[n - 1]);
-                n++;
+        /* AH=47h: get the current directory.  RBIL 2147: the returned path
+         * "does not include a drive or the initial backslash", the root is the
+         * empty string, and AX is 0100h on success (many Microsoft products
+         * test that).  DL selects the drive (0 = current); an unmounted drive
+         * is error 0Fh.
+         *
+         * The leading backslash we used to add cost real compatibility:
+         * Windows 1.x builds its module name by writing "C:" + '\', then
+         * letting DOS drop the cwd straight into that buffer, so "\WINDOWS"
+         * became "C:\\WINDOWS\WIN100.OVL" -- a 30-byte name instead of 12,
+         * which then did not fit in the kernel's 428-byte local heap. */
+        int dl = (int)(e->dx & 0xFF);
+        int d;
+        if (dl == 0) {
+            d = dos_current_drive();
+        } else {
+            d = dl - 1;
+            if (d < 0 || d >= DOS_MAX_DRIVES || !g_dos.drives[d].mounted) {
+                set_err(e, 0x0F);                /* invalid drive */
+                return;
             }
         }
+        const char *cwd = (d >= 0 && d < DOS_MAX_DRIVES) ? g_dos.drives[d].cwd : "";
+        int n = 0;
+        while (cwd[n] && n < DOS_MAX_PATH - 1) {
+            emu_wb(e, e->ds, (u16)(e->si + n), (u8)cwd[n]);
+            n++;
+        }
         emu_wb(e, e->ds, (u16)(e->si + n), 0);
-        e->ax = (u16)(cwd[0] ? 0x0100 : 0x0000);   /* bit 8: not the root */
+        e->ax = 0x0100;
         set_ok(e);
         return;
     }
@@ -1170,11 +1183,33 @@ void int21_handler(Emu *e)
         set_ok(e);
         return;
     }
-    case 0x57:
+    case 0x57: {
+        /* AH=57h: get (AL=0) or set (AL=1) the date and time of an open file.
+         * This used to answer zeros for everything.  That is not a harmless
+         * stub: Windows 1.x opens its overlay, asks for the timestamp and asks
+         * for nothing else -- then closes it without reading a single byte and
+         * shuts down when the answer says the overlay is stale. */
+        int h = e->bx;
+        if (h < 0 || h >= g_dos.files_limit) { set_err(e, 6); return; }
+        dos_handle *H = &g_dos.handles[h];
+        int used = (h < 5) || H->used;
+        if (!used) { set_err(e, 6); return; }
+        if (H->console) {                        /* CON/PRN: no timestamp */
+            e->cx = 0;
+            e->dx = 0;
+            set_ok(e);
+            return;
+        }
+        if ((e->ax & 0xFF) == 0) {
+            e->cx = H->time;
+            e->dx = H->date;
+        } else {
+            H->time = e->cx;
+            H->date = e->dx;
+        }
         set_ok(e);
-        e->cx = 0;
-        e->dx = 0;
         return;
+    }
     case 0x58:
         e->ax = 0;                               /* allocation strategy: first fit, low */
         set_ok(e);

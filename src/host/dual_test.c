@@ -147,17 +147,40 @@ static void test_cwd_call(void)
         buf[n++] = (char)ch;
     }
     buf[n] = 0;
-    if (buf[0] == '\\' && buf[1] != ':' && strchr(buf, ':') == NULL)
-        ok("AH=47h returns \\SIMT (no drive letter)");
-    else bad("AH=47h path text", (int)(unsigned char)buf[0], (int)'\\');
+    /* RBIL 2147: no drive letter and no initial backslash, so "SIMT" */
+    if (strcmp(buf, "SIMT") == 0)
+        ok("AH=47h returns SIMT (no drive, no leading backslash)");
+    else bad("AH=47h path text", (int)(unsigned char)buf[0], (int)'S');
     if (cf == 0) ok("AH=47h clears CF");
     else bad("AH=47h CF", cf, 0);
+    if (g_e.ax == 0x0100) ok("AH=47h returns AX=0100h on success");
+    else bad("AH=47h AX", g_e.ax, 0x0100);
 
     /* back to the root: DOS returns an empty string there */
     i21(0x3B, 0x0000, 0, 0, putstr("C:\\"), 0, 0, 0, &cf);
     i21(0x47, 0x4700, 0, 0, 0, si, 0, SCR_SEG, &cf);
     if (emu_rb(&g_e, SCR_SEG, si) == 0) ok("AH=47h returns an empty string in the root");
     else bad("AH=47h root string", emu_rb(&g_e, SCR_SEG, si), 0);
+    if (g_e.ax == 0x0100) ok("AH=47h returns AX=0100h in the root too");
+    else bad("AH=47h root AX", g_e.ax, 0x0100);
+
+    /* AH=57h has to hand back the timestamp the directory entry carries */
+    {
+        int cf2 = 0, h = 0;
+        i21(0x3C, 0x3C00, 0, 0x20, putstr("STAMP.T"), 0, 0, 0, &cf2);  /* create */
+        h = (int)g_e.ax;
+        if (!cf2 && h >= 5) {
+            i21(0x57, 0x5701, (u16)h, 0x1234, 0x0A21, 0, 0, 0, &cf2); /* set */
+            i21(0x57, 0x5700, (u16)h, 0, 0, 0, 0, 0, &cf2);            /* get */
+            if (!cf2 && g_e.cx == 0x1234 && g_e.dx == 0x0A21)
+                ok("AH=57h round-trips a file timestamp through the handle");
+            else bad("AH=57h timestamp", (int)((g_e.dx << 16) | g_e.cx), 0x0A211234);
+            i21(0x3E, 0x3E00, (u16)h, 0, 0, 0, 0, 0, &cf2);            /* close */
+            i21(0x41, 0x4100, 0, 0, putstr("STAMP.T"), 0, 0, 0, &cf2); /* delete */
+        } else {
+            bad("AH=57h could not create the probe file", cf2, 0);
+        }
+    }
 
     i21(0x3A, 0x3A00, 0, 0, putstr("C:\\SIMT"), 0, 0, 0, &cf);   /* rmdir */
     section_done("current directory call");

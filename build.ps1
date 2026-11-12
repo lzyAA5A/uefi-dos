@@ -115,6 +115,7 @@ try {
     @{ script = 'tools/make_keytest.py';  what = 'keyboard scan-code probe' }
     @{ script = 'tools/make_tailtest.py'; what = 'command-tail (PSP:0080h) probe' }
         @{ script = 'tools/make_gfx_test.py'; what = 'graphics mode probes (mode 13h + VESA)' }
+    @{ script = 'tools/make_cwd_test.py'; what = 'INT 21h AH=47h / AH=57h probe' }
         @{ script = 'tools/make_video_test.py'; what = 'CGA mode 4 and INT 33h mouse probes' }
         @{ script = 'tools/make_dos4_test.py'; what = 'DOS 4.0 conformance probe' }
         )
@@ -145,7 +146,7 @@ try {
                       'UPCALL.COM','DTATEST.COM','I2FTEST.COM','DPMITEST.COM','FCBTEST.COM',
                       'INFO.COM','CLOCK.COM','HEX.COM','SUM.COM','CAL.COM','KEYTEST.COM','TAILCHK.COM',
                             'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM',
-                            'CGATEST.COM','MOUSETST.COM')
+                            'CGATEST.COM','MOUSETST.COM','CWDCHK.COM')
         # the native SDK examples are PE images, not DOS programs: optional
         $nativePrograms = @()
         foreach ($p in @('HELLO64.EXE','HELLO32.EXE','FILET64.EXE','FILET32.EXE')) {

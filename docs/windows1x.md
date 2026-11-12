@@ -779,3 +779,76 @@ calls now fix it — `gfx_clear()` wipes the whole linear framebuffer (called fr
 both `plat_video_gfx_begin()` and `plat_video_text()`), and `plat_video_text()`
 also blanks the 25x80 console grid, since the text mirror only sends rows that
 are not blank and the firmware would otherwise keep (and redraw) stale cells.
+
+## The two INT 21h calls Windows 1.x uses to size its module database (1.1.2 .. 1.1.3)
+
+The kernel now gets all the way past module instantiation in a *flat* install
+layout, and the two bugs that got it there were both in calls whose answers we
+had invented rather than measured.
+
+### AH=47h "get current directory" was formatted wrong
+
+The old handler prepended a backslash (`\WINDOWS`) and returned `AX=0000` for
+the root.  RBIL 2147 says the path "does not include a drive or the initial
+backslash", and a reference run of real MS-DOS 5.00 (`ref_cwd2.png`) confirms
+`AX=0100h` on success — including in the root, where the string is empty.
+
+Why it mattered: `WIN100.BIN` builds its overlay name at `CS:1D2Bh` by writing
+`C:`, then `\`, then letting DOS drop the cwd straight into the same buffer
+(`AH=47h` with `DS:SI` pointing just past the backslash).  With the leading
+backslash we added, the name became `C:\\WINDOWS\WIN100.OVL` — 30 bytes with a
+duplicated separator instead of the correct 20.
+
+The name length then feeds the module-database `GlobalAlloc` request at
+`CS:2123h`: `DI = 0x19D + lenbyte + 1`, where `lenbyte` is `strlen(path) + 8`
+computed by the `repnz scas` at `CS:1C04h`.  The kernel's own local heap comes
+from `[instance+0x10]` — the NE `ne_heap` field, 0x200 — which yields 428 usable
+bytes.  A 30-byte name asked for 0x1BC (444) and failed, so `CS:212Bh` returned
+0, `CS:216Bh` turned that into segment `0001h`, and the kernel wrote its module
+header into the IVT and quit (`CS:675Ch` → `exit(1)`).
+
+The fix (`src/emu/int21.c`, `case 0x47`) honours DL, writes
+`g_dos.drives[d].cwd` with no leading backslash, NUL-terminates, and sets
+`AX=0100h`.  Measured with the new `CWDCHK.COM` probe against real MS-DOS 5.00
+and UEFI-DOS:
+
+```
+cd CF=0 rc=3B00
+SUB    CF=0 AX=0100 [CWDTMP]      <- real DOS and UEFI-DOS agree
+cd CF=0 rc=3B00
+ROOT   CF=0 AX=0100 []
+cd CF=0 rc=3B00
+SUB-C:  CF=0 AX=0100 [CWDTMP]
+```
+
+### AH=57h "get file date and time" was a stub returning zeros
+
+Windows opens `C:\WIN100.OVL`, calls `AH=57h` once, closes it again **without
+reading a byte** (`docs`/serial traces show `AH=3D`, `AH=57`, `AH=3E` and no
+`AH=3F` at all).  A zero timestamp is not a harmless placeholder for that
+sequence — it is the value the staleness check compares against.
+
+`dos_handle` now carries `u16 time, date` filled from the directory entry
+(`raw[22..25]`) at both handle-creation sites in `src/kernel/dos.c`, `AH=57h`
+returns them (and stores on `AL=1`), and `sft_entry_write()` publishes them at
+`+0Dh`/`+0Fh` instead of zeros.  `src/host/dual_test.c` round-trips the values
+through a real file (`[4.1b]`, part of `hosttest.exe --phase46`).
+
+### What the two fixes changed, measured
+
+| layout | module-name request | DOS calls before it quit |
+| --- | --- | --- |
+| `C:\WINDOWS\WIN` (installed tree) | `DI=0x1BB` (443 B) → fails | 53 |
+| `C:\WINDOWS\WIN` after AH=47h | `DI=0x1BB` (443 B) → fails | 53 |
+| flat root (`WIN` with everything in `C:\`) | `DI=0x1B3` (435 B) | 129, reaches graphics |
+
+The flat layout mirrors what the real-DOS reference run does (its `C:` is a
+flat copy of the media, so its cwd is empty and the joined name is short).  In
+that layout UEFI-DOS now issues 129 DOS calls, sets a CGA mode and draws the
+splash (`build/w101flat.png`, 640x200) before it still exits with code 1 right
+after opening and timestamping `WIN100.OVL`.
+
+Remaining divergence, in one line: the overlay is opened but never read, so the
+kernel still bails between `AH=57h` and the module load; the heap it computes
+(`[instance+0x10]` = `ne_heap` 0x200 → 428 usable) is also still smaller than
+the 435 bytes it asks for in that layout.
