@@ -468,6 +468,44 @@ the child flush against the top of memory - `psp=0x744B`, `CS=0x7494`, `DS(insta
 `SS=0x7BDA` - which is what the reference machine looks like (`CS=0x74B9`), and the module
 database allocation still returns `AX=1` there. So the load address is *not* the lever either.
 
+### The heap term is identical on the real machine - so the difference is elsewhere
+
+Reading the reference dump directly settles the question this round was chasing. With the
+kernel running from its copy at image base `0x7480` (so `cs = 0x74B9`), the kernel's own cells
+in `build/refm_c1_*.bin` hold:
+
+```
+cs:6498 (instance) = 0x74A0        == 0x7480 + 0x20, exactly the value our emulator computes
+cs:6496            = 0x0000
+cs:649A            = 0x0040
+cs:64B2            = 0x0746
+[instance+0x10]    = 0x0200        == the file's ne_heap field, unpatched
+NE@load+0x200      = 'NE' 0x0004
+```
+
+and the file itself also says `0x0200`. So on the working reference machine:
+
+* `instance = load + 0x20` - **the same** as ours (`0x0D30` with `load = 0x0D10`, `0x747B`/`0x749B`
+  with the high placement),
+* `[instance+0x10]` - **the same** `0x0200` heap term, which the builder turns into the same
+  428-byte block (`'M' owner=0000 size=001B` at `load+2`).
+
+The whole "the reference machine must be getting a bigger heap term" line is therefore dead:
+the reference machine builds the same tiny heap we do, and the module-database request
+(`0x19D + lenbyte + 1` = 435 bytes = 29 paragraphs) cannot fit it either. What differs is what
+happens *next*: the 25 KB heap and the 29-paragraph database block that the reference arena
+shows at `0x0FEA` / `0x0FCC` four seconds into the boot must be the product of a **second**
+build - the `CS:66F8..0x6705` block that writes available memory into `[instance+0x10]` and
+`[instance+0x0E]` - i.e. the reference kernel *recovers* from the failed allocation and rebuilds
+its arena bigger, while ours falls into the `ES = 0001h` path and exits.
+
+That reframes the remaining work: not "give the kernel a bigger heap up front" (that is what
+the patched-image experiment did, and it crashes the real kernel with `FatalExit 8 / stack
+overflow`), but "find what makes the reference kernel take the recovery path after the first
+allocation fails". The 0x2085 failure branch at `0x2165..0x216B` and the loop at `0x6632` are
+where to look, and the marker instrumentation for it must avoid relocating relative branches
+(see the previous section).
+
 ## Windows 1.01: what the kernel asks DOS for
 
 `WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
