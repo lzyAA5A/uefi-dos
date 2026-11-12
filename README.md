@@ -663,6 +663,12 @@ three more bugs:
   for. Programs that save and restore vectors never noticed; programs that
   *install* handlers — Windows 1.x does it with `INT 22h`, then reads the vector
   back — died with `Incorrect DOS version`, which is where 1.01 had been stuck.
+- **`AH=36h` reported zero free space on every drive.** It counted a cluster as
+  free when its FAT link read `0FFFFFFFDh`, which never happens (a free cluster
+  links to 0), stopped scanning after 30 000 clusters and hard-coded 512 bytes
+  per sector, so `BX` always came back 0. Installers check that figure before
+  every write — Windows 1.01's `SETUP` among them — and a zero reads as "disk
+  full". It now returns the volume's own free-cluster count.
 - **`AH=50h` (set current PSP) was a no-op.** It fell through to the "unknown
   call, report success" default, so `g_dos.psp_seg` stayed 0 and every internal
   structure that names the current PSP disagreed with the program.
