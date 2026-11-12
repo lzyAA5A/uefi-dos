@@ -440,6 +440,34 @@ the next thing to run: with it we either learn that the reference heap term real
 `0x0200` - in which case the divergence is the *request* size, not the heap - or we get the
 larger number the 25 KB reference heap implies.
 
+### A trap worth writing down: relocating a relative `call` breaks it
+
+The second marker run gave per-site counters in the BIOS inter-application area
+(`0x04F0..0x04F7`, one byte per site). It reported
+
+```
+64E5 entry=1   658B heap-prep=0   65AC call73AB=1   6642 instantiate=0
+66FC patch=0   670F gate=0        73AB builder=0    65AF after-builder=0
+```
+
+which is impossible - `0x65AC` is `call 0x73AB`, so reaching it must reach the callee's first
+instruction and then the return point. The reason is a bug in the instrumentation, not in the
+kernel: the stub **replays the relocated instruction**, and a relative `call`/`jmp` replayed
+from a different address jumps somewhere else. `E8 FC 0D` executed at `CS:0x7454` instead of
+`CS:0x65AC` calls `0x8253`, not `0x73AB` - so the callee and everything after it never ran.
+
+Rule for the next round: any instrumented site whose first instruction is a relative branch
+must be replayed by *emulating* it (push the original return address and jump to the absolute
+target), or the site must be moved to a point whose first instruction is absolute (a `mov`,
+`les`, `push`). All the sites that only test "did we get here" should point at non-branch
+instructions.
+
+The two other facts from that run are still valid and useful: the kernel reaches
+`CS:0x64E5` exactly once, and the placement experiment (`UEFIDOS_EXEC_HIGH=1`) now really puts
+the child flush against the top of memory - `psp=0x744B`, `CS=0x7494`, `DS(instance)=0x747B`,
+`SS=0x7BDA` - which is what the reference machine looks like (`CS=0x74B9`), and the module
+database allocation still returns `AX=1` there. So the load address is *not* the lever either.
+
 ## Windows 1.01: what the kernel asks DOS for
 
 `WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
