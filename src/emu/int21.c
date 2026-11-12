@@ -275,6 +275,33 @@ static int arena_resize(Emu *e, u16 ds, u16 want, u16 *out_max)
     return 0;
 }
 
+#ifdef UEFIDOS_HOST
+/* Host-only: dump the DOS memory arena.  The classic 1980s idiom is
+ * "shrink my own block (AH=4Ah), then ask for the largest free block
+ * (AH=48h with BX=FFFFh)", so when a program's memory sizing goes wrong the
+ * first thing to look at is the MCB chain itself. */
+static void arena_dump(Emu *e, const char *why)
+{
+    if (!getenv("UEFIDOS_TRACE_MEM")) return;
+    u16 seg = g_dos.mem_base;
+    fprintf(stderr, "[mem] %s base=%04X psp=%04X\n", why,
+            (unsigned)g_dos.mem_base, (unsigned)g_dos.psp_seg);
+    for (int guard = 0; guard < 64 && seg; guard++) {
+        u8 tag = emu_rb(e, seg, 0);
+        u16 owner = emu_rw(e, seg, 1);
+        u16 size = emu_rw(e, seg, 3);
+        fprintf(stderr, "      %04X: tag=%02X(%c) owner=%04X size=%04X data=%04X..%04X\n",
+                (unsigned)seg, (unsigned)tag, (tag >= 0x20 && tag < 0x7F) ? tag : '.',
+                (unsigned)owner, (unsigned)size, (unsigned)(seg + 1),
+                (unsigned)(seg + size));
+        if (tag == (u8)MCB_LAST) break;
+        u16 nx = (u16)(seg + 1 + size);
+        if (nx <= seg) break;
+        seg = nx;
+    }
+}
+#endif
+
 static u16 dpb_write(Emu *e, int slot, int drive, u16 next)
 {
     fat_vol *v = &g_dos.drives[drive].vol;
@@ -1039,6 +1066,7 @@ void int21_handler(Emu *e)
         if (!arena_alloc(e, e->bx, &ds, &max_free)) {
             e->bx = max_free;
 #ifdef UEFIDOS_HOST
+            arena_dump(e, "AH=48h failed");
             if (getenv("UEFIDOS_TRACE_EXEC"))
                 fprintf(stderr, "[mem] 48h need=%04X fail max=%04X psp=%04X\n",
                         (unsigned)e->bx, (unsigned)max_free, (unsigned)g_dos.psp_seg);
@@ -1061,6 +1089,9 @@ void int21_handler(Emu *e)
             set_err(e, 8);
             return;
         }
+#ifdef UEFIDOS_HOST
+        arena_dump(e, "after AH=4Ah");
+#endif
         set_ok(e);
         return;
     }

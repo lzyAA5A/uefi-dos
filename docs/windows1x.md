@@ -821,6 +821,73 @@ the measurement the next round starts from, and it is the last structural unknow
 (strip = 27 paragraphs, `GlobalAlloc` fails, `AH=4C AL=1`) and the reference run (strip spanning the
 whole lower memory, `GlobalAlloc` returns `0x0FCD`).
 
+## WIN.COM's own memory sizing, decoded (and the contradiction it exposes)
+
+`WIN.COM` (4,867 bytes) was disassembled end to end, because the remaining hope was that it
+places the kernel high on the reference machine (which would explain why the reference kernel
+runs at the top of memory with a low PSP). It does not.
+
+The wrapper's whole decision table, with `cs:0x103` = the word at file offset 0x103 = `0x3500`:
+
+```
+2c1  start: call 0x74a ; call 0x6e3        ; memory sizing, then ...
+6e3  add $0x89f,%ax ; shr $4,%ax ; bx=ax   ; needed = (size+0x89F)>>4 paragraphs
+6ec  push ss / pop es
+6ee  mov ah,4Ah / int 21h                  ; shrink itself to that size
+6f2  bx=0FFFFh ; mov ah,48h / int 21h      ; largest free block (returns error 8 + BX)
+6f9  cmp %cs:0x103,%bx                     ; >= 0x3500 paragraphs (~216 KB)?
+6fe  jae 0x709                             ; yes -> continue
+700  call 0x745 ; call 0x3de ; jmp 0x3bf   ; no  -> plain EXEC, then exit
+709  cmpw $0x2120,%cs:0x81                 ; command tail starts with " !" ?
+710  jne 0x744                             ; no  -> just `ret` (no allocation at all)
+712  ...                                   ; yes -> the scratch-exchange path:
+740  mov ah,48h / int 21h                  ;     allocate the remainder
+2d7  call 0x6a6                            ; build "C:\WIN100.BIN" at cs:0x206
+2e5  call 0x41a                            ; build the PSP tail: 'XW' at 0xFE, count, path
+2ea  call 0x745                            ; EXEC it (AX=4B00h at 0x58f)
+31a  movb $1,0x269                         ; second-pass flag
+     cmpb $0,0x281 / jne 0x329             ; scratch path taken?
+     jmp 0x3bf                             ; else: delete \xchg.$$$, AH=4Dh, exit
+```
+
+So for a plain `win` — which is what both machines run — `WIN.COM` measures memory, passes
+the 0x3500 test, finds the tail does **not** start with `' !'`, and falls straight through to
+`mov $0x4B00,%ax / int 21h` with the interposed tail `00 0D 0D "C:WIN100.BIN"` and `'XW'` at
+`PSP:0FEh`. Nothing in that path allocates a high block, copies the image, or touches the load
+segment. The high/scratch machinery is gated behind the `' !'` invocation, which ordinary
+`win` does not produce.
+
+Measured on our side with the new `UEFIDOS_TRACE_MEM=1` knob (which dumps the MCB chain), the
+sizing sequence is DOS-identical: after `AH=4Ah` the arena reads
+
+```
+0CFF: M owner=0D00 size=008B   data 0D00..0D8A   <- WIN.COM's own shrunken block (PSP 0D00)
+0D8B: Z owner=0000 size=9233   data 0D8C..9FBE   <- one free block to the end of the arena
+```
+
+`0x9233` paragraphs >= `0x3500`, so `jae` is taken exactly as on real DOS, the `' !'` test fails
+exactly as on real DOS, and the child is EXECed with `PSP = 0D8Ch`, `load = 0D9Ch`,
+`instance = 0DBCh` — the low geometry the whole analysis has been about.
+
+**The contradiction, stated exactly.** Two reference measurements cannot both be true of the
+first instance:
+
+* the kernel's builder receives `load = PSP+0x10 = 0x0FCA` (probe 10), i.e. a **low** PSP
+  (`0x0FBA`, the same PSP that owns the big `Z` block in the reference MCB walk), and
+* the kernel's NE entry and its arena builder both execute at `CS = 0x74B9`
+  (probe 11), i.e. the image sits at `0x7480`, flush against the top of memory.
+
+A single DOS `EXEC` cannot produce both: the child would execute at `load+0x39 = 0x1003`.
+The only ways to reconcile them are that the kernel **relocates itself and re-enters its own
+NE entry point** (`CS:64E5`) after some earlier stage, or that the probes caught a *second*
+instance at the top while the first one was the low one that fails. Both remain unproven; the
+first would have to happen before `CS:212Bh` for the arena to come out right, and every path
+between `CS:64E5h` and `CS:212Bh` has now been decoded and contains no copy and no `AH=48h`.
+
+That is the single open question left, and it is now narrow enough to attack directly: find
+the code that re-enters `CS:64E5h` (or the DOS call sequence that produces a high `PSP+0x10`
+while the image is high), and everything else in the startup is already accounted for.
+
 ### Negative result: a big strip alone is not enough
 
 To test whether the reference geometry is the whole story, the arena builder was nudged so that the

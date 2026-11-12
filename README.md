@@ -489,6 +489,7 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_DUMP_AT=CS:IP` (+ `UEFIDOS_DUMP_AT_FILE=file`) | snapshot the low 640 KB the first time execution reaches that address (default `build/mem_at.bin`) — captures a program's arena at the exact instruction where its allocator gives up |
 | `UEFIDOS_TRACE_INTS=1`, `UEFIDOS_TRACE_VRAM=n`, `UEFIDOS_TRACE_STEPS=n`, `UEFIDOS_TRACE_WINDOW=CS:LO-HI`, `UEFIDOS_TRACE_PORTS=1` | interrupt, video-write, single-step, address-window and port-I/O traces under `build/` |
 | `UEFIDOS_TRACE_PSP=1`, `UEFIDOS_TRACE_EXEC=1` | print every new PSP's command tail (and the bytes after it) and every `INT 21h AH=4Bh` (path, environment segment, command-line far pointer, caller PSP/DS) plus failing `AH=48h` requests |
+| `UEFIDOS_TRACE_MEM=1` | dump the DOS memory arena (MCB chain: segment, `M`/`Z`, owner PSP, size, data range) after `INT 21h AH=4Ah` and whenever `AH=48h` fails — the fastest way to see whether a program's shrink-then-probe memory sizing came out right |
 | `UEFIDOS_EXEC_HIGH=1` | place an `EXEC`'d child flush against the top of memory instead of right after its caller (for probing programs that are picky about where DOS put them) |
 
 The last 64 steps are dumped to `build/limit_dump.txt` when a program hits the
