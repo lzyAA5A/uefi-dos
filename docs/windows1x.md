@@ -497,7 +497,7 @@ Facts established from the real dump (all reproducible):
 | item | real MS-DOS 5.00 | UEFI-DOS |
 | --- | --- | --- |
 | `WIN100.BIN` load segment | `0FB2h` (CS base linear `0FEB0h`) | `0D10h` |
-| PSP top-of-memory (`PSP+2`) | `9FC0h` (DOS 5 keeps 64 paragraphs) | `A000h` |
+| PSP top-of-memory (`PSP+2`) | `9FC0h` (DOS 5 keeps 64 paragraphs) | `9FC0h` (since `DOS_MEM_TOP`) |
 | first `mov ss` in the stub | `SS=load_seg, SP=0200h` | same |
 | kernel's arena MCB signature | not at `load_seg:0` | `'M'` at `0D10h:0` |
 | kernel's own "Z" block | not at `9FFEh` | `'Z'` at `9FFEh` |
@@ -546,3 +546,106 @@ Next step: make the reported top-of-memory `9FC0h` and, if that alone does not
 move the instance, trace the `CS` window `0x0000..0x64E5` with
 `UEFIDOS_TRACE_WINDOW=0D49:0000-64E5` (a large but bounded trace) to find the
 branch that decides whether to relocate.
+
+## Startup path comparison and three targeted probes
+
+Top-of-memory was the first suspect and is now matched (`PSP+2 = 9FC0h` in both
+runs).  It changed nothing, so this round went after the exact divergence with
+better references:
+
+### The entry stub is identical on both DOSes
+
+Disassembling `WIN100.BIN` at file `0x200..0x590` (that is `load_seg:0`, while
+the `CS` code segment starts `0x390` bytes later at `load_seg+39h`) gives:
+
+```
+0000: push cs / pop ds                 ; DS = CS = load_seg
+0002: mov si,0x130 / add si,0x1ff / and si,0xfe00    ; si = 0200h
+000D: cmp word [si],0x454e             ; 'NE' at image+200h
+0013: mov ax,ds / cli / mov ss,ax / mov sp,si / sti  ; SS = load_seg, SP = 0200h
+```
+
+So `SS:SP = load_seg:0200h` on **both** systems, and the instance formula
+`CS:6506h: mov ax,ss / add ax,sp>>4` therefore yields `load+20h` on both — which
+means the real run cannot have been at `CS:6506h` with the stub's stack either.
+It got there after switching stacks, which is exactly the step we skip.
+
+### Real run reaches `CS:670Fh` first; ours jumps straight to `CS:64E5h`
+
+`-d exec -dfilter` (see below) over the real run shows the order
+`670Fh → 6713h → 6745h → 64B4h → 64BBh (lcall *CS:006Eh) → 64C6h → 64CAh`.
+`CS:670Fh` is the routine that
+
+* saves the current `SS` into `CS:0018h` and `CS:0016h`,
+* installs `INT 3Fh` (`CS:1369h`, old vector saved in `CS:0086h/0088h`),
+* and then gates on the instance: `CS:673Dh: mov es,CS:[6498h] ; cmp word es:000Ah,0`
+  — **non-zero exits with `mov ax,4C01h / int 21h`**, zero continues through
+  `CS:6745h: mov ax,64B4h / push ax / jmp 69E8h`.
+
+UEFI-DOS never executes `670Fh` at all: a window trace on `6730h-6765h` shows
+only the *other* exit (`CS:675Ch: mov al,1 / push / call 38DDh`, i.e. the MS C
+runtime `exit(1)`), reached from `CS:6681h`.  Our kernel reaches the
+`CS:64E5h` block directly through a `ret` from `CS:63ADh`, i.e. before the
+relocation/stack switch that the real run performs first.
+
+### Probe 1 — enlarge `ne_heap` (scratch image, not shipped)
+
+`WIN100.BIN` file `0x410` is the `NE` header's heap field (`0200h`).  Raising it
+to `4000h` moved the run from 53 to **77** `INT 21h` calls and let it get past
+the first allocation in some paths, but it still ended in `AH=4Ch AL=1`.
+
+### Probe 2 — make the instance read the `NE` signature (the decisive one)
+
+If the stack segment is one paragraph below the image, `SS + (SP>>4)` computes
+`load+1Fh`, so `[instance+10h]` lands exactly on the `NE` signature
+(`454Eh` = 17742) instead of `ne_heap`.  Done by patching the stub's `cli`
+(file `0x215`) into `dec ax`:
+
+```
+instance  = 0D2Fh  (was 0D30h)
+heap word = 454Eh  -> 17712 bytes
+heap area = 9B6Bh .. 9FBE0h  (0x9FC0h - 0x9B6Bh = 455h paragraphs, verified in a
+           memory dump: the initialiser at CS:53B6h writes 1143 free-list slots)
+```
+
+Result: **the first `GlobalAlloc(0x1BCh)` still returns 0** (`CS:212Eh: or ax,ax /
+je 2165h`), and the run still ends with `AH=4Ch AL=1`.  So the heap *size* is not
+the blocker: the kernel is handed 17 KB of free heap and its own allocator
+(`CS:212Bh -> 98Ah -> 61EEh -> 54FAh -> 5389h` search) still finds nothing.
+
+The three DOS-version branches were also tried through `SETVER` (major 2 ->
+`CS:7677h`, major 3 minor<10 -> `CS:76B3h`, 3.1+ -> `AH=5D06h` SDA): all three
+end in `AH=4Ch AL=1` (79 / 79 / 77 INT calls respectively).
+
+### Host knob added: `UEFIDOS_EXEC_HIGH=1`
+
+Places an `EXEC`'d child flush against the top of memory
+(`psp = DOS_MEM_TOP - image_paras - 0x20`, the layout the real kernel ends up
+running in).  Behaviour was bit-for-bit unchanged (77 INT calls, same exit), so
+the kernel does not depend on where DOS put it — it does its own placement.
+
+### Tooling notes from this round
+
+* QEMU's gdb stub is usable in principle (`-gdb tcp::1234`, standard RSP), but a
+  hand-written client that interrupts the target leaves the vCPU frozen while
+  the "continue" packet is outstanding, and the run then looks like "Windows
+  never started".  Treat `-d exec -dfilter` + `pmemsave` as the reliable path.
+* `-d exec -dfilter 0x16300+0x300` prints translated-block starts with
+  `[cs_base/linear_rip]`, which is enough to prove *whether* a kernel offset was
+  executed; it cannot tell which program owns a linear address during boot, so
+  never read early entries as "the kernel did this".
+* `-d int` only logs hardware interrupts (no `INT 21h`), so it cannot replace the
+  UEFI-DOS `UEFIDOS_TRACE_INTS` trace.
+
+### Where the next attempt should look
+
+The failure is inside the kernel's own heap after a successful arena build:
+trace `CS:5389h` (the free-list search) on the Probe-2 image and compare the
+list head it reads against what `CS:72D1h`/`CS:73ABh` wrote, plus the heap
+anchor cell `CS:0002h`.  The arena the kernel hand-writes in our run is
+`'M' owner=FFFFh size=0100h` at `0D10h:0`, another `'M'` at `0D12h:0` and
+`'Z' owner=FFFFh size=0001h` at `9FBEh:0` — note that `9FBEh` is *not*
+`9FFEh`, so the kernel's own `'Z'` block ends 32 paragraphs below the reported
+top of memory, which is one structural difference from the real run worth
+checking against the search's block walk.
+

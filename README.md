@@ -482,6 +482,7 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_DUMP_MEM=file` | write the low 640 KB as the program ends (compare with a QEMU `pmemsave` of the same program under real DOS) |
 | `UEFIDOS_TRACE_INTS=1`, `UEFIDOS_TRACE_VRAM=n`, `UEFIDOS_TRACE_STEPS=n`, `UEFIDOS_TRACE_WINDOW=CS:LO-HI`, `UEFIDOS_TRACE_PORTS=1` | interrupt, video-write, single-step, address-window and port-I/O traces under `build/` |
 | `UEFIDOS_TRACE_PSP=1`, `UEFIDOS_TRACE_EXEC=1` | print every new PSP's command tail (and the bytes after it) and every `INT 21h AH=4Bh` (path, environment segment, command-line far pointer, caller PSP/DS) plus failing `AH=48h` requests |
+| `UEFIDOS_EXEC_HIGH=1` | place an `EXEC`'d child flush against the top of memory instead of right after its caller (for probing programs that are picky about where DOS put them) |
 
 The last 64 steps are dumped to `build/limit_dump.txt` when a program hits the
 instruction limit.
@@ -514,7 +515,12 @@ chain, swappable data area, InDOS flag, PSP and job file table — before it exi
 with code 1 without loading a driver, so the desktop is still not drawn;
 `docs/windows1x.md` records the disassembled validation chain, the DOS surface
 it needs and the open question (an instance/handle walk at `CS:0E71h`), plus
-`INT 15h`/XMS and the installable display-driver loader as remaining work. **Windows 1.0 Developer Release 5** can be laid
+`INT 15h`/XMS and the installable display-driver loader as remaining work. The
+current status in one line: the kernel builds its own arena and a 17 KB module
+heap, then its own first `GlobalAlloc(0x1BCh)` still returns 0, so it takes its
+`exit(1)` path before any `INT 10h`; the reference run under real MS-DOS 5.00
+differs in that the kernel has already relocated itself against the top of
+memory by then (see the probe table in `docs/windows1x.md`). **Windows 1.0 Developer Release 5** can be laid
 out on a UEFI-DOS image with `tools/install_win1x.py` (and started with
 `start_win1x.bat`), but its `KERNEL.EXE` destroys its own code and stack in its
 bootstrap before it makes a single `INT 21h` call — the same files hang the same

@@ -3573,6 +3573,16 @@ int emu_exec_program(Emu *e, const char *prog, const char *args)
         u32 need = 0x10u + ((u32)size + 15u) / 16u + 0x100u;
         if (cand > (u32)caller_block && cand + need < (u32)DOS_MEM_TOP) psp = (u16)cand;
     }
+#ifdef UEFIDOS_HOST
+    /* Experiment knob: place the child flush against the top of memory, which is
+     * where the real-mode Windows 1.x kernel ends up running (its startup code
+     * copies the image to top - image_paras and switches its stack to image_seg
+     * - 1).  Tests whether a program cares where DOS put it. */
+    if (depth == 0 && getenv("UEFIDOS_EXEC_HIGH")) {
+        u32 paras = ((u32)size + 15u) / 16u;
+        if (paras + 0x30u < (u32)DOS_MEM_TOP) psp = (u16)((u32)DOS_MEM_TOP - paras - 0x20u);
+    }
+#endif
 
     /* snapshot the parent context; the child runs in a new segment */
     Emu saved;
