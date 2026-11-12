@@ -620,6 +620,71 @@ Both are decided by a single real-machine probe: store `DI` at `CS:2123`, store 
 `linear 0x04F0` with `DS = 0` (the technique already proven for the NE-entry site). That probe
 is the next step.
 
+### Decisive real-machine probes: the allocation SUCCEEDS, and it is called with a different `load`
+
+Five instrumented boots of real MS-DOS 5 / Windows 1.01 settled the questions left open above.
+The technique: patch `WIN100.BIN` (file offset = CS offset + 0x590) so a 3-byte instruction site
+jumps to a stub placed in the image's zero padding at `CS:5AE5`, the stub records registers into
+`CS:5B48`, replays the replaced instruction and jumps back. Results are located in the 640 KB
+`pmemsave` dump by searching for the marker words.
+
+| probe | site | what it recorded | result |
+|---|---|---|---|
+| 6 | `CS:212B` (call to `0x98A`) | `DI` = requested size | **`DI = 0x1B3` = 435 bytes — identical to ours** |
+| 7, 8 | `CS:2132` (after the call) | `AX` = returned segment | **`AX = 0x0FCD`, a real segment — the allocation SUCCEEDS** |
+| 9 | `CS:667A` (call to `0x0E71`) | arg `SI`, returned `AX` | `SI = 1`, `AX = 0` — **the walk returns 0 on the real machine too** |
+| 10 | `CS:73BE` (call to `0x72D1`) | `AX`,`BX`,`CX`,`DX` | **`instance = 0x74A0`, `load = 0x0FCA`, `top = 0x9FC0`, heap term = `0x0200`** |
+
+Probe 10 is the answer to the whole puzzle. The arguments the kernel hands to its arena builder are
+
+```
+instance    = 0x74A0   (DGROUP of the copy that runs, flush against the top of memory)
+load        = 0x0FCA   (PSP + 0x10 = 0x0FBA + 0x10 — the ORIGINAL load segment)
+top         = 0x9FC0
+heap term   = 0x0200   (the plain NE field, unpatched)
+```
+
+so the only allocatable block — the strip between `load + 2` and `instance - 2` — spans
+`0x0FCC .. 0x749E` = **25 809 paragraphs**, which is why a 30-paragraph request succeeds there and
+lands at `0x0FCD` (exactly the MCB seen in the earlier reference dumps: `0FCC M owner=0FCD size=001D`).
+Our emulator instead runs the image in place, so `instance = load + 0x20` and the same strip is
+27 paragraphs — one third of the request.
+
+The kernel therefore relocates itself to the top of memory while keeping its PSP (and hence `load`)
+at the low address DOS gave it. `WIN.COM` carries the primitive for exactly this at file `0x4A1`:
+
+```
+4a1 push %es ; push %ds
+4a3 mov 0x27c,%bx        ; paragraph count
+4a7 mov %bx,%cx
+4a9 mov $0x48,%ah ; int 21h      ; allocate the destination block
+4ad mov %ax,%es ; xchg %ax,0x27a ; mov %ax,%ds
+4b5 xor %si,%si ; xor %di,%di ; shl cx x3 ; rep movsw
+4c2 pop %ds ; pop %es ; ret
+```
+
+and the size gate just before the exec:
+
+```
+5e3 add $0x89f,%ax
+5e6 mov $0x4,%cl ; shr %cl,%ax ; mov %ax,%bx
+5ec push %ss ; pop %es
+5ee mov $0x4a,%ah ; int 21h      ; shrink WIN.COM's own block to BX paragraphs
+5f2 mov $0xffff,%bx
+5f5 mov $0x48,%ah ; int 21h      ; ask for the largest free block (fails, returns it in BX)
+5f9 cmp %cs:0x103,%bx
+5fe jae 0x609                    ; enough memory -> continue
+600 call 0x645 ; call 0x2de ; jmp 0x2bf   ; otherwise complain and quit
+609 cmpw $0x2120,%cs:0x81
+610 jne 0x644
+612 sub %cs:0x103,%bx
+...
+```
+
+So the next thing to establish is which of these two branches our run takes and what
+`[cs:0x103]` holds — our emulator does answer `AH=48 BX=FFFFh` with a largest-block value, but the
+comparison at `CS:5F9` and the `0x4A1` copy are the two places where the relocation can be skipped.
+
 ## Windows 1.01: what the kernel asks DOS for
 
 `WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
