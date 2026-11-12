@@ -768,3 +768,14 @@ for well under a second: a single timed `screendump` misses it, so the tools kee
 one monitor connection open and fire 40-60 dumps.  `tools/gfx_burst.ps1` quotes
 the *path* inside `-drive`/`-serial` values (`file:"C:\x.img"`); quoting the whole
 `file=...` token makes QEMU read `file=C:\x` as a character-device driver name.
+
+### Screen hand-back (1.1.2)
+
+The splash is on screen for well under a second and then the kernel exits, so
+`WIN.COM` resets the video mode.  That reset used to leave the logo behind: the
+scaled frame only covers the middle of the screen, the console repaints just its
+own grid, and the leftover pixels stayed until something overwrote them.  Two
+calls now fix it — `gfx_clear()` wipes the whole linear framebuffer (called from
+both `plat_video_gfx_begin()` and `plat_video_text()`), and `plat_video_text()`
+also blanks the 25x80 console grid, since the text mirror only sends rows that
+are not blank and the firmware would otherwise keep (and redraw) stale cells.

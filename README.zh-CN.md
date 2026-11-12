@@ -12,7 +12,7 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.1.1** —— 31 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.1.2** —— 31 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
 1.1.1 修的是 DOS 的 EXEC 命令行约定：调用方 `PSP:0080h..00FFh` 那 **128 字节
@@ -38,7 +38,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.1.zip)
+[**下载 `UEFI-DOS-1.1.2.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.2.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -513,6 +513,14 @@ Windows/286 2.10 需要 286 保护模式和 EMM，UEFI-DOS 目前没有。
 EXE 装载下都会写坏自己。证据与反汇编见 `docs/windows1x.md`。
 
 Windows/286 2.10 需要 286 保护模式和 EMM，UEFI-DOS 目前没有。
+
+## 从图形模式交还文本模式
+
+退出图形模式不只是“别再写像素”：缩放后的游戏画面只占屏幕中间一块（四周是边距带），
+而固件控制台只重画它自己的字符网格。于是 Windows 1.x 的启动画面会**残留**在屏幕
+上——`C:\WINDOWS>` 提示符回来时，底下还压着被弃置 logo 的两块白斑。现在
+`plat_video_text()` 会把整块线性帧缓冲擦掉（`gfx_clear()`）并刷空 25x80 的字符网格，
+`plat_video_gfx_begin()` 进图形模式时也擦一次，边距带因此是黑的而不是上一屏的文字。
 
 ## 目录结构
 

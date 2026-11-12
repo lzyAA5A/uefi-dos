@@ -74,6 +74,8 @@ typedef struct {
 
 /* set while a graphics mode owns the display (see plat_video_gfx_begin) */
 static int g_gfx_on;
+/* wipe the whole linear framebuffer (defined next to plat_video_text) */
+static void gfx_clear(void);
 
 static void ser_init(void);
 void plat_serial_puts(const char *s);
@@ -547,6 +549,7 @@ int plat_video_gfx_begin(int w, int h)
     g_gfx_dy = (gh - (UINTN)h * sc) / 2;
     g_gfx_on = 1;
     g_show_count = 0;
+    gfx_clear();
     plat_serial_puts("gfx: linear framebuffer ");
     plat_serial_puts(g_gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor ? "BGR" : "RGB");
     return 0;
@@ -590,10 +593,49 @@ void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
     }
 }
 
+/* Wipe the whole linear framebuffer.  Handing the display back to the text
+ * console is not enough by itself: a scaled game frame only covers the middle
+ * of the screen, the firmware console repaints just its own character grid, and
+ * whatever was left around or under it stayed visible.  Windows 1.x's splash
+ * survived the mode reset that way, so the prompt ended up drawn on top of two
+ * white slabs of the abandoned logo. */
+static void gfx_clear(void)
+{
+    if (!g_gop || !g_gop->Mode || !g_gop->Mode->Info) return;
+    if (!g_gop->Mode->FrameBufferBase || !g_gop->Mode->FrameBufferSize) return;
+    UINTN gw = g_gop->Mode->Info->HorizontalResolution;
+    UINTN gh = g_gop->Mode->Info->VerticalResolution;
+    UINTN stride = g_gop->Mode->Info->PixelsPerScanLine;
+    if (!stride) stride = gw;
+    if (!gw || !gh) return;
+    UINTN fbsize = (UINTN)g_gop->Mode->FrameBufferSize;
+    u8 *base = (u8 *)(UINTN)g_gop->Mode->FrameBufferBase;
+    UINTN row_bytes = stride * 4u;
+    if (row_bytes > fbsize) row_bytes = fbsize;
+    for (UINTN y = 0; y < gh; y++) {
+        UINTN off = y * stride * 4u;
+        if (off + row_bytes > fbsize) break;
+        gBS->SetMem(base + off, row_bytes, 0);
+    }
+}
+
 void plat_video_text(void)
 {
     if (!g_gfx_on) return;
     g_gfx_on = 0;
+    gfx_clear();
+    /* Blank the console grid as well.  The text mirror only sends rows that are
+     * not blank, so the firmware kept its previous characters in the empty ones
+     * and would redraw them over the framebuffer on the next scroll.  One pass
+     * of 25 blank lines leaves the console and the screen in sync. */
+    if (gOut) {
+        for (UINTN y = 0; y < 25; y++) {
+            gOut->SetCursorPosition(gOut, 0, y);
+            for (int x = 0; x < 80; x++)
+                gOut->OutputString(gOut, (CHAR16 *)L" ");
+        }
+        gOut->SetCursorPosition(gOut, 0, 0);
+    }
     /* repaint every text row from scratch when console output resumes */
     memset(g_vid_shadow, 0xFF, sizeof(g_vid_shadow));
 }
