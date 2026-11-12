@@ -554,6 +554,72 @@ Unit-count arithmetic confirms the usable-size formula measured earlier (a stock
 
 That last relation explains both experiments at once: raising `ne_heap` to `0x240` alone makes the block 31 paragraphs and the 29-paragraph request fits; raising it to `0x1000` does **not** help (measured again with a clean patch at file offset `0x410`: `0x212E AX=0000`, `ES=0D12`, still 77 DOS calls and `AH=4C AL=1`), because the allocator's split path refuses to carve a block out of that arena entry once the heap sits elsewhere. So the kernel needs both a larger `ne_heap` **and** a heap/anchor layout that matches, which is exactly what the real machine had before it produced the 25 KB heap seen in the reference dump.
 
+### The strip is the only allocatable block, and the request is 30 paragraphs
+
+Allocator arithmetic, now measured with registers (`UEFIDOS_TRACE_WINDOW=5a80-5af0`,
+image `build/w101h.img`, `ne_heap = 0x240`):
+
+```
+2079 0D49:5AA0 AX=0D12 ... DX=001E SI=0D12 DI=0000 ES=0D12   ; candidate block = the 27-paragraph strip
+2080 0D49:5AA4 AX=001B ... DX=001E                          ; AX = block size (0x1B)
+2081 0D49:5AA5 AX=001C ... DX=001E                          ; AX = size + 1
+2083 0D49:5AE2 AX=001C ... DX=001E                          ; cmp %dx,%ax  ->  0x1C < 0x1E
+2084 0D49:5AE4 ...                                          ; ret, caller takes `jb` -> block skipped
+```
+
+so the module database needs **DX = 0x1E = 30 paragraphs** (444 bytes rounded up plus the MCB
+overhead) while the strip offers `size + 1 = 0x1C = 28`. The request is 30 for every plausible
+name length (a 6-char name still asks for 29), so *which* module name is used cannot save it.
+
+The reason the strip is the only candidate is in the arena builder itself (`CS:72D1`, complete):
+
+```
+72d1  lea 0x1(%bx),%si ; and $0xfffe,%si    ; si = load        (block 1)
+72d8  lea 0x2(%si),%di ; and $0xfffe,%di    ; di = load + 2    (block 2 = the strip)
+72ea  sub %dx,%cx ; neg %cx ; and $0xfe,%cl ; cx = top - heap paragraphs  (heap block)
+72f1  dec %dx ; and $0xfe,%dl               ; dx = top - 1     ('Z' block)
+72f5  dec %ax ; and $0xfe,%al               ; ax = instance - 1 (block 4, the big middle one)
+...
+7304  movw $0xffff,0x1(%bx)  ; block 1 owner = FFFF
+7320  movw $0xffff,0x1(%bx)  ; 'Z' block owner = FFFF
+7340  movw $0xffff,0x1(%bx)  ; heap block owner = FFFF
+7365  movw $0xffff,0x1(%bx)  ; big middle block owner = FFFF
+7384  mov    %bx,0x1(%bx)    ; strip owner = BX = 0   <- the only owner-0 block
+```
+
+and since the allocator's acceptance test is `cmp %di,%es:0x1(%di)` with `DI = 0`
+(`CS:5A84`), **only the strip can ever satisfy an allocation**. Its size is
+`instance - load - 5 = 0x1B` (27) for every `ne_heap`, because both ends of the strip
+are fixed by `load` and `instance` — which is why raising `ne_heap` from `0x200` to `0x240`
+grew the *middle* block (`0D2E`, size `0x926D`) and the heap block (`9F9C`, size `0x21`),
+but left the strip at `0x1B` (measured in `build/a240.bin`).
+
+### The reference dumps show the same strip, so the contradiction is now precise
+
+Locating the kernel by its NE header (`4e45 0400 5200 3001 c707 ...`) in the real MS-DOS 5
+dumps gives image base `0x74800` (= `0x9FC0 - 0x2B40`, flush against the top of memory) and
+
+```
+[instance+0x10] = 0x0200     [instance+0] = 'NE'     (build/refm_c1_0.bin)
+```
+
+so the reference machine runs with exactly our numbers: instance = `load + 0x20`, module
+database request 30 paragraphs, strip 27 paragraphs. On our side the allocation therefore
+fails, `CS:216B` returns 1, the caller installs `ES = 0001`, the walk reads `es:001C` out of
+the IVT and the kernel exits with `AH=4C AL=1`.
+
+Two candidate explanations remain, and they are now the only two:
+1. the reference machine reaches `CS:212B` with a *different* `DX` (e.g. it re-entered through
+   the module instantiate twice and the second call passes a size hint), or
+2. the reference machine survives the failed allocation because on a real IVT the word at
+   `0001:001C` (the INT 7 vector) makes `CS:0E8A cmp %si,%es:0x1C; jbe` take the *other*
+   branch (`0EDC`) instead of the "return 0" path we take, so the kernel keeps going.
+
+Both are decided by a single real-machine probe: store `DI` at `CS:2123`, store `AX`/`DX` at
+`CS:5AE2`, and mark whether `CS:2130 je` is taken, all into the BIOS scratch area at
+`linear 0x04F0` with `DS = 0` (the technique already proven for the NE-entry site). That probe
+is the next step.
+
 ## Windows 1.01: what the kernel asks DOS for
 
 `WIN.COM` is a small launcher: it saves `INT 21h`, checks the DOS version, works
