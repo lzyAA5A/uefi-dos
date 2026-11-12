@@ -1159,6 +1159,78 @@ instruction. Everything needed is in place to keep digging: `UEFIDOS_DUMP_AT=CS:
 writes the low 640 KB at an exact instruction, and the QEMU reference runs can be
 dumped with `pmemsave 0 655360`.
 
+### The instantiate path, and why "instance = load+0x21" is dead
+
+Disassembly of `CS:6604..6684` (the block that reaches the module database) and a
+window trace of `CS:2085` settle what the kernel is actually doing:
+
+```
+6609: mov %sp,%di                 ; 0x80-byte scratch buffer on the kernel stack
+660b: mov $0x4000,%bx
+6616: call 0x1A2C                 ; open the overlay (C:WIN100.OVL, handle 5)
+661b: jne 0x6635                  ; open succeeded -> skip the retry path
+663a: push cs:6498 / push 0xFFFF / push %ss / push %di
+6642: call 0x2085                 ; instantiate the module -> AX = database segment
+6645: add $0x80,%sp
+664d: mov %ax,%es
+667a: call 0x0E71                 ; module walk
+667f: jne 0x6684                  ; *** only a NON-ZERO walk reaches the rest ***
+6681: jmp 0x675C                  ; exit(1)
+```
+
+So `CS:6684` - and therefore the block at `CS:66F8..6705` that stores `BP` into
+`[instance+0x10]` and `[instance+0x0E]`, and the `CS:670F` gate behind it - is reachable
+**only after the first module instantiate and the module walk both succeed**. The heap
+field is patched *after* the very allocation that needs it, so the first instantiate has
+to fit the initial 428-byte heap.
+
+`CS:2085` was traced from its entry: `CS:2097 lds si,[bp+4]` loads `DS:SI` from the
+caller's `(ss, di)` pair, `CS:209A mov al,[si]` reads the length byte `0x15` there, and
+`CS:20A0..20A3` compare `[bp+0Ah]` with `[bp+8]`; when they match (they do: both
+`0x0D30`) `DS` stays at the **instance segment**, `SI` is zeroed and the code jumps to
+the size computation at `CS:20F9`. The "module header" it sizes is therefore
+`instance:0000` - the DGROUP/node base, which is the NE header inside the loaded image.
+No `AH=3Fh` read happens anywhere in the run (the trace has `AH=3Dh`, `AH=57h`, `AH=3Eh`
+and nothing else on that handle).
+
+The overlay-name literal at `CS:6751` is `WIN100.BIN\0` (10 characters + NUL); the
+assembler at `CS:6560..6589` prepends the drive (`AH=19h`) and a colon, so the path is
+`C:WIN100.BIN` and the length byte becomes 13, with `lenbyte = 22` (13 + 9) feeding
+`DI = 0x19D + 22 = 435`.
+
+#### Experiment: force the next instance value
+
+`instance = SS + (SP>>4)` with the stack the MZ stub sets, so an odd/extra value can be
+forced by patching the stub itself: image `0x18` holds `8B E6 FB` (`mov %si,%sp; sti`);
+replacing it with `8D 64 10` (`lea 0x10(%si),%sp`) makes `SP = 0x210`, hence
+`instance = load+0x21`, hence a 29-paragraph block (29 >= 28) **and** a heap of
+`0x05D8 = 1496` bytes - exactly the combination that "ought" to work.
+
+It does not, and the reason is decisive: **`instance` is the kernel's DGROUP base.** Shifting
+it by one paragraph moves every kernel variable by 16 bytes, so `DS` then points 16 bytes
+into the NE header. The size computation at `CS:20F9` reads `[DS+4]`, `[DS+6]`, `[DS+0Ch]`…
+from shifted bytes and asks for `DI = 0x66DB` = **26,331 bytes (1645 paragraphs)**, which
+fails far harder than the original. The hypothesis "real DOS has `instance = load+0x21`"
+is therefore refuted: with `instance = load+0x20` fixed, the arena block at `load+0x2` is
+always 27 paragraphs, and the request is always 435 bytes.
+
+Two smaller experiments close the neighbouring questions:
+
+* an **odd child load segment** (`UEFIDOS_PSP_SEG=0x0D01`) changes nothing - the block size
+  is invariant under the load segment's parity, because both `(load+1)&~1` and
+  `(instance-1)&~1` shift together (`block = 0x1B` for even and odd loads alike);
+* the kernel never asks DOS for memory (`AH=48h/49h/4Ah` do not appear after the `EXEC`),
+  so a larger DOS block would not help either.
+
+Where that leaves the bring-up: the first `GlobalAlloc` wants 435 bytes, the only block the
+kernel's own allocator will consider is 27 paragraphs (432 bytes, ~428 usable), and every
+lever outside `instance` (heap field, top of memory, load segment, stack size, DOS version)
+has now been tested and rejected. The next question is internal to the kernel's allocator:
+`CS:5A82` refuses to split/absorb the neighbouring FFFF-owned block because
+`testb $0x8,0x5(%es:di)` is clear on it, and on a real MS-DOS 5 the same region ends up
+owned by the module segment (`0FCC M owner=0FCD size=001D`). Reproducing *that* ownership
+transfer - not the block size - is what remains.
+
 ## The kernel's private arena, decoded instruction by instruction
 
 This section records what `CS:670F` and `CS:72D1` actually do, because the
