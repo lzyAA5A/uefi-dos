@@ -852,3 +852,99 @@ Remaining divergence, in one line: the overlay is opened but never read, so the
 kernel still bails between `AH=57h` and the module load; the heap it computes
 (`[instance+0x10]` = `ne_heap` 0x200 → 428 usable) is also still smaller than
 the 435 bytes it asks for in that layout.
+
+## Where the kernel stops after 1.1.3: its own allocator, not DOS (1.1.4)
+
+The splash now draws, and every DOS service the kernel asks for comes back with the
+right answer. It still exits with code 1 before painting the first window frame.
+This round pinned down exactly which instruction decides that, and ruled out three
+plausible explanations. All numbers below are measured, not guessed.
+
+### The decision point
+
+`WIN100.BIN` at `CS:6642h` calls `CS:2085h` ("instantiate a module"). Inside, at
+`CS:2123h`, it computes a byte count and calls `CS:98Ah` (GlobalAlloc):
+
+| step | value | meaning |
+| --- | --- | --- |
+| `CS:209A` `mov al,[si]` | `0x15` = 21 | length byte of the module path = 13-char name + 8 |
+| `CS:209C` `inc ax` | `0x16` = 22 | |
+| `CS:2123` `DI` | `0x1B3` = 435 | bytes wanted: `0x19D + (lenbyte + 1)` |
+| `CS:212B` `call 98Ah` | `AX = 0000` | **allocation fails**, after ~440 steps inside the allocator |
+| `CS:2130` `je 2165` | taken | |
+| `CS:216B` `xor ax,ax / inc ax` | `AX = 1` | "failure" marker returned to the caller |
+| `CS:6649` `or ax,ax / je` | not taken | the caller only rejects 0, so it accepts the marker |
+| `CS:664F` `mov es,ax` | `ES = 0001` | segment 0001 = the interrupt vector table |
+| `CS:6653..665E` | | writes into segment 0001 |
+| `CS:667A` `call 0E71h` | `AX = 0000` | module walk fails |
+| `CS:6681` `jmp 675Ch` | | `mov al,1 / call 38DDh` = MS C `exit(1)` |
+| `CS:394E` | | `mov ah,4Ch / int 21h` -> exit code 1, **zero `INT 10h` calls** |
+
+So the whole abort hangs off one failed 435-byte allocation inside the kernel's own
+memory manager. DOS is not consulted: the complete call trace contains **no
+`AH=48h`/`AH=49h`/`AH=4Ah`** after the `EXEC`.
+
+### Where the 428-byte wall came from, and why raising it did not help
+
+`CS:65ACh` calls `CS:73ABh` with four arguments, visible in the register trace:
+
+| arg | value | source |
+| --- | --- | --- |
+| `[bp+0Ah]` -> `AX` | `0D9Ch` | load segment (`PSP+0x10`) |
+| `[bp+08h]` -> `BX` | `0DBCh` | instance = `SS + (SP>>4)` = load + `0x20` |
+| `[bp+0Ch]` -> `CX` | `9FC0h` | top of memory from `ES:[0002h]` = `PSP+2` |
+| `[bp+06h]` -> `DX` | `0200h` | `[instance+10h]` = the NE header's `heap` field |
+
+`CS:72D1h` turns that heap field into an MCB chain, and `CS:73EFh`
+(`sub 3,cx / and 0FCh,cl / sub bx,cx / shr 1,shr 1`) turns 0x200 bytes = 32
+paragraphs into a **428-byte** user area — one byte less than the 435 the kernel
+wants, so the very first allocation fails.
+
+Two experiments were run to confirm that this is a symptom rather than the cause:
+
+1. Patching the NE `heap` field at **file offset 0x410** (image `0x210`, `NE+0x10`)
+   from `0x0200` to `0x1000` really does reach the kernel: the call trace then shows
+   `DX = 1000h` at `CS:65ACh` and the heap is built much larger. **The 435-byte
+   allocation still returns 0.**
+2. Loading the kernel at the top of memory instead of below `COMMAND.COM`
+   (`UEFIDOS_EXEC_HIGH=1`, host knob) puts `CS` at `7494h`, `DS` at `747Bh`,
+   `SS` at `7BDAh` — the layout the real MS-DOS 5 run ends up with. **Identical
+   failure at `CS:664Fh`.**
+3. Raising the reported DOS version from 2.11 to 3.30 via `SETVER` only changes
+   which validation branch the kernel takes (79 vs 77 DOS calls); the same abort.
+
+### What the real MS-DOS 5 run shows
+
+- The overlay name it builds is `C:WIN100.OVL` (12 characters, **no** leading
+  backslash when the current directory is the root), and a second copy
+  `C:\WIN100.OVL` exists at linear `0x00FE68h` — both found in the reference dumps
+  `build/rd1.bin`..`build/rd4.bin`.
+- The kernel image sits at segment `0F92h`..`0FB2h` (linear `0x0FB20h` for the
+  segment that carries the code — established by matching a 32-byte needle from
+  file offset `0x6990h`, which lands at linear `0x162B0h`), and by one second into
+  the run the original MZ and NE headers are **no longer in memory at all**: the
+  kernel has moved its module header into a private block.
+- Its own MCB chain is built by the same `CS:72D1h` code and ends with
+  `Z FF FF 01 00 00 9E 9F` at `0x9FBEh`, byte-for-byte what ours builds.
+
+### What this leaves
+
+The remaining difference is inside the segment-chain search at `CS:594Fh`, whose
+accept condition is `cmp %bh,0x3(%si)` (`CS:597Fh`) followed by
+`mov ax,es:[di+3] / inc ax / cmp ax,dx / jb` (`CS:598Ah`): a candidate block is only
+usable when its type byte matches the high byte of the request *and* it is large
+enough. Our chain visits `ES = 0D9Ch, 0D9Eh, 0DBAh, ...` (the blocks the kernel
+itself just built from `load`, `instance`, `top`) and rejects every one, which means
+the kernel expects a block layout that real DOS produces by *moving itself to the
+top of memory first*. Reproducing that move - or finding the DOS call that makes the
+real kernel do it - is the next concrete step; the probes needed are already in the
+tree (`UEFIDOS_TRACE_WINDOW`, `UEFIDOS_WATCH`, `UEFIDOS_TRACE_PSP`,
+`UEFIDOS_DUMP_MEM`, `UEFIDOS_EXEC_HIGH`).
+
+Reproduction commands used for every number above:
+
+```
+python tools\make_tree_image.py build\w101flat.img F:\1231\_tmp\win\w101full --size-mb 64
+$env:UEFIDOS_TRACE_WINDOW='6500-6770'; $env:UEFIDOS_TRACE_STEPS='6000000'
+build\hosttest.exe --shell build\w101flat.img 'SETVER WIN.COM 3.30' 'SETVER WIN100.BIN 3.30' 'WIN'
+```

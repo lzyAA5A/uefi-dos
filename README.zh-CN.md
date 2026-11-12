@@ -12,7 +12,7 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.1.3** —— 32 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.1.4** —— 32 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
 1.1.1 修的是 DOS 的 EXEC 命令行约定：调用方 `PSP:0080h..00FFh` 那 **128 字节
@@ -38,7 +38,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.3.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.2.zip)
+[**下载 `UEFI-DOS-1.1.4.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.4.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -450,6 +450,7 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_PSP_SEG=0x260` | 覆盖加载段，用于按固定 PSP 链接的程序 |
 | `UEFIDOS_DUMP_VRAM=1` | 把模拟的 80×25 屏 dump 到 `build/vram_dump.txt`（带列标尺） |
 | `UEFIDOS_DUMP_MEM=file` | 程序结束时把低端 640 KB 写文件（与真 DOS 下 QEMU `pmemsave` 的结果逐字节对比） |
+| `UEFIDOS_DUMP_AT=CS:IP`（配合 `UEFIDOS_DUMP_AT_FILE=file`） | 执行第一次走到该地址时把低端 640 KB 存盘（默认 `build/mem_at.bin`）——用来在"分配器放弃"的那条指令上抓下程序的内存现场 |
 | `UEFIDOS_TRACE_INTS=1`、`UEFIDOS_TRACE_VRAM=n`、`UEFIDOS_TRACE_STEPS=n`、`UEFIDOS_TRACE_WINDOW=CS:LO-HI`、`UEFIDOS_TRACE_PORTS=1` | 中断、显存写入、单步、地址窗口、端口 I/O 跟踪，输出在 `build/` |
 | `UEFIDOS_TRACE_PSP=1`、`UEFIDOS_TRACE_EXEC=1` | 打印每个新 PSP 的命令行尾部（及其后 16 字节）、每次 `INT 21h AH=4Bh`（路径、环境段、命令行远指针、调用者 PSP/DS），以及失败的 `AH=48h` 请求 |
 | `UEFIDOS_EXEC_HIGH=1` | 把 `EXEC` 的子进程贴着常规内存顶端装载（而不是紧跟调用者之后），用于试探对装载地址敏感的程序 |

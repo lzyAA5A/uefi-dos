@@ -3155,6 +3155,34 @@ static void trace_step(Emu *e, u64 steps)
         }
         if (left || win_on) f = fopen("build/step_trace.txt", "w");
     }
+    /* UEFIDOS_DUMP_AT=CS:IP: snapshot the low 640 KB the first time execution
+       reaches that address (UEFIDOS_DUMP_AT_FILE names the file, default
+       build/mem_at.bin).  This is how a real-DOS pmemsave taken at the same
+       checkpoint is compared against ours. */
+    {
+        static int at_on = -1, at_done = 0;
+        static u32 at_cs = 0, at_ip = 0;
+        if (at_on < 0) {
+            const char *a = getenv("UEFIDOS_DUMP_AT");
+            at_on = 0;
+            if (a && sscanf(a, "%x:%x", &at_cs, &at_ip) == 2) at_on = 1;
+        }
+        if (at_on && !at_done && e->cs == (u16)at_cs && (e->ip & 0xFFFF) == at_ip) {
+            const char *p = getenv("UEFIDOS_DUMP_AT_FILE");
+            const char *q = (p && *p) ? p : "build/mem_at.bin";
+            FILE *df = fopen(q, "wb");
+            at_done = 1;
+            if (df) {
+                size_t n = e->ram_size < 0xA0000u ? (size_t)e->ram_size : 0xA0000u;
+                fwrite(e->mem, 1, n, df);
+                fclose(df);
+                fprintf(stderr, "[dump-at] %04X:%04X step %llu -> %s  SP=%04X:%04X DS=%04X ES=%04X SS=%04X\n",
+                        (unsigned)e->cs, (unsigned)(e->ip & 0xFFFF), (unsigned long long)steps, q,
+                        (unsigned)e->ss, (unsigned)e->sp, (unsigned)e->ds, (unsigned)e->es, (unsigned)e->ss);
+                fflush(stderr);
+            }
+        }
+    }
     if (!f) return;
     if (win_on) {
         if (!((win_cs == 0 || e->cs == win_cs) && e->ip >= win_lo && e->ip <= win_hi)) return;
