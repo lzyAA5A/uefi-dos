@@ -490,6 +490,8 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_TRACE_INTS=1`, `UEFIDOS_TRACE_VRAM=n`, `UEFIDOS_TRACE_STEPS=n`, `UEFIDOS_TRACE_WINDOW=CS:LO-HI`, `UEFIDOS_TRACE_PORTS=1` | interrupt, video-write, single-step, address-window and port-I/O traces under `build/` |
 | `UEFIDOS_TRACE_PSP=1`, `UEFIDOS_TRACE_EXEC=1` | print every new PSP's command tail (and the bytes after it) and every `INT 21h AH=4Bh` (path, environment segment, command-line far pointer, caller PSP/DS) plus failing `AH=48h` requests |
 | `UEFIDOS_TRACE_MEM=1` | dump the DOS memory arena (MCB chain: segment, `M`/`Z`, owner PSP, size, data range) after `INT 21h AH=4Ah` and whenever `AH=48h` fails — the fastest way to see whether a program's shrink-then-probe memory sizing came out right |
+| `UEFIDOS_EXEC_HIGH_IMAGE=1` | an experiment, not the default: load an EXE image flush against the top of the program's block and leave the PSP at the bottom — the geometry a reference MS-DOS 5.00 run shows for Windows 1.01's kernel (default off, because `PSP+0x10` is what programs read as their own segment) |
+| `UEFIDOS_TRACE_DIV=1` | print the `CS:IP` and registers whenever a `DIV`/`IDIV` traps with a quotient overflow |
 | `UEFIDOS_EXEC_HIGH=1` | place an `EXEC`'d child flush against the top of memory instead of right after its caller (for probing programs that are picky about where DOS put them) |
 
 The last 64 steps are dumped to `build/limit_dump.txt` when a program hits the

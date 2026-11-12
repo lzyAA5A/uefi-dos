@@ -458,6 +458,8 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_TRACE_INTS=1`、`UEFIDOS_TRACE_VRAM=n`、`UEFIDOS_TRACE_STEPS=n`、`UEFIDOS_TRACE_WINDOW=CS:LO-HI`、`UEFIDOS_TRACE_PORTS=1` | 中断、显存写入、单步、地址窗口、端口 I/O 跟踪，输出在 `build/` |
 | `UEFIDOS_TRACE_PSP=1`、`UEFIDOS_TRACE_EXEC=1` | 打印每个新 PSP 的命令行尾部（及其后 16 字节）、每次 `INT 21h AH=4Bh`（路径、环境段、命令行远指针、调用者 PSP/DS），以及失败的 `AH=48h` 请求 |
 | `UEFIDOS_TRACE_MEM=1` | 在 `INT 21h AH=4Ah` 之后、以及每次 `AH=48h` 失败时打印 DOS 内存 arena（MCB 链：段址、`M`/`Z`、owner PSP、大小、数据范围）——查看程序“先缩小再探测”的内存测算是否算对，这是最快的手段 |
+| `UEFIDOS_EXEC_HIGH_IMAGE=1` | 实验开关（非默认）：把 EXE 镜像装到程序内存块的顶部、PSP 留在底部——这正是参考机 MS-DOS 5.00 跑 Windows 1.01 内核时的布局（默认关闭，因为程序普遍把 `PSP+0x10` 当作自己的段） |
+| `UEFIDOS_TRACE_DIV=1` | `DIV`/`IDIV` 因商溢出陷入时打印 `CS:IP` 和各寄存器 |
 | `UEFIDOS_EXEC_HIGH=1` | 把 `EXEC` 的子进程贴着常规内存顶端装载（而不是紧跟调用者之后），用于试探对装载地址敏感的程序 |
 
 程序撞到指令上限时，最后 64 步会 dump 到 `build/limit_dump.txt`。

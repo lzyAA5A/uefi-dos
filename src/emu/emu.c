@@ -1428,6 +1428,13 @@ static u32 do_shift(Emu *e, int op, u32 v, unsigned cnt, int width)
 }
 static int trap_div(Emu *e)
 {
+#ifdef UEFIDOS_HOST
+    if (getenv("UEFIDOS_TRACE_DIV"))
+        fprintf(stderr, "[div] CS:IP=%04X:%04X AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X DS=%04X ES=%04X\n",
+            (unsigned)e->cs, (unsigned)e->ip, (unsigned)e->ax, (unsigned)e->bx,
+            (unsigned)e->cx, (unsigned)e->dx, (unsigned)e->si, (unsigned)e->di,
+            (unsigned)e->ds, (unsigned)e->es);
+#endif
     plat_puts("Divide overflow in 16-bit program\n");
     e->halted = 1;
     e->exit_code = 0xFF;
@@ -2957,6 +2964,18 @@ static int load_com_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
     return 0;
 }
 
+/* DOS loads a program's *image* right after its PSP.  Windows 1.01's kernel
+ * cannot start with that geometry: its KERNSTUB sets SS:SP = load:0200h, so
+ * it computes instance = load+0x20h and then builds a private arena whose only
+ * allocatable block spans load+2 .. instance-1 -- 27 paragraphs, one short of
+ * the 28 its first GlobalAlloc needs (measured; see docs/windows1x.md).  With
+ * the image flush against the top of the block and the PSP left at the bottom
+ * (the geometry a reference MS-DOS 5.00 run shows: child PSP 0FBAh, image at
+ * 7480h = top-size), that same block spans tens of thousands of paragraphs.
+ * Set g_exec_image_high = 1 to opt in.  Today only the host harness does that
+ * (UEFIDOS_EXEC_HIGH_IMAGE=1); CONFIG.SYS does not parse a keyword for it yet. */
+int g_exec_image_high = 0;   /* see load_exe_at(): place EXE images high */
+
 static int load_exe_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char *args,
                        const u8 *tail128)
 {
@@ -2978,6 +2997,10 @@ static int load_exe_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
     if ((u32)psp_seg + 0x10u + modparas + 0x10u >= 0xA000u) return 1;
     build_psp_ex(e, psp_seg, args, tail128);
     u16 load_seg = (u16)(psp_seg + 0x10);
+    if (g_exec_image_high) {
+        u32 hi = 0x9FC0u - (u32)modparas;
+        if (hi > (u32)psp_seg + 0x10u) load_seg = (u16)hi;
+    }
     u32 base = (u32)load_seg * 16;
     for (u32 i = 0; i < modsize; i++) e->mem[(base + i) & MEM_MASK] = img[hdr + i];
     if ((u32)e_lfarlc + (u32)e_crlc * 4u <= hdr) {

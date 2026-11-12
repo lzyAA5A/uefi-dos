@@ -123,6 +123,11 @@ static LONG WINAPI dbg_crash(EXCEPTION_POINTERS *ep)
 
 int main(int argc, char **argv)
 {
+    {   /* host knob: mirror CONFIG.SYS EXECHIGH=1 without an image */
+        extern int g_exec_image_high;
+        if (getenv("UEFIDOS_EXEC_HIGH_IMAGE")) g_exec_image_high = 1;
+    }
+
 #ifdef UEFIDOS_DEBUG_INT
     setvbuf(stdout, NULL, _IONBF, 0);
     SetUnhandledExceptionFilter(dbg_crash);

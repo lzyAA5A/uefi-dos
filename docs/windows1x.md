@@ -821,6 +821,54 @@ the measurement the next round starts from, and it is the last structural unknow
 (strip = 27 paragraphs, `GlobalAlloc` fails, `AH=4C AL=1`) and the reference run (strip spanning the
 whole lower memory, `GlobalAlloc` returns `0x0FCD`).
 
+## The reference geometry, measured at the kernel's entry point
+
+A probe stub was patched into the window: `CS:64E5h` (`2E 8C 06 10 00`, the first
+instruction of the NE entry) is redirected with `E9` to the zero cave at `CS:5AE5h`, which
+records `CS`, `SS`, `SP` and the `ES` the program was entered with into the BIOS
+inter-application area at linear `04F0h`, replays the original instruction and jumps back to
+`CS:64EAh`.  Run on the reference machine (real MS-DOS 5.00, `REF_HD` = the working tree),
+every 640 KB dump taken 2..25 s after `win` shows the same values:
+
+```
+count=0001  CS=74B9  SS=7480  SP=0200  ES(child PSP)=0FBA
+      -> instance = SS + (SP>>4) = 74A0      load = ES + 0x10 = 0FCA
+```
+
+That settles the question the previous rounds could not: the kernel is entered **once**, and
+on the reference machine it is already at the top of memory at its very first instruction —
+`SS = 7480h`, i.e. the image sits flush against the top (`7480h + 2B40h = 9FC0h`) — while the
+PSP that the program inherits is still the **low** `0FBAh`.  The KERNSTUB then sets
+`SS:SP = 7480h:0200h`, so `instance = 74A0h`, and the arena `CS:72D1h` builds spans
+`0FCC..749E` — tens of thousands of paragraphs, which is why the reference kernel's first
+`GlobalAlloc` (30 paragraphs) succeeds and its module database lands at `0FCDh`.
+
+A single DOS `EXEC` in our emulator cannot produce that geometry (the image goes right after
+the PSP), so the emulator grew an opt-in switch for the experiment: `g_exec_image_high`
+(`src/emu/emu.c`, host knob `UEFIDOS_EXEC_HIGH_IMAGE=1`), which loads an EXE image at
+`0x9FC0 - image_paragraphs` and leaves the PSP at the bottom of the block — exactly the
+reference layout.
+
+**Result of the experiment (big step forward).** With the switch on, the same `WIN` run goes
+from 129 DOS calls to **250**, and the failure moves:
+
+| | image right after the PSP (today) | image flush at the top (`EXECHIGH`) |
+| --- | --- | --- |
+| module database alloc | fails, returns handle 1 | **succeeds** |
+| `INT 21h AH=3Fh` reads | none at all | `AH=3F BX=0005 CX=FFFF` into `ES:DI=9F04` |
+| graphics mode set by the kernel | never | `INT 10h AH=00 AX=0006` from the kernel's own code |
+| how the run ends | `AH=4Ch AL=1` right after the splash | `Divide overflow in 16-bit program` at `CS:IP=0DBD:90B4` |
+
+So `CS:212Bh` now hands out a real segment, the kernel starts loading modules from
+`WIN100.OVL` and even programmes the video mode — and then executes into a divide fault with
+nonsense registers (`AX=BX=FFFF, CX=867C, DX=E24C, DS=09EC, ES=E24C` at `CS:0DBD`), which is
+the signature of running data rather than code.  The next thing to look at is that fault
+(the `[div]` line the host build now prints gives its address).
+
+The switch is **off by default** — it is a deliberate deviation from the DOS load convention
+(`PSP+0x10` is what programs read as their own segment), so it has to become a documented
+compatibility option rather than the default, once the divide fault is understood.
+
 ## WIN.COM's own memory sizing, decoded (and the contradiction it exposes)
 
 `WIN.COM` (4,867 bytes) was disassembled end to end, because the remaining hope was that it
