@@ -1103,6 +1103,62 @@ What the reference shows:
   those cells), so post-hoc cell reads cannot be compared with our pre-crash
   state. That is why the numbers above come from the call site, not from memory.
 
+## The module-database request, measured to the byte
+
+Two numbers decide whether Windows 1.01 gets past its own bootstrap, and both are now
+measured rather than guessed:
+
+| quantity | value | where it comes from |
+|---|---|---|
+| module-database request | **0x1B3 = 435 bytes = 28 paragraphs** | `CS:211D..2123` sums `ne_rev(0x52) + ne_enttab(0x130) + 2*ne_cseg + 8 + 16 + lenbyte(0x15)` |
+| arena block the kernel gives itself | **0x1B = 27 paragraphs = 464 bytes, 428 usable** | block at `load+0x2`, owner word 0, built by `CS:72D1` |
+
+`lenbyte` (0x15 = 21) is `strlen("C:\\WIN100.OVL") + 8`; the path is assembled at
+`CS:6560..6589` from the PSP command tail, `AH=19h` and the 11-byte literal at `CS:6751`,
+so the name is *not* derived from the program's own file name: renaming `WIN100.BIN` to
+`W.EXE` changes nothing (verified: same 77 DOS calls, same `AH=4C AL=1`).
+
+The block size is `(instance-1)&~1 - (load+2) - 1` with `instance = SS + (SP>>4)`.
+`CS:6500..650A` computes it from the live stack pointer, and the MZ stub forces
+`SS = load, SP = 0200h`, so `instance = load+0x20` and the block is 27 paragraphs -
+one short of the request's 28. `GlobalAlloc` therefore returns 0, `CS:216B` turns that
+into 1, the caller only rejects 0 (`CS:6649 or ax,ax / je`), `mov es,ax` puts **ES = 0001h
+(the IVT)** into play, and the module walk at `CS:0E71` then fails, ending in `exit(1)`.
+
+### Diagnostic: shrink the request by 4 bytes
+
+Patching one immediate - `CS:211D add $0x10,%di` -> `add $0x0C,%di` (file offset
+`0x590+0x211F = 0x26AF` in `WIN100.BIN`) makes the request 431 bytes = 27 paragraphs,
+which fits the 27-paragraph block. Result, from `UEFIDOS_TRACE_WINDOW=211d-2170` and
+`6640-6700`:
+
+```
+0D49:2123 AX=0016 BX=0D30 CX=0000 DX=5D6C SI=0000 DI=01AF ...  ; request 431 bytes
+0D49:212E AX=0D13 BX=0008 CX=0D13 DX=0D13 ...                  ; allocator SUCCEEDS
+0D49:664F AX=0D13 ... ES=0D13                                  ; ES = the new DB segment
+0D49:667D AX=0000 ...                                          ; but the module walk still returns 0
+```
+
+So the size wall is real and it is exactly two bytes of headroom (`434` needed vs `432`
+available when the path keeps its drive prefix). It is *not* the only wall: with the
+allocation satisfied the kernel still gets `0` back from `CS:0E71` (the module walk,
+`mov es,[bp+0Ah] / mov si,[bp+8] / dec si / cmp %si,%es:0x1C / jbe`) - the freshly
+created database at `0D13h` reports `[es:0x1C] = 0` modules - and exits with code 1 the
+same way. Both blockers are therefore open; the second one has never been reached before
+in our runs.
+
+### Where the reference run differs (still unresolved)
+
+On real MS-DOS 5.00 the equivalent block in the MCB chain is
+`0FCC M owner=0FCD size=001D` - **29 paragraphs**, i.e. two more than ours, which is
+exactly enough for a 28-paragraph request. A 29-paragraph block requires
+`instance = load+0x21` or `load+0x22`, i.e. `SP` between `0210h` and `022Fh` at
+`CS:6506`; our emulator (and, on paper, the stub) produce `SP = 0200h`. Reproducing the
+real value means finding what puts 16..47 bytes more on the kernel's stack before that
+instruction. Everything needed is in place to keep digging: `UEFIDOS_DUMP_AT=CS:IP`
+writes the low 640 KB at an exact instruction, and the QEMU reference runs can be
+dumped with `pmemsave 0 655360`.
+
 ## The kernel's private arena, decoded instruction by instruction
 
 This section records what `CS:670F` and `CS:72D1` actually do, because the

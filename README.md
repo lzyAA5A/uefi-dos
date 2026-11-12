@@ -542,8 +542,13 @@ and paints the splash. `INT 21h AH=57h` (get file date/time) was also a stub
 answering zeros; handles now carry the directory timestamp and the SFT publishes
 it. `docs/windows1x.md` holds the traces, the reference dumps and what is still
 open: the kernel opens `WIN100.OVL`, timestamps it, closes it without reading a
-byte and still exits 1, because its local heap (`ne_heap` = 512 bytes → 428
-usable) is a few bytes short of the 435 its module table wants in that layout. The `TAILCHK.COM` regression (`COUNT=00 C81=0D`) keeps the
+byte and still exits 1, because its first `GlobalAlloc` asks for **28
+paragraphs (435 bytes)** for the module database while the only block its own
+arena builder hands it is **27 paragraphs (428 usable)** — two bytes of
+headroom short. Shrinking that request by four bytes in a scratch image makes
+the allocation succeed (the kernel then advances past `CS:212Eh` with a real
+segment instead of `ES=0001h`), which proves the wall is the size and not the
+code path; the next gate, `CS:0E71h`, still returns "0 modules". The `TAILCHK.COM` regression (`COUNT=00 C81=0D`) keeps the
 tail semantics from drifting back. **Windows 1.0 Developer Release 5** can be laid
 out on a UEFI-DOS image with `tools/install_win1x.py` (and started with
 `start_win1x.bat`), but its `KERNEL.EXE` destroys its own code and stack in its
