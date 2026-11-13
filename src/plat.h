@@ -66,6 +66,11 @@ int  plat_video_gfx_begin(int w, int h);
 void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac);
 void plat_video_text(void);
 
+/* 8x8 bitmap font (printable ASCII 0x20..0x7E) used by the INT 10h text
+ * services while a CGA graphics mode (4/5/6) owns the screen.  Public
+ * domain, see src/common/font8x8.c. */
+extern const u8 g_font8x8[95][8];
+
 extern int g_plat_shutdown_requested;
 
 #endif

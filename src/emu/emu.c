@@ -2425,6 +2425,10 @@ static int step_8086(Emu *e)
         set_szp8(e, r8(e, 0));
         break;
     }
+    case 0xD6: { /* SALC (undocumented 8086): AL = 0FFh if CF else 0 */
+        w8(e, 0, getf(e, F_CF) ? 0xFF : 0x00);
+        break;
+    }
     case 0xD0: case 0xD1: case 0xD2: case 0xD3: case 0xC0: case 0xC1: {
         int width = op_width(e, op & 1);
         MRM m;

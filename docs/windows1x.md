@@ -2299,3 +2299,70 @@ the kernel does - so the remaining question is which value the kernel *expects* 
 why it computes `owner = 0` here while the reference run ends up with
 `owner = block+1`. The next probe is `UEFIDOS_WATCH=0D130-0D16F` to catch every
 write to that header between `CS:72D1` and the first `GlobalAlloc`.
+
+## Round 13: an undocumented opcode was aborting the kernel, and the banner appears
+
+The kernel's first module (loaded from `WIN100.OVL` into the 32 KB block that
+`CS:0B1Fh` allocates) executes the undocumented 8086 opcode `D6h` — SALC, "set AL
+from carry".  Our decoder had `D4h` (AAM), `D5h` (AAD) and `D7h` (XLAT) but not
+`D6h`, so the emulator stopped the program with
+
+```
+UEFI-DOS: unsupported 8086 opcode 0xD6
+```
+
+`src/emu/emu.c` now implements it (`w8(e, 0, getf(e, F_CF) ? 0xFF : 0x00);`, no
+flags affected) and `src/emu/itest.c` gained two vectors (`stc; salc` ->
+`AX=12FFh`, `clc; salc` -> `AX=1200h`) for 66 instruction tests.
+
+What that changed, with `UEFIDOS_EXEC_HIGH_IMAGE=1` on the flat tree image:
+
+| | before SALC | after SALC |
+| --- | --- | --- |
+| how the run ends | `unsupported 8086 opcode 0xD6` | runs to the instruction limit |
+| INT 21h calls | 250 | 250 |
+| INT 10h text output | none | **147 x `AH=0Eh`** |
+| graphics mode | `AH=00h` mode 6, then mode 3 | same |
+
+The 147 teletype characters spell, in order,
+
+```
+Microsoft WindowsVersion 1.01Copyright (c) Microsoft Corporation, 1985.
+All Rights Reserved.Microsoft is a registered trademark of Microsoft Corp.
+```
+
+i.e. **the real Windows 1.01 startup banner** — the kernel is now past the
+module-database build, past loading its first module and into its display
+start-up.  The characters go through `INT 10h AH=0Eh` in a CGA graphics mode,
+which UEFI-DOS still draws into the text buffer only, so nothing appears on
+screen yet (see the limitation below).
+
+The new wall: after the banner the kernel spins forever in a three-byte-stride
+table scan inside the module at `0DBDh`:
+
+```
+0DBD:39B3  83 ED 03      sub  bp,3
+0DBD:39B6  83 C5 03      add  bp,3
+0DBD:39B9  2E 3A 66 00   cmp  ah,cs:[bp]
+0DBD:39BD  75 F7         jne  0DBD:39B6
+```
+
+with `AX=3508h` and `BP` marching `371Dh, 3720h, 3723h, ...` — a linear search
+for the byte `35h` over the module's own 3-byte-entry table that never matches
+and never bounds-checks (`build/limit_dump.txt`).  No `INT 16h`, `INT 9` or
+`INT 8` call happens in the whole run (`build/int_trace.txt` has 250 entries,
+none of them keyboard related), so the value being looked up does not come from
+our keyboard layer.
+
+Still missing for a visible desktop, in the order they will bite:
+
+1. ~~CGA text output~~ — DONE in the same round: the text services now render
+   8x8 glyphs into the interleaved `B800h` bitmap when `gfx_kind != 0`
+   (`cga_glyph`/`cga_set` in `src/emu/int21.c`, font in
+   `src/common/font8x8.c`, 40 columns in modes 4/5, 80 in mode 6, scrolling
+   shifts the bitmap).  `CGATEXT.COM` (from `tools/make_cgatext.py`) proves it:
+   `CGA TEXT OK` / `ASCII 8X8 FONT` appear in the dumped frame.  The Windows
+   banner still ends up invisible because the kernel paints a *whole-screen*
+   mode-6 bitmap of its own afterwards, so the frame is uniformly one colour.
+2. Whatever the `0DBDh:39B6h` scan is really for — the table it walks is inside
+   the module we just loaded, and the value it wants (`35h`) is absent from it.

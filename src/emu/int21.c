@@ -1493,8 +1493,79 @@ static void cur_sync(Emu *e)
     emu_ww(e, 0x40, 0x50, (u16)((e->cury << 8) | (e->curx)));
 }
 
+/* Text geometry of the current mode: the CGA modes 4/5 give 40 columns and
+ * mode 6 gives 80, the text modes 80.  All of them have 25 rows. */
+#define SCR_ROWS 25
+
+static int scr_cols(Emu *e)
+{
+    if (e->gfx_kind) return (e->gfx_w >= 640) ? 80 : 40;
+    return 80;
+}
+
+/* ---- CGA bitmap text (modes 4/5/6) ------------------------------------
+ * In a CGA graphics mode the text services must paint glyphs into the
+ * interleaved B8000 bitmap instead of the character buffer.  Without this a
+ * program that switches to a CGA mode and prints (Windows 1.01 prints its
+ * start-up banner through INT 10h AH=0Eh in mode 6, DOS games do it
+ * constantly) showed a blank screen.
+ */
+static u32 cga_off(Emu *e, int x, int y)
+{
+    u32 col = (e->gfx_kind == 2) ? (u32)(x >> 3) : (u32)(x >> 2);
+    return (u32)(y >> 1) * 80u + col + ((y & 1) ? 0x2000u : 0);
+}
+
+static int cga_shift(Emu *e, int x)
+{
+    return (e->gfx_kind == 2) ? (7 - (x & 7)) : (6 - ((x & 3) << 1));
+}
+
+static u8 cga_get(Emu *e, int x, int y)
+{
+    u8 b = emu_rb(e, VRAM_SEG, (u16)cga_off(e, x, y));
+    return (u8)((b >> cga_shift(e, x)) & ((e->gfx_kind == 2) ? 1 : 3));
+}
+
+static void cga_set(Emu *e, int x, int y, u8 v)
+{
+    int sh, mask;
+    u16 off;
+    u8 b;
+    if (x < 0 || y < 0 || x >= (int)e->gfx_w || y >= (int)e->gfx_h) return;
+    mask = (e->gfx_kind == 2) ? 1 : 3;
+    sh = cga_shift(e, x);
+    off = (u16)cga_off(e, x, y);
+    b = emu_rb(e, VRAM_SEG, off);
+    b = (u8)((b & ~((u8)mask << sh)) | ((v & (u8)mask) << sh));
+    emu_wb(e, VRAM_SEG, off, b);
+}
+
+/* One 8x8 glyph.  In the 2bpp modes the low two attribute bits are the
+ * foreground and bits 4-5 the background; in the 1bpp mode 6 any non-zero
+ * attribute is foreground. */
+static void cga_glyph(Emu *e, int col, int row, u8 ch, u8 attr)
+{
+    int fg = (e->gfx_kind == 2) ? 1 : (attr & 3);
+    int bg = (e->gfx_kind == 2) ? 0 : ((attr >> 4) & 3);
+    const u8 *glyph = (ch >= 0x20 && ch <= 0x7E) ? g_font8x8[ch - 0x20] : 0;
+    int r, c;
+    for (r = 0; r < 8; r++) {
+        u8 bits = glyph ? glyph[r] : 0;
+        for (c = 0; c < 8; c++) {
+            int on = (bits >> (7 - c)) & 1;
+            cga_set(e, col * 8 + c, row * 8 + r, (u8)(on ? fg : bg));
+        }
+    }
+}
+
 static void vram_put(Emu *e, int x, int y, u8 ch, u8 attr)
 {
+    if (e->gfx_kind) {
+        if (x < 0 || y < 0 || x >= scr_cols(e) || y >= SCR_ROWS) return;
+        cga_glyph(e, x, y, ch, attr);
+        return;
+    }
     if (x < 0 || x > 79 || y < 0 || y > 24) return;
     emu_wb(e, VRAM_SEG, (u16)((y * 80 + x) * 2), ch);
     emu_wb(e, VRAM_SEG, (u16)((y * 80 + x) * 2 + 1), attr);
@@ -1515,7 +1586,7 @@ static void vram_fill(Emu *e, int x0, int y0, int x1, int y1, u8 ch, u8 attr)
         for (int x = x0; x <= x1; x++) vram_put(e, x, y, ch, attr);
 }
 
-static void clear_screen(Emu *e) { vram_fill(e, 0, 0, 79, 24, ' ', 0x07); }
+static void clear_screen(Emu *e) { vram_fill(e, 0, 0, scr_cols(e) - 1, SCR_ROWS - 1, ' ', 0x07); }
 
 /* AL lines of a window (CH,CL)=upper-left .. (DH,DL)=lower-right; AL=0 blanks
  * the whole window.  up=1 scrolls towards the top (AH=06), up=0 towards the
@@ -1523,12 +1594,25 @@ static void clear_screen(Emu *e) { vram_fill(e, 0, 0, 79, 24, ' ', 0x07); }
 static void video_scroll(Emu *e, int up, int lines, int x0, int y0, int x1, int y1, u8 attr)
 {
     if (x0 < 0) x0 = 0;
-    if (x1 > 79) x1 = 79;
+    if (x1 > scr_cols(e) - 1) x1 = scr_cols(e) - 1;
     if (y0 < 0) y0 = 0;
-    if (y1 > 24) y1 = 24;
+    if (y1 > SCR_ROWS - 1) y1 = SCR_ROWS - 1;
     int h = y1 - y0 + 1;
     if (h <= 0 || x1 < x0) return;
     if (lines <= 0 || lines > h) lines = h;
+    if (e->gfx_kind) {
+        int px0 = x0 * 8, px1 = x1 * 8 + 7, py0 = y0 * 8, py1 = y1 * 8 + 7, d = lines * 8;
+        int bg = (e->gfx_kind == 2) ? 0 : ((attr >> 4) & 3);
+        int y, x;
+        for (y = py0; y <= py1; y++) {
+            int sy = up ? y + d : y - d;
+            for (x = px0; x <= px1; x++) {
+                u8 v = (sy >= py0 && sy <= py1) ? cga_get(e, x, sy) : (u8)bg;
+                cga_set(e, x, y, v);
+            }
+        }
+        return;
+    }
     for (int y = y0; y <= y1; y++) {
         int sy = up ? y + lines : y - lines;
         if (sy >= y0 && sy <= y1) {
@@ -1558,11 +1642,11 @@ static void tele_put(Emu *e, u8 c, u8 attr)
     } else {
         vram_put(e, x, y, c, attr);
         x++;
-        if (x > 79) { x = 0; y++; }
+        if (x > scr_cols(e) - 1) { x = 0; y++; }
     }
-    if (y > 24) {
-        video_scroll(e, 1, 1, 0, 0, 79, 24, 0x07);
-        y = 24;
+    if (y > SCR_ROWS - 1) {
+        video_scroll(e, 1, 1, 0, 0, scr_cols(e) - 1, SCR_ROWS - 1, 0x07);
+        y = SCR_ROWS - 1;
     }
     e->curx = x;
     e->cury = y;

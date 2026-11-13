@@ -108,6 +108,8 @@ static const u8 c_not[]       = { 0xF7, 0xD3 };              /* not bx */
 static const u8 c_cbw[]       = { 0x98 };                    /* cbw */
 static const u8 c_cwd[]       = { 0x99 };                    /* cwd */
 static const u8 c_aam[]       = { 0xD4, 0x0A };              /* aam */
+static const u8 c_salc_cf[]   = { 0xF9, 0xD6 };              /* stc; salc */
+static const u8 c_salc_nc[]   = { 0xF8, 0xD6 };              /* clc; salc */
 static const u8 c_lodsb[]     = { 0xAC };                    /* lodsb */
 static const u8 c_xlat[]      = { 0xD7 };                    /* xlat */
 static const u8 c_les[]       = { 0xC4, 0x07 };              /* les ax,[bx] */
@@ -239,6 +241,8 @@ static const it_case g_cases[] = {
     CASE("cbw (al=FFh)", c_cbw, ((it_regs){.ax = 0x00FF}), ((it_regs){.ax = 0xFFFF}), IT_C_AX, 1, 0, 0, 0, 0, 0),
     CASE("cwd (ax=8000h)", c_cwd, ((it_regs){.ax = 0x8000}), ((it_regs){.ax = 0x8000, .dx = 0xFFFF}), IT_C_AX | IT_C_DX, 1, 0, 0, 0, 0, 0),
     CASE("aam (al=45)", c_aam, ((it_regs){.ax = 45}), ((it_regs){.ax = 0x0405}), IT_C_AX, 1, 0, 0, 0, 0, 0),
+    CASE("salc with CF=1 (stc;salc)", c_salc_cf, ((it_regs){.ax = 0x1234}), ((it_regs){.ax = 0x12FF}), IT_C_AX, 2, 0, 0, 0, 0, 0),
+    CASE("salc with CF=0 (clc;salc)", c_salc_nc, ((it_regs){.ax = 0x1234}), ((it_regs){.ax = 0x1200}), IT_C_AX, 2, 0, 0, 0, 0, 0),
 
     /* --- 386 additions to the 16-bit decoder (MINIGAME died on 0x6F) --- */
     CASE("imul ax,bx,5", c_imul3, ((it_regs){.bx = 7}), ((it_regs){.ax = 35}), IT_C_AX, 1, 0, 0, 0, 0, 0),

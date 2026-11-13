@@ -37,6 +37,7 @@ try {
         'src/common/util.c',
         'src/common/divdi3.c',
         'src/common/cp437.c',
+        'src/common/font8x8.c',
         'src/fs/fat.c',
         'src/kernel/dos.c',
         'src/shell/shell.c',
@@ -94,6 +95,7 @@ try {
             'src/api/native.c',
             'src/emu/itest.c',
             'src/emu/emu.c',
+            'src/common/font8x8.c',
             'src/emu/int21.c',
             'src/emu/fcb.c',
             'src/emu/int2f.c', 'src/emu/int33.c',
@@ -113,6 +115,7 @@ try {
             @{ script = 'tools/make_fcb_test.py'; what = 'FCB test program' },
             @{ script = 'tools/make_tools.py';    what = 'bundled utility set' }
     @{ script = 'tools/make_keytest.py';  what = 'keyboard scan-code probe' }
+    @{ script = 'tools/make_cgatext.py';  what = 'CGA graphics-mode text probe' }
     @{ script = 'tools/make_tailtest.py'; what = 'command-tail (PSP:0080h) probe' }
         @{ script = 'tools/make_gfx_test.py'; what = 'graphics mode probes (mode 13h + VESA)' }
     @{ script = 'tools/make_cwd_test.py'; what = 'INT 21h AH=47h / AH=57h probe' }
@@ -146,7 +149,7 @@ try {
                       'UPCALL.COM','DTATEST.COM','I2FTEST.COM','DPMITEST.COM','FCBTEST.COM',
                       'INFO.COM','CLOCK.COM','HEX.COM','SUM.COM','CAL.COM','KEYTEST.COM','TAILCHK.COM',
                             'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM',
-                            'CGATEST.COM','MOUSETST.COM','CWDCHK.COM')
+                            'CGATEST.COM','MOUSETST.COM','CWDCHK.COM','CGATEXT.COM')
         # the native SDK examples are PE images, not DOS programs: optional
         $nativePrograms = @()
         foreach ($p in @('HELLO64.EXE','HELLO32.EXE','FILET64.EXE','FILET32.EXE')) {

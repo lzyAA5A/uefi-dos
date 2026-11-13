@@ -12,7 +12,7 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.1.4** —— 32 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.1.5** —— 33 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
 1.1.1 修的是 DOS 的 EXEC 命令行约定：调用方 `PSP:0080h..00FFh` 那 **128 字节
@@ -42,7 +42,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.4.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.4.zip)
+[**下载 `UEFI-DOS-1.1.5.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.5.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -419,7 +419,7 @@ Long Name Report.txt         31 13:12  11-11-26
 
 ## 回归测试
 
-`run_tests.ps1` 会先完整构建，再跑 25 项检查：FAT32 读/写自检；宿主命令解释器
+`run_tests.ps1` 会先完整构建，再跑 33 项检查：FAT32 读/写自检；宿主命令解释器
 DIR/TYPE/VER/COM/EXE/EXEC/显示 + 原生 API 与上行调用演示；宿主写路径；软盘镜像挂载
 为 `A:`；在 2.11 镜像上写 FAT12；读取 2.11 与 MS-DOS 5 镜像；两项 QEMU/OVMF 启动
 冒烟测试（x86_64 与 IA32）；阶段 4/6 语义与双路径对比；32 MB 与 1.9 GB FAT16 卷写入；
@@ -482,6 +482,8 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 两行改法（`UEFIDOS_DOSVER_MAJOR 2`、`..._MINOR 11`、`..._COMPAT_MINOR 10`）。
 
 ### Windows 1.x / 2.x
+
+在 CGA 图形模式下，文本服务现在会把 8x8 字形直接画进交错位图（`src/common/font8x8.c`，公有领域字体；模式 4/5 是 40 列、模式 6 是 80 列），所以程序切到 CGA 模式后再用 `AH=0Eh` 打印的内容是看得见的——Windows 1.01 的启动横幅就是这么打印的。`tools/make_cgatext.py` 生成的 `CGATEXT.COM` 就是回归项 `graphics: INT 10h text services paint glyphs in CGA mode 4` 的探针。
 
 `INT 10h` 的 CGA 模式、`INT 33h` 鼠标驱动、硬件中断注入都是为 Windows 加的。
 **Windows 1.01** 的 `SETUP` 在合并安装卷上能完整装完（识别 CGA、拷完 build/utility
@@ -547,6 +549,7 @@ src/
   common/util.c      自立 mem/str 例程（不用 libc）
   common/divdi3.c    64 位除法助手（-m32 -nostdlib 需要）
   common/cp437.c     CP437 → Unicode 表，供控制台镜像使用
+common/font8x8.c   公有领域 8x8 字体（CGA 图形模式下的文本输出）
   fs/fat.c|h         块设备上的 FAT12/16/32 驱动（三者都有写路径）
                      含 VFAT 长文件名的解析与写入
   kernel/dos.c|h     驱动器（多卷）、含长文件名的路径解析、文件句柄、find/DTA、
@@ -632,7 +635,10 @@ build.ps1 run_uefi.ps1 run_interactive.ps1 run_tests.ps1 start_qemu.bat
 1.0.0 这一批来自实跑 DOOM 0.99（见 `docs/doom.md`）——它自带的 DOS/16M 加载器
 是最苛刻的 CPU/DOS 一致性测试：
 
-- **`POPF` 丢掉 IOPL 与 NT**（掩码 `0x0FD5`，那是 8086/286 的行为）。扩展器写
+- **`D6h`（SALC）曾是未知指令。** Windows 1.01 从 `WIN100.OVL` 载入的第一个模块会执行
+  未公开的 8086 指令 `D6h`，模拟器当时直接报 `UEFI-DOS: unsupported 8086 opcode 0xD6`
+  并终止。现已实现为 `AL = CF ? 0FFh : 0`（不影响标志位），并补了两条指令测试向量。
+- **`POPF` 丢弃了 IOPL 与 NT**（掩码 `0x0FD5`，那是 8086/286 的行为）。扩展器写
   `FLAGS=0F000h` 再读回来判断是 386 还是 286，于是在一个**已经支持保护模式**的
   模拟器上打出 `DOS/16M error: [15] protected mode available only with 386 or 486`。
   386/486 的 12-14 位可写、只有第 15 位保留，16 位 `POPF` 现在按 `0x7FD5` 掩码。

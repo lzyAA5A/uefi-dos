@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.1.4** — 32 of 32 automated checks pass on the Windows host harness
+Version **1.1.5** — 33 of 33 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
 
 1.1.1 fixes the EXEC command-tail contract DOS has and UEFI-DOS did not:
@@ -42,7 +42,7 @@ still missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.1.4.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.4.zip)
+[**Download `UEFI-DOS-1.1.5.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.5.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -77,6 +77,7 @@ both inside. `make_release.ps1` rebuilds that package from source.
 | Long file names | VFAT LFN chains are parsed for lookup, `DIR` and the native API, and files created with a long name get an LFN chain plus a generated 8.3 alias; DOS programs still see only the alias |
 | Native 32/64-bit API | `g_dosapi` table — same operations and error codes as INT 21h, native pointers, one source for both firmware widths |
 | 16-bit bridge | `exec16()` downcall (native → real mode) and `INT 2Fh AX=5544h` upcall (real mode → native) |
+| CGA text | `INT 10h` `AH=02/03/06/07/09/0A/0E/13` render 8x8 glyphs into the CGA bitmap (40/80 columns, public-domain font) |
 | CGA graphics | `INT 10h` modes 4/5/6 (320×200×4, 640×200×2), interleaved bitmap at `B800`, palette/background via `AH=0Bh` and the `3D8h`/`3D9h` ports |
 | Mouse | `INT 33h` functions 0000h–0024h, event handler + mask (000Ch), firmware pointer polling and a software arrow drawn into the frame |
 | Hardware interrupts | `INT 8` at 18.2 Hz and `INT 9` with a scan code latched for port `60h`, delivered only to handlers the guest installed; BIOS tick counter `0040:006C` runs |
@@ -439,7 +440,7 @@ Long Name Report.txt         31 13:12  11-11-26
 
 ## Regression suite
 
-`run_tests.ps1` builds everything and runs 32 checks: FAT32 read/write selftest;
+`run_tests.ps1` builds everything and runs 33 checks: FAT32 read/write selftest;
 host shell DIR/TYPE/VER/COM/EXE/EXEC/video plus native-API and upcall demos;
 host shell write path; floppy-image `A:` mount; FAT12 write on a 2.11 image;
 FAT12 read of 2.11 and MS-DOS 5 images; two QEMU/OVMF boot smoke tests (x86_64
@@ -513,6 +514,13 @@ buffer at `0040:001A/001C/001E`, non-callable interrupt vectors, and the missing
 repository.
 
 ### Windows 1.x / 2.x
+
+In a CGA mode the text services now paint 8x8 glyphs straight into the
+interleaved bitmap (`src/common/font8x8.c`, public-domain font, 40 columns in
+modes 4/5 and 80 in mode 6), so anything a program prints with `AH=0Eh` after
+switching to a CGA mode is visible — that is how Windows 1.01 prints its
+start-up banner.  `tools/make_cgatext.py` builds the probe behind the
+`graphics: INT 10h text services paint glyphs in CGA mode 4` regression check.
 
 The `INT 10h` CGA modes, the `INT 33h` driver and the hardware-interrupt
 injection exist because of Windows. `SETUP` from **Windows 1.01** runs end to end
@@ -628,6 +636,7 @@ src/
   common/util.c      freestanding mem/str routines (no libc)
   common/divdi3.c    64-bit division helpers (needed for -m32 -nostdlib)
   common/cp437.c     CP437 -> Unicode table for the console mirror
+common/font8x8.c   public-domain 8x8 font used for text in CGA graphics modes
   fs/fat.c|h         FAT12/16/32 driver over a block device (write paths for all
                      three) plus VFAT long-name parsing and creation
   kernel/dos.c|h     drives (multi-volume), path resolution incl. long names,
@@ -663,6 +672,7 @@ tools/
   make_fcb_test.py   hand-assembles FCBTEST.COM (FCB create/write/read/delete)
   make_dos4_test.py  hand-assembles DOS4TEST.COM (DOS 4.0 call surface, 30 checks)
   make_video_test.py hand-assembles CGATEST.COM (mode 4 stripes) and MOUSETST.COM (INT 33h)
+make_cgatext.py    hand-assembles CGATEXT.COM (INT 10h text into the CGA bitmap)
   make_tools.py      generates the bundled utilities INFO/CAL/SUM/HEX/CLOCK
   mkfat16.py         sparse FAT16 formatter (32 MB .. 1.9 GB test volumes)
   extract_dos_file.py  pull one file out of a raw FAT image by cluster chain
@@ -737,6 +747,10 @@ loader is a ruthless CPU/DOS conformance test:
 The 1.0.0 batch came from running DOOM 0.99 (see `docs/doom.md`), whose DOS/16M
 loader is a ruthless CPU/DOS conformance test:
 
+- **`D6h` (SALC) was an unknown opcode.**  Windows 1.01's first module, loaded
+  from `WIN100.OVL`, executes the undocumented 8086 `D6h`; the emulator stopped
+  with `UEFI-DOS: unsupported 8086 opcode 0xD6`.  Implemented as `AL = CF ? 0FFh : 0`
+  (no flags affected) with two new instruction-test vectors.
 - **`POPF` discarded IOPL and NT** (mask `0x0FD5`, i.e. 8086/286 behaviour). The
   extender writes `FLAGS=0F000h` and reads it back to tell a 386 from a 286, so
   it printed `DOS/16M error: [15] protected mode available only with 386 or 486`

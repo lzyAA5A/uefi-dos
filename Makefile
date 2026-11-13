@@ -45,6 +45,7 @@ SRC = src/uefi/main.c \
       src/common/util.c \
       src/common/divdi3.c \
       src/common/cp437.c \
+src/common/font8x8.c \
       src/fs/fat.c \
       src/kernel/dos.c \
       src/shell/shell.c \

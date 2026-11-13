@@ -232,6 +232,21 @@ Run-Check 'graphics: INT 10h mode 13h paints the 320x200 framebuffer' {
     Write-Host "framebuffer dump: $sz bytes"
 } @('gfx: mode set 320x200x8', 'gfx: 320x200 framebuffer ->', 'GFX-OK 320x200x256', 'GFX-TEXT-OK')
 
+Run-Check 'graphics: INT 10h text services paint glyphs in CGA mode 4' {
+    $env:UEFIDOS_GFX_DUMP = (Join-Path $Build 't_cgatext.ppm')
+    Remove-Item $env:UEFIDOS_GFX_DUMP -ErrorAction SilentlyContinue
+    & $HostExe --shell (Join-Path $Build 'UEFIDOS.img') 'CGATEXT'
+    $lit = 0
+    if (Test-Path $env:UEFIDOS_GFX_DUMP) {
+        $ppm = [System.IO.File]::ReadAllBytes($env:UEFIDOS_GFX_DUMP)
+        $nl = @()
+        for ($i = 0; $i -lt 40; $i++) { if ($ppm[$i] -eq 10) { $nl += $i } }
+        for ($i = $nl[2] + 1; $i -lt $ppm.Length; $i++) { if ($ppm[$i] -ne 0) { $lit++ } }
+    }
+    Write-Host "lit channels in the CGA text frame: $lit"
+    if ($lit -gt 200) { Write-Output 'CGA-TEXT-PIXELS-OK' }
+} @('gfx: mode set 320x200x8', 'gfx: 320x200 framebuffer ->', 'CGA-TEXT-PIXELS-OK')
+
 Run-Check 'graphics: VESA VBE 4F00/4F01/4F02 sets 640x480x256' {
     $env:UEFIDOS_GFX_DUMP = (Join-Path $Build 't_vesa.ppm')
     Remove-Item $env:UEFIDOS_GFX_DUMP -ErrorAction SilentlyContinue
@@ -255,7 +270,7 @@ Run-Check 'FAT: create-over-existing truncates (AH=3Ch) and keeps the chain vali
 # caught here instead of as "a game renders garbage".
 Run-Check 'emulator: 8086 instruction test vectors (ITEST)' {
     & $HostExe --itest
-} @('ITEST PASSED', 'itest: 64 passed, 0 failed')
+} @('ITEST PASSED', 'itest: 66 passed, 0 failed')
 
 # Native 64-bit SDK program: a PE image built by sdk/ is mapped, relocated and
 # executed on the real CPU, with the DOS API and a 16-bit downcall inside.
@@ -281,7 +296,7 @@ Run-Check 'native SDK: FILETOOL writes/verifies a 3000-byte file and lists drive
 # (ICEBP) -- both undocumented on the 8086 and unused by DOS software.
 Run-Check 'emulator: brute-force opcode audit (IFUZZ)' {
     & $HostExe --ifuzz
-} @('IFUZZ DONE', 'ifuzz: 8086 opcodes missing: 0F D6 (2 total)')
+} @('IFUZZ DONE', 'ifuzz: 8086 opcodes missing: 0F (1 total)')
 
 Write-Host ""
 Write-Host "=============================="
