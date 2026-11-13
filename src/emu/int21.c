@@ -105,6 +105,35 @@ static void trace_call(Emu *e, int intno)
 #define trace_call(e, intno) ((void)0)
 #endif
 
+/* Host-only find trace (UEFIDOS_TRACE_FIND=1 -> build/find_trace.txt): one line
+ * per AH=4Eh/AH=4Fh with the search state recovered from the DTA and the result,
+ * which is the only way to see whether a caller loops because a search never
+ * ends or because it never started. */
+#ifdef UEFIDOS_HOST
+static void find_trace(const char *what, const dos_find *f, int rc, const char *name)
+{
+    static FILE *ft;
+    static int on = -1;
+    if (on < 0) {
+        on = getenv("UEFIDOS_TRACE_FIND") ? 1 : 0;
+        if (on) ft = fopen("build/find_trace.txt", "w");
+    }
+    if (!on || !ft) return;
+    char pat[12];
+    for (int i = 0; i < 11; i++) {
+        u8 c = f->pat[i];
+        pat[i] = (char)(c >= 32 && c < 127 ? c : '?');
+    }
+    pat[11] = 0;
+    fprintf(ft, "[find] %s pat=%s attr=%02X dir=%lu idx=%lu rc=%d name=%s\n",
+            what, pat, (unsigned)f->attr_mask, (unsigned long)f->dir_cluster,
+            (unsigned long)f->index, rc, name ? name : "");
+    fflush(ft);
+}
+#else
+#define find_trace(what, f, rc, name) ((void)0)
+#endif
+
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
 /* ------------------------------------------------------------------ */
@@ -910,7 +939,11 @@ void int21_handler(Emu *e)
     }
     case 0x3E: {
         int rc = dos_close(e->bx);
-        if (rc != FAT_OK) { set_err(e, (u8)dos_error_code(rc)); return; }
+        /* MS-DOS 3.3+ reports a bad handle as error 6 here, not as the generic
+         * "invalid data" the shared mapping produces; Windows 1.x closes every
+         * handle it thinks it owns on exit and prints the code, so the
+         * difference is visible in its cleanup trace. */
+        if (rc != FAT_OK) { set_err(e, 6); return; }
         dos_jft_sync(e);
         set_ok(e);
         return;
@@ -1224,6 +1257,7 @@ void int21_handler(Emu *e)
         dos_find f;
         read_dos_str(e, e->ds, e->dx, pat, sizeof(pat));
         int rc = dos_find_first(pat, want_attr, &f, name, &attr, &size, &tm, &dt);
+        find_trace("4E", &f, rc, name);
         if (rc != FAT_OK) { set_err(e, (u8)dos_error_code(rc)); return; }
         find_state_store(e, &f);
         dta_set(e, name, attr, size, tm, dt);
@@ -1238,6 +1272,7 @@ void int21_handler(Emu *e)
         dos_find f;
         if (!find_state_load(e, &f)) { set_err(e, 0x12); return; }
         int rc = dos_find_next(&f, name, &attr, &size, &tm, &dt);
+        find_trace("4F", &f, rc, name);
         find_state_store(e, &f);        /* DOS keeps the position after a miss too */
         if (rc != FAT_OK) { set_err(e, 0x12); return; }
         dta_set(e, name, attr, size, tm, dt);

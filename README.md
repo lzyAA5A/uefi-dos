@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.1.10** — 35 of 35 automated checks pass on the Windows host harness
+Version **1.1.11** — 35 of 35 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
 
 1.1.1 fixes the EXEC command-tail contract DOS has and UEFI-DOS did not:
@@ -42,7 +42,7 @@ still missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.1.10.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.10.zip)
+[**Download `UEFI-DOS-1.1.11.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.10.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -405,8 +405,14 @@ through `AX=1012h`, paints 320x200 pixels and reports `GFX-OK 320x200x256`;
 `VESATEST.COM` walks the VESA calls (`4F00`, `4F01`, `4F02` with the linear
 framebuffer bit) into 640x480x256 and paints the screen in five 64 KB passes.
 Under UEFI the emulated framebuffer is converted to the GOP pixel format and
-written straight into `Mode->FrameBufferBase` with an integer upscale (a 320x200
-mode fills a 640x480 display at 2x, letterboxed). While a graphics mode owns the
+written straight into `Mode->FrameBufferBase`: the horizontal step is an
+integer repeat of each source column, the vertical step is `out_h / h` source
+rows per destination row, and the picture is sized to 4:3 rather than to the
+framebuffer's own ratio. That is what a real card did — a 200-line mode's pixels
+are about 1:2.4 tall, not square — so a 320x200 game still fills the width at 2x
+while a CGA 640x200 desktop (Windows 1.01) fills a 1280x800 panel edge to edge
+instead of sitting in a letterbox with the text squeezed to two thirds of its
+height. While a graphics mode owns the
 screen, text output is redirected to the serial port so the console cannot
 repaint its text grid over the picture. Details, including the two firmware
 `Blt` paths that had to be abandoned, are in [`docs/graphics.md`](docs/graphics.md).
@@ -492,6 +498,7 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_TRACE_INTS=1`, `UEFIDOS_TRACE_VRAM=n`, `UEFIDOS_TRACE_STEPS=n`, `UEFIDOS_TRACE_WINDOW=CS:LO-HI`, `UEFIDOS_TRACE_PORTS=1` | interrupt, video-write, single-step, address-window and port-I/O traces under `build/` |
 | `UEFIDOS_TRACE_IRQ=1` | hardware-interrupt trace: one line per INT 8h/9h frame pushed into a guest handler (`[irq] vec=08 depth=0 from CS:IP to CS:IP`), plus a periodic `[irqdbg]` line with the delivery conditions (IF, irq depth, whether the vector is still ours) |
 | `UEFIDOS_TRACE_SS=1` | log every instruction that changes `SS`, with the frame it lands on (`[ss] #1234 1409->0D00 sp=0826->0826 after 0D00:0592 next=0D00:0594 ax=...`) — a program that silently ends up on the wrong stack segment (a PSP instead of its own stack, or a stale frame restored by a bad `IRET`) is invisible in DOS call traces; this is how Windows 1.01's FatalExit `stack overflow` was pinned on a stale frame rather than on a real stack exhaustion |
+| `UEFIDOS_TRACE_FIND=1` | one line per `INT 21h AH=4Eh/AH=4Fh` with the search state recovered from the DTA and the result (`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`) — the fastest way to tell "a program loops because the search never ends" from "because the search never started" |
 | `UEFIDOS_TRACE_IVT=1` | log every `INT 21h AH=25h` the guest performs (`[ivt] set 08 = 15B7:0244 by CS:IP`) — the fastest way to see which handler a program installs, and whether it installs one at all |
 | `UEFIDOS_TRACE_PSP=1`, `UEFIDOS_TRACE_EXEC=1` | print every new PSP's command tail (and the bytes after it) and every `INT 21h AH=4Bh` (path, environment segment, command-line far pointer, caller PSP/DS) plus failing `AH=48h` requests |
 | `UEFIDOS_TRACE_MEM=1` | dump the DOS memory arena (MCB chain: segment, `M`/`Z`, owner PSP, size, data range) after `INT 21h AH=4Ah` and whenever `AH=48h` fails — the fastest way to see whether a program's shrink-then-probe memory sizing came out right |

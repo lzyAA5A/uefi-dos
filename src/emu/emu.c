@@ -2568,11 +2568,25 @@ static int step_8086(Emu *e)
     case 0xCA: { int width = (op_is32(e) ? 32 : 16); u16 n = fetch16(e); u32 off = popv(e, width); u16 sel = (u16)popv(e, width); set_cs_ip(e, sel, off); e->esp = (e->esp + n) & sp_mask(e); break; }
     case 0xCF: { /* IRET */
         int width = (op_is32(e) ? 32 : 16);
+        u16 sp_before = e->sp;
+        u16 ss_before = e->ss;
         u32 off = popv(e, width);
         u16 sel = (u16)popv(e, width);
         u32 fl = popv(e, width);
         if (width == 32) e->eflags = (fl & 0x00FD5FFFu) | EFLAGS_FIXED;
         else e->flags = (u16)((fl & 0x0FD5) | 0x0002);
+        /* A chained DOS call returned through our trampoline: deliver the flags
+         * the service handler produced (CF in particular) instead of the ones
+         * the INT inside the trampoline pushed.  Without this every chained call
+         * looked successful -- Windows' INT 21h front end hands AH=4Eh/4Fh to
+         * the old vector, so `jb` after the find-next never fired and the
+         * directory scan looped until its list allocation ran out of memory. */
+        if (e->iret_fl_ok && ss_before == e->iret_fl_ss && sp_before == e->iret_fl_sp) {
+            if (width == 32) e->eflags = (e->eflags & ~0x000008D5u) |
+                                         (e->iret_fl_val & 0x000008D5u);
+            else e->flags = (u16)((e->flags & ~0x0FD5) | (e->iret_fl_val & 0x0FD5));
+        }
+        e->iret_fl_ok = 0;
         set_cs_ip(e, sel, off);
         /* A guest handler that we pushed a hardware-interrupt frame for leaves
          * through its own IRET.  Decrementing here is what keeps IRQ0/IRQ1
@@ -2673,6 +2687,12 @@ do_int: {
         if (int_site_ok && int_site_cs == TRAMP_SEG &&
             int_site_ip == (u16)TRAMP_SLOT(intn) && hooked_int(intn)) {
             dos_service_call(e, intn);
+            /* The guest executes the trampoline's IRET next; make it deliver the
+             * flags this call produced (see the IRET case). */
+            e->iret_fl_ok = 1;
+            e->iret_fl_ss = e->ss;
+            e->iret_fl_sp = e->sp;
+            e->iret_fl_val = e->flags;
             return 0;
         }
         if (intn == 0x21 && int_site_ok && int_site_cs != TRAMP_SEG) {

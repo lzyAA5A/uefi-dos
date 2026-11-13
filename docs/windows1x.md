@@ -2909,3 +2909,167 @@ it is plain DOS behaviour — but the remaining failure is elsewhere.
 + `WIN` gives the real desktop: title bar "MS-DOS Executive", the
 `File View Special` menu, the drive buttons A/B/C/D with C selected, `C: \`,
 the mouse cursor, the 50 % grey desktop, and no DOS box at all.
+
+
+---
+
+## Round 18 — the desktop lists its files, and the picture fills the screen
+
+Two user-visible complaints drove this round: the desktop was letterboxed with
+black bars and squeezed text, and it never showed a single file ("一直卡在这").
+Both were real emulator bugs, not Windows misconfiguration.
+
+### 1. Aspect: one integer scale for both axes letterboxed every 200-line mode
+
+`plat_video_gfx_begin()` (`src/uefi/efi_plat.c`) picked a GOP mode at least as
+big as the guest and then computed *one* integer upscale for both axes:
+
+```c
+UINTN sc = gw / (UINTN)w;
+UINTN sc2 = gh / (UINTN)h;
+if (sc2 < sc) sc = sc2;
+```
+
+For CGA 640x200 in a 1280x800 GOP mode that is `sc = 2` horizontally but
+`gh/h = 4` vertically, so the clamp chose 2 and centred the picture with
+`g_gfx_dy = (gh - h*sc)/2` — 200 rows doubled to 400 inside an 800-row panel,
+i.e. black bars above and below and text at two thirds of its proper height.
+A real card never did that: a 200-line mode covered the whole 4:3 screen, which
+is why its pixels are about 1:2.4 tall.
+
+The fix separates the axes. Horizontal stays an integer repeat of each source
+column (`g_gfx_scale`); vertical becomes the fraction `g_gfx_vy_num / g_gfx_vy_den`
+with the picture sized to 4:3:
+
+```c
+UINTN out_w = (UINTN)w * sc;
+UINTN out_h = out_w * 3u / 4u;          /* 4:3 picture */
+if (out_h > gh) out_h = gh;
+if (out_h < (UINTN)h) out_h = (UINTN)h; /* never squeeze the guest */
+g_gfx_vy_num = out_h;
+g_gfx_vy_den = (UINTN)h;
+```
+
+and `plat_video_gfx_show()` maps row `y` to the destination rows
+`[y*num/den, (y+1)*num/den)`, guaranteeing at least one row so nothing is
+dropped. 640x200 in 1280x800 now becomes 1280x800 (2x horizontally, an
+alternating 4:4:4:4 vertical step), and a 320x200 game still fills the width at
+2x. Screenshot: `build/win1x_fix2.png` (before: `build/win1x_scale2.png`, black
+bands, squashed text).
+
+### 2. THE stall: a chained DOS call returned the *caller's* flags, not the result
+
+`AH=4Eh/4Fh` is the whole file listing, and Windows' INT 21h front end does not
+handle it itself — it falls through to the vector it saved at boot
+(`0DBD:3B04 pop ds / pop bp / dec bp / cli / ljmp *cs:[007A]`). The vector
+`AH=35h` handed out is our trampoline `TRAMP_SEG:TRAMP_SLOT(0x21)`, whose body is
+`INT 21 ; IRET`. Round 16 taught `do_int()` to dispatch that inner `INT 21`
+straight to the service handler instead of re-reading the IVT (otherwise the
+call bounced back into Windows' hook forever). What it still got wrong is the
+return: the handler sets `CF`/`AX`, then the *trampoline's* `IRET` popped the
+flags that the inner `INT` had pushed — the caller's original flags — so **CF was
+always cleared by the time Windows looked at it**.
+
+The KERNEL find-next wrapper makes the consequence visible
+(`0x91DD:096D` = `AH=1Ah`, `0x91DD:0971` = `AH=4Fh`):
+
+```
+95d: mov ax,ds / ... / 96b mov ah,1A / 96d int 21
+96f: mov ah,4F / 971 int 21
+973: jb 977          ; error -> keep AX (18h)
+975: xor ax,ax       ; success -> 0
+```
+
+With CF lost, every find-next looked successful, so the directory-cache routine
+at `0x91DD:27A0` never took its stop path (`2898 or ax,ax / je 2895`) and looped:
+copy 22 bytes (`282D rep movsb`), `inc word [bp-4]` (`282F`), and when the count
+reached `[0x00BE]` grow the array by 20 entries (`283F`: `mov ax,[0x00BE] / add
+ax,0x14 / mul 0x16 / GlobalReAlloc`). `UEFIDOS_TRACE_WINDOW=91DD:2790-28C0`
+showed 1480 iterations with the counter at 1479 and a 0x80E8-byte realloc
+request, which is exactly the "Not enough memory to display entire directory"
+box (host harness) or a busy cursor that never paints the list (UEFI run).
+
+**Fix** (`src/emu/emu.c`, `src/emu/emu.h`): the trampoline dispatch path records
+the flags the service produced together with the stack position of the frame the
+upcoming `IRET` will pop; `case 0xCF` applies them when `SS:SP` still match:
+
+```c
+dos_service_call(e, intn);
+e->iret_fl_ok = 1;
+e->iret_fl_ss = e->ss;
+e->iret_fl_sp = e->sp;
+e->iret_fl_val = e->flags;
+```
+
+```c
+if (e->iret_fl_ok && ss_before == e->iret_fl_ss && sp_before == e->iret_fl_sp)
+    e->flags = (u16)((e->flags & ~0x0FD5) | (e->iret_fl_val & 0x0FD5));
+e->iret_fl_ok = 0;
+```
+
+That is precisely what the real DOS kernel does — it writes the result flags
+into the caller's saved frame, so `CF` survives the `iret` of a handler that was
+entered by a `pushf; call far` chain.
+
+### Evidence
+
+New host-only knob `UEFIDOS_TRACE_FIND=1` writes `build/find_trace.txt`, one line
+per `AH=4Eh/AH=4Fh` with the state recovered from the DTA and the result
+(`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`).
+
+- before the fix: **1481 lines**, `idx` stuck at 155 with `rc=1` and the caller
+  looping anyway; the KERNEL cache reached 1479 entries.
+- after the fix: **156 lines**, the last one `idx=155 rc=1`, and Windows paints
+  the listing.
+
+The regression `AH=4Eh/4Fh` check passed both before and after this bug, because
+it asserts `AX=0012` and the DTA contents — the DOS *answers* were right all
+along; only the flag delivery through a chained call was wrong. That is worth
+remembering when a compatibility suite is green but a real program still fails.
+
+Real MS-DOS 5.00 renders the same tree for comparison: `python
+F:\1231\_tmp\win\ref_winshot.py r19` boots the DOS 5 floppy with the Windows
+tree as a vvfat IDE disk, types `c:` + `win`, dumps `pmemsave 0xb8000 16384`
+after 25/40/60 s and decodes the CGA bitmap (`(y&1)*0x2000 + (y>>1)*80`, two
+bank-interleaved 8 KB halves) into `build/refwin_r19_2.png` — five columns of
+files, no dialog, permanent. Our UEFI run (`build/win1x_fix2.png`) now shows six
+columns plus a scroll bar for the same directory; the difference is layout, not
+contents.
+
+### Timing note for reproducing this under QEMU
+
+`_tmp/win/win1x_shot.py` takes `--wait=<seconds>` **with an equals sign**; a bare
+`--wait 400` leaves the flag unparsed and the number becomes the screenshot tag,
+so the shot is taken after the default 40 s. Forty seconds is *not* enough: the
+emulated guest needs roughly 20 M instructions before the desktop is complete, so
+the first screenshot still shows the pre-paint screen with the busy cursor. Use
+`--rebuild --wait=420` (the window then shows the full listing, exactly like
+`build/win1x_fix2.png`).
+
+### 3. `AH=3Eh` on a bad handle returned error 15, MS-DOS 3.3+ returns 6
+
+Windows 1.x closes every handle it believes it owns on the way out
+(`0DBD:391E AH=3E BX=0013..0000`) and prints the code, so the difference is
+visible in its cleanup trace: five handles said "DOS error 15" where a real
+DOS says 6. `case 0x3E` now maps any close failure to error 6 instead of the
+shared `dos_error_code()` table.
+
+### Still open
+
+- **The mouse never moves.** A full run makes **zero** `INT 33h` calls, which
+  means Windows never even asks for a mouse: the boxed icon in the middle of the
+  screen is the CGA busy/hourglass pointer at its home position, not a live
+  arrow. Windows 1.x does not pick drivers from `WIN.INI` — the tree has
+  `MOUSE.DRV`, `MSMOUSE1/2.DRV`, `LMOUSE.DRV`, `JOYMOUSE.DRV`, `NOMOUSE.DRV` and
+  even `SYSTEM.DRV`, but no `SYSTEM.INI`, and the only DOS-opened files during
+  startup are the overlay and `WIN.INI` (four `AH=3Dh` opens in total), so the
+  display/keyboard/mouse configuration comes from inside `WIN100.OVL`, i.e. it
+  is baked in by SETUP. Getting a pointer therefore means running Windows 1.01
+  `SETUP` and answering "Microsoft Mouse (Bus/Serial)". Our `INT 33h` side is
+  fine (`MOUSETST.COM` passes) and the firmware simple-pointer protocol feeds it
+  (`plat_mouse_poll()`), so that experiment is cheap once SETUP is driven.
+- The kernel still returns to WIN.COM when the harness kills it
+  (`UEFIDOS_HARD_STEPS`/step budget) and the module stub then reports a bogus
+  `FatalExit code = stack overflow` because it probes `SS:000A` on WIN.COM's PSP
+  stack, where that word is the saved `INT 22h` vector — a post-mortem artefact,
+  not a real overflow, and unchanged by this round.

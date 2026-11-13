@@ -107,6 +107,14 @@ u32  irq_steps;              /* steps spent inside that handler (watchdog) */
     u8   kbd_irq_scan;           /* scan code latched for port 60h */
     int  kbd_out_valid;          /* port 60h holds an unread scan code */
     u16  irq_ip, irq_cs, irq_sp, irq_ss;  /* return point of the IRQ handler */
+    /* A DOS call that arrives through a chained vector (program hook -> saved
+     * vector = our "INT n; IRET" trampoline) returns to the *original* caller
+     * with the trampoline's IRET, which pops the flags pushed by that INT.  DOS
+     * solves this by writing the result flags into the caller's saved frame, so
+     * the carry flag survives the IRET; these fields carry that one-shot
+     * override to the IRET implementation. */
+    int  iret_fl_ok;
+    u16  iret_fl_ss, iret_fl_sp, iret_fl_val;
     u8  dac[256 * 3];       /* 6-bit VGA DAC, R,G,B */
     u16 pal_index;          /* 3C8h write index */
     u8  pal_phase;          /* 0..2 within a 3C9h triple (write) */

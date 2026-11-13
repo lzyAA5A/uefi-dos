@@ -444,7 +444,9 @@ int plat_boot_blockdev(blockdev *bd)
 
 /* ---- graphics modes ------------------------------------------------ */
 static EFI_GRAPHICS_OUTPUT *g_gop;
-static UINT32 g_gfx_scale = 1;
+static UINT32 g_gfx_scale = 1;     /* horizontal integer upscale        */
+static UINTN g_gfx_vy_num = 1;    /* vertical scale = vy_num / vy_den  */
+static UINTN g_gfx_vy_den = 1;
 static UINTN g_gfx_dx, g_gfx_dy;
 static unsigned g_show_count;
 
@@ -538,15 +540,27 @@ int plat_video_gfx_begin(int w, int h)
 
     UINTN gw = g_gop->Mode->Info->HorizontalResolution;
     UINTN gh = g_gop->Mode->Info->VerticalResolution;
-    /* integer upscale so a 320x200 game fills the screen without blurring */
+    /* Horizontal: integer upscale so a 320x200 game fills the width without
+     * blurring.  Vertical: a 200-line mode (CGA 640x200, VGA 320x200) covered
+     * the whole 4:3 screen on real hardware, i.e. its pixels were about 1:2.4
+     * tall rather than square.  Scaling both axes by one integer therefore
+     * either letterboxes the picture -- black bars above and below with the
+     * text squashed, which is exactly how Windows 1.01 looked -- or stretches
+     * it.  Target a 4:3 picture instead and let the vertical step be
+     * fractional: row y covers rows [y*num/den, (y+1)*num/den), so a 200-line
+     * frame in a 480-line mode alternates 2 and 3 destination rows. */
     UINTN sc = gw / (UINTN)w;
-    UINTN sc2 = gh / (UINTN)h;
-    if (sc2 < sc) sc = sc2;
     if (sc < 1) sc = 1;
     if (sc > 4) sc = 4;
+    UINTN out_w = (UINTN)w * sc;
+    UINTN out_h = out_w * 3u / 4u;          /* 4:3 picture */
+    if (out_h > gh) out_h = gh;
+    if (out_h < (UINTN)h) out_h = (UINTN)h; /* never squeeze the guest */
     g_gfx_scale = (UINT32)sc;
-    g_gfx_dx = (gw - (UINTN)w * sc) / 2;
-    g_gfx_dy = (gh - (UINTN)h * sc) / 2;
+    g_gfx_vy_num = out_h;
+    g_gfx_vy_den = (UINTN)h;
+    g_gfx_dx = (gw - out_w) / 2;
+    g_gfx_dy = (gh - out_h) / 2;
     g_gfx_on = 1;
     g_show_count = 0;
     gfx_clear();
@@ -575,8 +589,11 @@ void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
 
     for (int y = 0; y < h; y++) {
         const u8 *row = fb + (UINTN)y * (UINTN)w;
-        for (UINTN ry = 0; ry < sc; ry++) {
-            u8 *dst = base + ((g_gfx_dy + (UINTN)y * sc + ry) * stride + g_gfx_dx) * 4;
+        UINTN ry0 = (UINTN)y * g_gfx_vy_num / g_gfx_vy_den;
+        UINTN ry1 = (UINTN)(y + 1) * g_gfx_vy_num / g_gfx_vy_den;
+        if (ry1 <= ry0) ry1 = ry0 + 1;      /* never drop a source row */
+        for (UINTN ry = ry0; ry < ry1; ry++) {
+            u8 *dst = base + ((g_gfx_dy + ry) * stride + g_gfx_dx) * 4;
             for (int x = 0; x < w; x++) {
                 u8 idx = row[x];
                 u8 r = (u8)((dac[idx * 3 + 0] << 2) | (dac[idx * 3 + 0] >> 4));
