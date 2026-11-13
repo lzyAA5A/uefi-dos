@@ -2881,3 +2881,31 @@ next step is a window trace on `0x91DD:0960-0980` combined with a ring dump
    so `in al,20h` answers like hardware.
 4. Re-take the reference snapshots (`_tmp/win/ref_snap.py`) and compare the
    Windows arena / heap heads with ours at the same idle point.
+
+### Round 17b — the find state belongs in the DTA (DOS semantics), not in the emulator
+
+`INT 21h AH=4Eh/4Fh` kept the search state in a single static `dos_find` inside
+the emulator.  DOS keeps it in the **DTA** (`DTA+00h` drive, `01h..0Bh`
+template, `0Ch` attribute, `0Dh..14h` resume position), which is what makes a
+program able to save a DTA, run a second search, restore the first DTA and
+continue where it left off — Windows 1.x' KERNEL wrapper re-points the DTA at the
+same buffer before every find-next and multiplexes the shell's scans through it.
+
+`src/emu/int21.c` now stores/loads the state in the DTA
+(`find_state_store()` / `find_state_load()`, guarded by "template byte 0 is
+non-zero" so a fresh DTA reports "no search" = error 18).  `FINDTEST.COM` now
+shows a DOS-shaped DTA prefix (`02 3F 3F .. 30 03 00 00 00 02 00 00 00`) instead
+of zeros, and the regression stays green (35/35).
+
+It did **not** change the Windows symptom: the shell still shows the modal
+`Not enough memory to display entire directory.` box (host harness) or an empty
+file area with no box (real QEMU/OVMF run, `build/win1x_q1.ppm` /
+`build/win1x_q2.ppm`), with exactly one `AH=4Eh` and 1480 `AH=4Fh` calls
+(154 entries, then 1326 consecutive error-18s) in both cases.  Keep the fix —
+it is plain DOS behaviour — but the remaining failure is elsewhere.
+
+**Screenshot evidence now on file:** booting `UEFI-DOS 1.1.9` under OVMF with
+`CONFIG.SYS` `EXECHIGH=ON` and `AUTOEXEC.BAT` = `SETVER WIN.COM/WIN100.BIN 3.30`
++ `WIN` gives the real desktop: title bar "MS-DOS Executive", the
+`File View Special` menu, the drive buttons A/B/C/D with C selected, `C: \`,
+the mouse cursor, the 50 % grey desktop, and no DOS box at all.

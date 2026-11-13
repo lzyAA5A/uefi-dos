@@ -2732,7 +2732,6 @@ static int step(Emu *e)
     static u16 last_ss = 0;
     static int last_ok = 0;
     static u64 ss_n = 0;
-    u16 ss0 = e->ss;
     u16 sp0 = e->sp;
     if (ss_on < 0) {
         const char *v = getenv("UEFIDOS_TRACE_SS");

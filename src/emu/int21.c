@@ -10,8 +10,44 @@ static int g_pending_key = -1;
 static int g_pending_scan = -1;
 static int g_pending_asc = -1;
 static int g_pending_cr = 0;
-static dos_find g_find;
-static int g_find_valid = 0;
+/* The find-first/find-next search state lives in the DTA, exactly where DOS
+ * keeps it (DTA+00h drive, 01h..0Bh template, 0Ch attribute, 0Dh..14h the
+ * resume position).  A program is allowed to save a whole DTA, switch DTAs
+ * between two searches and restore one later, and then expects that search to
+ * continue where it stopped -- Windows 1.x' KERNEL wrapper does exactly this
+ * (it re-points the DTA at the same buffer before every find-next and
+ * multiplexes the shell's several directory scans through it).  Keeping the
+ * state in a single global instead made every search resume the position of
+ * whatever ran last, which shows up as "error 18 forever" once one scan has
+ * reached the end of the directory. */
+static void find_state_store(Emu *e, const dos_find *f)
+{
+    u16 base = g_dos.dta_off;
+    emu_wb(e, g_dos.dta_seg, base, (u8)f->drive);
+    for (int i = 0; i < 11; i++)
+        emu_wb(e, g_dos.dta_seg, (u16)(base + 1 + i), f->pat[i]);
+    emu_wb(e, g_dos.dta_seg, (u16)(base + 0x0C), f->attr_mask);
+    emu_ww(e, g_dos.dta_seg, (u16)(base + 0x0D), (u16)(f->index & 0xFFFFu));
+    emu_ww(e, g_dos.dta_seg, (u16)(base + 0x0F), (u16)(f->index >> 16));
+    emu_ww(e, g_dos.dta_seg, (u16)(base + 0x11), (u16)(f->dir_cluster & 0xFFFFu));
+    emu_ww(e, g_dos.dta_seg, (u16)(base + 0x13), (u16)(f->dir_cluster >> 16));
+}
+
+/* 0 = the DTA holds no search (a fresh DTA has an all-zero template, which a
+ * real one can never have: every template byte is '?' or a name character). */
+static int find_state_load(Emu *e, dos_find *f)
+{
+    u16 base = g_dos.dta_off;
+    f->drive = emu_rb(e, g_dos.dta_seg, base);
+    for (int i = 0; i < 11; i++)
+        f->pat[i] = emu_rb(e, g_dos.dta_seg, (u16)(base + 1 + i));
+    f->attr_mask = emu_rb(e, g_dos.dta_seg, (u16)(base + 0x0C));
+    f->index = (u32)emu_rw(e, g_dos.dta_seg, (u16)(base + 0x0D))
+             | ((u32)emu_rw(e, g_dos.dta_seg, (u16)(base + 0x0F)) << 16);
+    f->dir_cluster = (u32)emu_rw(e, g_dos.dta_seg, (u16)(base + 0x11))
+                   | ((u32)emu_rw(e, g_dos.dta_seg, (u16)(base + 0x13)) << 16);
+    return f->pat[0] != 0;
+}
 
 /* Host-only interrupt trace: UEFIDOS_TRACE_INTS=1 writes build/int_trace.txt
  * so a compatibility sweep can see exactly which DOS services a program uses. */
@@ -1185,21 +1221,24 @@ void int21_handler(Emu *e)
         u8 attr, want_attr = (u8)e->cx;
         u32 size;
         u16 tm, dt;
+        dos_find f;
         read_dos_str(e, e->ds, e->dx, pat, sizeof(pat));
-        int rc = dos_find_first(pat, want_attr, &g_find, name, &attr, &size, &tm, &dt);
+        int rc = dos_find_first(pat, want_attr, &f, name, &attr, &size, &tm, &dt);
         if (rc != FAT_OK) { set_err(e, (u8)dos_error_code(rc)); return; }
-        g_find_valid = 1;
+        find_state_store(e, &f);
         dta_set(e, name, attr, size, tm, dt);
         set_ok(e);
         return;
     }
     case 0x4F: {
-        if (!g_find_valid) { set_err(e, 0x12); return; }
         char name[13];
         u8 attr;
         u32 size;
         u16 tm, dt;
-        int rc = dos_find_next(&g_find, name, &attr, &size, &tm, &dt);
+        dos_find f;
+        if (!find_state_load(e, &f)) { set_err(e, 0x12); return; }
+        int rc = dos_find_next(&f, name, &attr, &size, &tm, &dt);
+        find_state_store(e, &f);        /* DOS keeps the position after a miss too */
         if (rc != FAT_OK) { set_err(e, 0x12); return; }
         dta_set(e, name, attr, size, tm, dt);
         set_ok(e);
