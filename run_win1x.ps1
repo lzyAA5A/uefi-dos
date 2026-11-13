@@ -81,8 +81,30 @@ if ($Installed) {
     # An already installed C:\WINDOWS tree: mirror it into an image and let
     # AUTOEXEC.BAT (SETVER + CD + WIN) start Windows at boot.
     Write-Host "Windows 1.x installed tree: $Installed"
-    Write-Host '  status: the kernel runs (all of its DOS-internals checks pass) but the'
-    Write-Host '          desktop is not drawn yet -- docs\windows1x.md says where it stops.'
+    Write-Host '  status: the desktop comes up with the directory listing (docs\windows1x.md,'
+    Write-Host '          Round 18) as long as the font set below is complete.'
+    # Windows 1.01 stops on its own "Change Disk / Insert <file> disk in drive A:"
+    # dialog when a font its display driver wants is missing from the Windows
+    # directory, and that dialog cannot be answered without a real floppy.  A
+    # SETUP run that only copied part of the font set (Set #2/#4 but not the
+    # Course/Helv/Tms "Set #5" trio) produces exactly that.  Say so up front.
+    $need = @('WIN.COM', 'WIN100.BIN', 'WIN100.OVL', 'WIN.INI', 'MSDOS.EXE',
+              'CGA.DRV', 'SYSTEM.DRV', 'KEYBUS.DRV', 'COMM.DRV',
+              'COURA.FON', 'HELVA.FON', 'TMSRA.FON',
+              'COURC.FON', 'HELVC.FON', 'TMSRC.FON',
+              'COURD.FON', 'HELVD.FON', 'TMSRD.FON',
+              'HIFONTS.FON', 'LOFONTS.FON', 'ROMAN.FON', 'SCRIPT.FON', 'MODERN.FON')
+    $winDir = Join-Path $Installed 'WINDOWS'
+    $missing = @($need | Where-Object { -not (Test-Path (Join-Path $winDir $_)) })
+    if ($missing.Count -gt 0) {
+        Write-Host ''
+        Write-Host "  WARNING: $($missing.Count) file(s) missing from $winDir"
+        Write-Host "           $($missing -join ', ')"
+        Write-Host '           Windows will stop on "Change Disk: Insert <file> disk in drive A:"'
+        Write-Host '           -- copy those files in from the media directory (all *.FON and'
+        Write-Host '           *.DRV) before booting, the setup you pointed at is incomplete.'
+        Write-Host ''
+    }
     $auto_path = Join-Path $Installed 'AUTOEXEC.BAT'
     $needs_auto = $true
     if (Test-Path $auto_path) {
