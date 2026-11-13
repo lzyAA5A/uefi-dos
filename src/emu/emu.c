@@ -1426,14 +1426,19 @@ static u32 do_shift(Emu *e, int op, u32 v, unsigned cnt, int width)
     }
     return r;
 }
+#ifdef UEFIDOS_HOST
+static void ring_dump(Emu *e, FILE *f);
+#endif
 static int trap_div(Emu *e)
 {
 #ifdef UEFIDOS_HOST
-    if (getenv("UEFIDOS_TRACE_DIV"))
+    if (getenv("UEFIDOS_TRACE_DIV")) {
+        ring_dump(e, fopen("build/div_ring.txt", "w"));
         fprintf(stderr, "[div] CS:IP=%04X:%04X AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X DS=%04X ES=%04X\n",
             (unsigned)e->cs, (unsigned)e->ip, (unsigned)e->ax, (unsigned)e->bx,
             (unsigned)e->cx, (unsigned)e->dx, (unsigned)e->si, (unsigned)e->di,
             (unsigned)e->ds, (unsigned)e->es);
+    }
 #endif
     plat_puts("Divide overflow in 16-bit program\n");
     e->halted = 1;
@@ -3016,6 +3021,13 @@ static int load_exe_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
             e->mem[(la + 1) & MEM_MASK] = (u8)(v >> 8);
         }
     }
+#ifdef UEFIDOS_HOST
+    if (getenv("UEFIDOS_EXEC_HIGH_IMAGE"))
+        fprintf(stderr, "[exe] psp=%04X load=%04X paras=%04X cs=%04X ss=%04X env=%04X\n",
+                (unsigned)psp_seg, (unsigned)load_seg, (unsigned)modparas,
+                (unsigned)(load_seg + e_cs), (unsigned)(load_seg + e_ss),
+                (unsigned)emu_rw(e, psp_seg, 0x2C));
+#endif
     e->ss = (u16)(load_seg + e_ss);
     e->sp = e_sp;
     e->cs = (u16)(load_seg + e_cs);

@@ -869,6 +869,45 @@ The switch is **off by default** — it is a deliberate deviation from the DOS l
 (`PSP+0x10` is what programs read as their own segment), so it has to become a documented
 compatibility option rather than the default, once the divide fault is understood.
 
+### Where the divide fault comes from
+
+The host build can now dump the last 4096 executed instructions at the fault
+(`UEFIDOS_TRACE_DIV=1` writes `build/div_ring.txt`) and print where an EXE image
+landed (`UEFIDOS_EXEC_HIGH_IMAGE=1` prints `[exe] psp=... load=... paras=...`).
+With the switch on, the placement is exactly the reference one:
+
+```
+[exe] psp=0D8C load=748B paras=2B35 cs=748B ss=7496 env=0B00
+```
+
+`0x748B + 0x2B35 = 0x9FC0` — the image is flush against the top of memory, the PSP
+stays at `0D8Ch`, so the arena the kernel builds spans `0D9Eh .. 74AAh`.
+
+The ring at the fault shows the kernel already running **far away from every one of
+those addresses**:
+
+```
+0DBD:0025 ... SS=6500  00 05 9F FF
+0DBD:0027 ...          9F FF FF 88
+0DBD:0028 ...          FF FF 88 00
+...
+0DBD:90B1 ... SS=AA00  F0 D4 00 86       <- divide traps somewhere in here
+```
+
+From `CS:0DBD` it walks monotonically up through zeroed memory (`00 86 E0 00`,
+`F0 46 00 86` — `add %al,0xE0(%bp)` / `std` style byte pairs that are just whatever the
+uninitialised block contained) for 4096+ instructions until a `DIV` with a zero divisor
+lands. `CS:0DBDh` is the child's own block (`PSP = 0D8Ch`) but *below* the relocated
+image, i.e. memory the kernel never wrote — so something computed a code pointer into
+the empty middle of its arena and jumped there. That pointer almost certainly comes
+from the module database, which is now built out of that same empty region.
+
+So the remaining defect is concrete: either the module loader writes the module image
+somewhere other than where the database says it is, or a DOS service returns a value
+the loader turns into `0DBDh`. The next measurement is the module load itself — the
+`AH=3Fh` read into `ES:DI=9F04h` seen in the trace, and the segment values the
+database records (`[DB+0x08]`, `[DB+0x0E]`, and the per-record `+0x0E`).
+
 ## WIN.COM's own memory sizing, decoded (and the contradiction it exposes)
 
 `WIN.COM` (4,867 bytes) was disassembled end to end, because the remaining hope was that it
