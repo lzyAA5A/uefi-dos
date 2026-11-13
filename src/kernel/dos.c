@@ -1379,6 +1379,9 @@ int dos_setver_del(const char *prog)
 
 void dos_read_config_sys(void)
 {
+    /* see emu/emu.h: 0 = EXE images load right after the PSP (DOS behaviour),
+     * 1 = flush against the top of the block (CONFIG.SYS EXECHIGH=ON) */
+    extern int g_exec_image_high;
     int h;
     char buf[1024];
     u32 got = 0;
@@ -1425,6 +1428,14 @@ void dos_read_config_sys(void)
                 if (d < 0) d = 0;
                 g_dos.last_drive = d;
             }
+        } else if (strcmp(key, "EXECHIGH") == 0) {
+            /* EXECHIGH=ON  -- load EXE images flush against the top of their
+             * block instead of right after the PSP.  Windows 1.x computes its
+             * private arena from PSP+2 and then expects the program image to be
+             * parked at the top, so this reproduces the geometry a real DOS 5
+             * machine ends up in for it.  Default OFF: DOS itself loads low. */
+            char v = cfg_upper((char)*q);
+            g_exec_image_high = (v == 'O' || v == 'Y' || v == '1') ? 1 : 0;
         } else if (strcmp(key, "SETVER") == 0 || strcmp(key, "DOSVER") == 0) {
             /* SETVER NAME 3.30  -- report another DOS version to that program */
             char nm[16];

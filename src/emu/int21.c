@@ -32,9 +32,11 @@ static void trace_call(Emu *e, int intno)
     g_trace_n++;
     if (trace_all < 0) trace_all = getenv("UEFIDOS_TRACE_ALL") ? 1 : 0;
     if (trace_all || g_trace_n <= 300 || (g_trace_n % 1000) == 0) {
-        fprintf(g_trace, "%7lu INT%02X AH=%02X AX=%04X BX=%04X CX=%04X DX=%04X SI=%04X DI=%04X ES=%04X",
-                g_trace_n, intno, (unsigned)(e->ax >> 8), e->ax, e->bx, e->cx, e->dx,
-                e->si, e->di, e->es);
+        fprintf(g_trace,
+                "%7lu INT%02X at %04X:%04X AH=%02X AX=%04X BX=%04X CX=%04X DX=%04X "
+                "SI=%04X DI=%04X ES=%04X",
+                g_trace_n, intno, e->cs, e->ip, (unsigned)(e->ax >> 8), e->ax, e->bx,
+                e->cx, e->dx, e->si, e->di, e->es);
         /* Path-taking calls: printing the ASCIIZ string turns "DOS error 2"
          * into "it wanted this file, from this directory". */
         if (intno == 0x21) {

@@ -3026,7 +3026,7 @@ static int load_exe_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
         }
     }
 #ifdef UEFIDOS_HOST
-    if (getenv("UEFIDOS_EXEC_HIGH_IMAGE"))
+    if (g_exec_image_high)
         fprintf(stderr, "[exe] psp=%04X load=%04X paras=%04X cs=%04X ss=%04X env=%04X\n",
                 (unsigned)psp_seg, (unsigned)load_seg, (unsigned)modparas,
                 (unsigned)(load_seg + e_cs), (unsigned)(load_seg + e_ss),

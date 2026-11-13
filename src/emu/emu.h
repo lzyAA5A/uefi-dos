@@ -216,6 +216,14 @@ int  itest_run(const char *filter); /* emu/itest.c: instruction-level tests */
 int  ifuzz_run(int verbose);        /* emu/itest.c: brute-force opcode audit */
 extern int emu_unsupported_ops;     /* number of unsupported opcodes executed */
 extern int emu_unsupported_quiet;   /* 1 = do not print them (fuzz mode) */
+/* EXE image placement.  0 (default, what DOS itself does) loads the image right
+ * after the PSP, so the program's block grows upwards.  1 loads it flush
+ * against the top of the caller's free block, leaving the space between PSP and
+ * image free -- the geometry real Windows 1.x kernels end up running in, since
+ * they compute their own arena from PSP+2 and then expect the image out of the
+ * way.  Set with CONFIG.SYS "EXECHIGH=ON" (or the host knob
+ * UEFIDOS_EXEC_HIGH_IMAGE). */
+extern int g_exec_image_high;
 
 /* Linear address of the DPMI host LDT handed to protected-mode clients. */
 #define DPMI_LDT_LIN 0x00F00000u

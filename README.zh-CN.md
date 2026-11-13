@@ -12,7 +12,7 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.1.5** —— 33 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.1.6** —— 34 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
 1.1.1 修的是 DOS 的 EXEC 命令行约定：调用方 `PSP:0080h..00FFh` 那 **128 字节
@@ -42,7 +42,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.5.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.5.zip)
+[**下载 `UEFI-DOS-1.1.6.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.6.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -182,6 +182,7 @@ seek 的 whence 与 INT 21h 相同，`find_first`/`find_next` 回填的字段与
 | 文件大小 | 保持 `u32`，按 DOS 4.0 语义以 32 MB 为实测上限（已在 1.9 GB FAT16 卷上验证） |
 | 报告版本 | `AH=30h` 返回 `AX=0x0004`（DOS 4.00），`VER` 显示同一级别；想报告别的版本改 `src/uefidos_config.h` 里的 `UEFIDOS_DOSVER_*` |
 | 数据结构 | `AH=32h` 在保留 ROM 窗口里为每个已挂载盘生成一个 DPB；`AH=52h` 返回 list of lists，其 `+2` 指向该 DPB 链 |
+| EXE 映像装载位置 | `CONFIG.SYS` 写 `EXECHIGH=ON` 时，EXE 映像贴着程序块的**顶端**装载（不再是 PSP 之后的默认位置）；`CONFIG` 显示当前模式，宿主测试器用 `UEFIDOS_EXEC_HIGH_IMAGE` |
 | 错误上报 | `AH=59h` 把上次失败映射成 class / 建议动作 / locus 三元组（`2`→class 8、`5`/`21h`→class 3、`27h`→class 11、`50h`→class 12 …） |
 | 扩展打开 | `AH=6Ch` 支持 DOS 的 action 位：打开已有 / 不存在则创建 / 覆盖已有，`AX` 返回句柄、`CX` 返回 `1`/`2`/`3`；`AH=68h` 提交 |
 | 临时文件 | `AH=5Ah` 在指定目录下生成 `TMPxxxxx.TMP` 并带冲突重试，两个程序不会撞名 |
@@ -419,7 +420,7 @@ Long Name Report.txt         31 13:12  11-11-26
 
 ## 回归测试
 
-`run_tests.ps1` 会先完整构建，再跑 33 项检查：FAT32 读/写自检；宿主命令解释器
+`run_tests.ps1` 会先完整构建，再跑 34 项检查：FAT32 读/写自检；宿主命令解释器
 DIR/TYPE/VER/COM/EXE/EXEC/显示 + 原生 API 与上行调用演示；宿主写路径；软盘镜像挂载
 为 `A:`；在 2.11 镜像上写 FAT12；读取 2.11 与 MS-DOS 5 镜像；两项 QEMU/OVMF 启动
 冒烟测试（x86_64 与 IA32）；阶段 4/6 语义与双路径对比；32 MB 与 1.9 GB FAT16 卷写入；

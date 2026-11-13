@@ -2366,3 +2366,136 @@ Still missing for a visible desktop, in the order they will bite:
    mode-6 bitmap of its own afterwards, so the frame is uniformly one colour.
 2. Whatever the `0DBDh:39B6h` scan is really for — the table it walks is inside
    the module we just loaded, and the value it wants (`35h`) is absent from it.
+
+## Round 14: every DOS call now carries CS:IP, and the splash's owner is known
+
+Change in the tooling first, because it is what made the rest visible:
+`UEFIDOS_TRACE_INTS` used to print registers only, so a call could not be
+attributed to a program or a module.  Each line now starts with the call site:
+
+```
+    202 INT10 at 16CD:016E AH=0F AX=0FCD BX=2732 CX=0000 DX=28D9 SI=00F2 DI=0020 ES=28D9
+    203 INT10 at 16CD:0175 AH=00 AX=0006 BX=2700 CX=0000 DX=28D9 SI=00F2 DI=0021 ES=28D9
+    204 INT10 at 16CD:0179 AH=0F AX=0F06 BX=2700 CX=0000 DX=28D9 SI=00F2 DI=0021 ES=28D9
+    205 INT10 at 0D89:0017 AH=00 AX=0003 BX=026A CX=0004 DX=0206 SI=0000 DI=0007 ES=0000
+```
+
+### Who prints the MICROSOFT banner
+
+147 of the 148 `INT 10h AH=0Eh` calls come from **`0D89:012C`**.  Segment 0x0D89
+is inside *WIN.COM*, not inside the kernel: WIN.COM is a .COM, so a module at
+image offset 0x890 sits at `PSP + 0x10 + 0x89` = 0x0D00 + 0x89 = **0x0D89** for a
+PSP of 0x0D00, and WIN.COM really does carry a `LOGO` module at file offset 0x790
+(image 0x890):
+
+```
+WIN.COM 0x790:  4C 4F 47 4F   E9 C0 00   ...        "LOGO", jmp +0xC0
+         0x7A5:  A0 18 00 CD 10 CB                     mov al,[0x18] / int 10h / retf   (entry 7)
+         0x7A3:  A0 19 00 26 A2 10 04                   mov al,[0x19] / mov es:[0x410],al
+```
+
+`[0x18]` holds 0x03 and `[0x19]` holds 0x21: the module remembers the *boot*
+video mode and the equipment byte and restores both.  So the splash is WIN.COM's
+own, and the final `INT 10h AX=0003` from `0D89:0017` is WIN.COM's exit path
+restoring text mode after the kernel returned — not the kernel switching back.
+
+### The kernel really does reach its display driver
+
+With the image flush against the top (`CONFIG.SYS EXECHIGH=ON`, see below) the
+kernel is loaded at 0x748B with 0x2B35 paragraphs, i.e. 0x748B + 0x2B35 = 0x9FC0,
+the top of its block.  In that geometry it gets past the module-database
+allocation and does this, in order:
+
+| # | Call | Site | Meaning |
+| --- | --- | --- | --- |
+| 177 | `AH=3D` `"C:\WIN100.OVL"` | kernel 1B05h | open the overlay |
+| 185 | `AH=3D` `"C:\WIN.INI"` | overlay 1B05h | open WIN.INI |
+| 187-189 | `AH=42`/`AH=42`/`AH=3F` | overlay 481Ah/474Bh | size it, rewind, read it whole (2353 B) into `9F04:0000` |
+| 191-194 | `AH=35` | overlay 6ECFh | save vectors for INT 20h/21h/24h/27h (we return the trampolines) |
+| 195-200 | `AH=52`,`AH=50`,`AH=06`,`AH=50`,`AH=52`,`AH=35` | 37A8h..37DDh | its INT 21h front end re-entering DOS while it sets itself up |
+| 201 | `AH=25` vector 24h = `CS:4072` | 37F2h | install its own critical-error handler |
+| 202-204 | `INT 10h 0Fh / 00h=06h / 0Fh` | **driver 16CDh** | the CGA driver reads the mode, sets 640x200 mono, reads it back |
+
+A display driver that sets mode 6 is a driver that ran.  Immediately after that
+the trace stops: no further DOS call, no further `INT 10h`, and the kernel hands
+control back to WIN.COM (which restores mode 3 and exits).  So the wall is
+between "display driver initialised" and "shell/desktop module created".
+
+### The interrupt dispatcher, decoded (and why it looked like an endless loop)
+
+Windows' INT 21h front end dispatches on `AH` through a 3-byte `{AH, handler}`
+table pointed at by `cs:[3716]` (= 0x3720).  A dump taken at the dispatcher entry
+(`UEFIDOS_DUMP_AT=0DBD:39AE`) shows it in memory:
+
+```
+cs:[3716] = 3720
+3720: 02 3CAD   3723: 09 3C93   3726: 40 3B9E   3729: 3E 3CFD   372C: 42 3CFD
+3735: 57 3CFD   373B: 06 3C1E   373E: 0B 3C61   3741: 44 3B7D   3747: 08 3CC1
+3750: 01 3C61   3753: 3F 3BB1   3759: 3B 3CDB   375C: 25 3CF0   375F: 48 3D52
+3768: 4B 3D89   376B: 00 3E65   376E: 4C 3E76   3771: 31 39F8   3774: 35 3A90
+3777: 56 20BE
+```
+
+The scan is `39AE`/`39B3`/`39B6`:
+
+```
+39ae: 2E 8B 2E 16 37   mov  cs:[3716],bp     ; bp = table base
+39b3: 83 ED 03         sub  $3,bp
+39b6: 83 C5 03         add  $3,bp
+39b9: 2E 3A 66 00      cmp  cs:[bp],ah
+39bd: 75 F7            jne  39b6              ; no bound check: a missing AH loops
+39bf: 2E FF 76 01      push cs:[bp+1]        ; return into the handler
+```
+
+Entry `0x35` lands on 0x3A90, which for `AH` in 0x29..0x30 chains straight to the
+previous INT 21h vector and otherwise swaps INT 24h to `CS:4072`, chains
+`AH=0Eh` and `AH=3Bh`, then restores it.  That explains the earlier "3-byte
+stride table walk" observation: it is the dispatcher looking for `AH`, not a
+crash — and it does terminate (the ring shows the match at `BP=3774`).
+
+One caveat about that cell: `0x3774` is both the table entry for `AH=35` *and*
+the byte the dispatcher stores the searched value into at `39A9`
+(`mov cs:[3774],ah`), so a dump taken at that moment always shows 0x35 there.
+
+### The late wild jump
+
+In the flush-at-top geometry the run does not always end cleanly: at roughly step
+1.4 M the guest executes **data** at `0DBD:6603` (bytes `F0 46 00`, `00 86 E0 00`,
+`SI` walking a byte table one per instruction) with an impossible frame
+(`SS=0D00 SP=4E3B`) and dies with `Divide overflow in 16-bit program`.  That is a
+return into memory the kernel had already given up on, i.e. a stale vector or a
+stale return address, and it happens *after* the point where the desktop should
+have appeared.
+
+## New in 1.1.6: `CONFIG.SYS EXECHIGH=ON`
+
+The geometry the kernel needs (image flush against the top of the block, PSP
+low) is now selectable instead of host-only:
+
+* `CONFIG.SYS`: `EXECHIGH=ON` (or `=Y`, `=1`; `OFF` restores the default).
+  `CONFIG` prints `EXE placement: high (flush at top of block)` or `low
+  (right after the PSP)`.
+* Host harness: `UEFIDOS_EXEC_HIGH_IMAGE=1` does the same, and prints
+  `[exe] psp=… load=… paras=… cs=… ss=…` so the arithmetic can be checked:
+  `load + paras` must equal 0x9FC0.
+* Implementation: `int g_exec_image_high` in `src/emu/emu.c`, used by
+  `load_exe_at()` (`load_seg = 0x9FC0 - modparas` when it is set and still above
+  `psp+0x10`); declared in `src/emu/emu.h`, set by `dos_read_config_sys()`.
+
+Default stays OFF, because DOS itself loads an EXE right after the PSP and
+nothing else we have tested benefits from moving it.  The Windows launcher
+(`run_win1x.ps1`) writes `CONFIG.SYS` with `FILES=40`, `LASTDRIVE=D` and
+`EXECHIGH=ON`, since that is the configuration in which the kernel gets furthest.
+
+## Where the Windows 1.01 work stands after this round
+
+* WIN.COM, the splash, the DOS-internals validation, the module database, the
+  overlay open, WIN.INI, its own INT 21h front end, its critical-error handler
+  and the CGA display driver all work.
+* The kernel then returns to WIN.COM without creating the shell, in both EXE
+  geometries (low: after the module-database allocation fails; high: right after
+  the display driver initialised).
+* Next instrument if this is picked up again: log the overlay *reads* (the
+  reference run pages modules in from WIN100.OVL after the driver starts) and
+  diff the module segments against the reference dump (`build\rd*.bin`), which
+  showed modules at 0x17DB, 0x1829, 0x189F, 0x18AF, 0x1AD7, 0x1C3F.

@@ -895,6 +895,10 @@ static int dispatch(char *line)
         plat_puts("  SETVER entries: ");
         api_put_num((u16)g_dos.ver_fix_count);
         plat_putc('\n');
+        plat_puts("  EXE placement: ");
+        plat_puts(g_exec_image_high ? "high (flush at top of block)"
+                                    : "low (right after the PSP)");
+        plat_putc('\n');
         return FAT_OK;
     }
     if (ci_equal(cmd, "FCB")) {

@@ -57,6 +57,22 @@ Run-Check 'DOS: AH=47h cwd format (no drive, no leading backslash) and AH=57h ti
     & $HostExe --shell (Join-Path $Build 't_shell.img') "CWDCHK"
 } @('CWDCHK-DONE', 'SUB    CF=0 AX=0100 [CWDTMP]', 'ROOT   CF=0 AX=0100 []', 'SUB-C:  CF=0 AX=0100 [CWDTMP]')
 
+Run-Check 'DOS: CONFIG.SYS EXECHIGH=ON places an EXE image flush against the top' {
+    # the [exe] diagnostic goes to stderr; PS 5.1 turns native stderr into a
+    # terminating error under 'Stop', so relax it for this check only
+    $ErrorActionPreference = 'Continue'
+    $img = Join-Path $Build 't_exechigh.img'
+    $mk = Join-Path $Root 'tools\make_image.py'
+    & $Python $mk $img --size-mb 40 --noboot --text "CONFIG.SYS=EXECHIGH=ON" `
+        --file ((Join-Path $Build 'MZEXE.EXE') + '=MZEXE.EXE') | Out-Null
+    $out = & $HostExe --shell $img 'CONFIG' 'MZEXE' 2>&1 | Out-String
+    if ($out -match '\[exe\] psp=([0-9A-F]{4}) load=([0-9A-F]{4}) paras=([0-9A-F]{4})') {
+        $top = [Convert]::ToInt32($matches[2], 16) + [Convert]::ToInt32($matches[3], 16)
+        if ($top -eq 0x9FC0) { Write-Output 'EXECHIGH-GEOMETRY-OK' }
+    }
+    $out
+} @('EXE placement: high', 'Hello from MZ EXE!', 'EXECHIGH-GEOMETRY-OK')
+
 Run-Check 'host shell: MD/COPY/TYPE/DEL/RD write path' {
     & $HostExe --shell (Join-Path $Build 't_shell.img') "MD T2" "COPY HELLO.TXT T2\A.TXT" "TYPE T2\A.TXT" "DEL T2\A.TXT" "RD T2"
 } @('1 file(s) copied', 'Hello UEFI-DOS!', 'SHELLDONE')

@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.1.5** — 33 of 33 automated checks pass on the Windows host harness
+Version **1.1.6** — 34 of 34 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
 
 1.1.1 fixes the EXEC command-tail contract DOS has and UEFI-DOS did not:
@@ -42,7 +42,7 @@ still missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.1.5.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.5.zip)
+[**Download `UEFI-DOS-1.1.6.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.6.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -194,6 +194,7 @@ for existing 16-bit code in [`docs/migration.md`](docs/migration.md).
 | File size | kept `u32`, practical 32 MB ceiling per DOS 4.0 semantics (verified on a 1.9 GB FAT16 volume) |
 | Reported version | `AH=30h` returns `AX=0x0004` (DOS 4.00); `VER` prints the same level. Set `UEFIDOS_DOSVER_*` in `src/uefidos_config.h` to claim another one |
 | Data structures | `AH=32h` synthesises a DPB per mounted drive in the reserved ROM window; `AH=52h` returns a list-of-lists whose `+2` points at that chain |
+| EXE image placement | `CONFIG.SYS` `EXECHIGH=ON` loads an EXE image flush against the top of the program's block instead of right after the PSP (what DOS itself does). `CONFIG` shows the current mode; the host harness has `UEFIDOS_EXEC_HIGH_IMAGE` |
 | Error reporting | `AH=59h` maps the last failure to a class / suggested action / locus triple (`2`→class 8, `5`/`21h`→class 3, `27h`→class 11, `50h`→class 12, …) |
 | Extended open | `AH=6Ch` with the DOS action bits: open-existing / create-if-missing / replace-existing, returning handle in `AX` and `1`/`2`/`3` in `CX`; `AH=68h` commits |
 | Unique temp files | `AH=5Ah` appends `TMPxxxxx.TMP` to the given directory and retries on collision, so two programs never collide |
@@ -440,7 +441,7 @@ Long Name Report.txt         31 13:12  11-11-26
 
 ## Regression suite
 
-`run_tests.ps1` builds everything and runs 33 checks: FAT32 read/write selftest;
+`run_tests.ps1` builds everything and runs 34 checks: FAT32 read/write selftest;
 host shell DIR/TYPE/VER/COM/EXE/EXEC/video plus native-API and upcall demos;
 host shell write path; floppy-image `A:` mount; FAT12 write on a 2.11 image;
 FAT12 read of 2.11 and MS-DOS 5 images; two QEMU/OVMF boot smoke tests (x86_64
@@ -565,6 +566,20 @@ out on a UEFI-DOS image with `tools/install_win1x.py` (and started with
 `start_win1x.bat`), but its `KERNEL.EXE` destroys its own code and stack in its
 bootstrap before it makes a single `INT 21h` call — the same files hang the same
 way on a real Compaq MS-DOS 2.11 boot floppy, so that one is not on UEFI-DOS.
+
+**1.1.6 moves that wall.** `CONFIG.SYS EXECHIGH=ON` loads the kernel image flush
+against the top of its block (`load 0x748B + 0x2B35` paragraphs = `0x9FC0`), the
+geometry a reference MS-DOS 5.00 run shows for the same file. In it the
+module-database allocation succeeds, the kernel opens `WIN100.OVL`, reads
+`WIN.INI`, installs its own `INT 21h` front end and critical-error handler, and
+its CGA driver at `16CDh` really executes `INT 10h AH=0Fh / AH=00h` (mode 6) `/
+AH=0Fh`. The `INT` trace now records the call site (`at CS:IP`), which also
+settled who prints the banner: it is `WIN.COM`'s own embedded `LOGO` module
+(image offset 0x890, `INT 10h AH=0Eh` from `0D89:012Ch`), and the mode-3 restore
+at the end is that module's entry 7 on WIN.COM's exit path, not the kernel
+switching back. The kernel still returns to WIN.COM right after the display
+driver initialises, so there is no desktop yet; `docs/windows1x.md` has the
+decoded interrupt dispatcher, the segment map and the next steps.
 Windows/286 2.10 needs 286 protected mode and an EMM, which UEFI-DOS does not
 have.
 

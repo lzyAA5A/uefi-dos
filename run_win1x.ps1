@@ -96,6 +96,13 @@ if ($Installed) {
         Set-Content -Path $auto_path -Value $auto -NoNewline -Encoding ASCII
         Write-Host '  wrote AUTOEXEC.BAT (SETVER + CD \WINDOWS + WIN)'
     }
+    # The Windows 1.x kernel rebuilds the DOS arena from PSP+2 and then expects
+    # its own image out of the way, so give it the geometry a real DOS 5 machine
+    # ends up in: EXECHIGH=ON loads EXE images flush against the top of the block.
+    $cfg_path = Join-Path $Installed 'CONFIG.SYS'
+    $cfg = "FILES=40`r`nLASTDRIVE=D`r`nEXECHIGH=ON`r`n"
+    Set-Content -Path $cfg_path -Value $cfg -NoNewline -Encoding ASCII
+    Write-Host '  wrote CONFIG.SYS (FILES=40, EXECHIGH=ON)'
     # the firmware needs EFI\BOOT in the image, and an installed C:\WINDOWS tree
     # does not carry it -- drop the freshly built loaders in before imaging
     $efiDir = Join-Path $Installed 'EFI\BOOT'

@@ -63,6 +63,7 @@ DOS 4.0（以及 3.3/5.0）的默认是 **FILES=8**，其中句柄 0..4 是预�
 | `FILES=n` | 生效句柄上限（clamp 到 5..255） |
 | `FCBS=m,n` | 记录 `g_dos.fcb_limit`（FCB 层本身无状态，见 4.3） |
 | `LASTDRIVE=x` | 记录 `g_dos.last_drive`，clamp 到 `DOS_MAX_DRIVES-1`（当前 = D:） |
+| `EXECHIGH=ON` | 1.1.6 起：EXE 映像贴着程序块顶端装载（默认 OFF = PSP+0x10，DOS 本来行为）；`CONFIG` 打印当前模式 |
 | `BUFFERS/DEVICE/SHELL/STACKS/SWITCHES/REM/;` | 接受并忽略（UEFI 层不需要可配置 BIOS） |
 
 INT 21h **AH=67h** 同时支持（设定本进程句柄上限），实测：
