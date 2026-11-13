@@ -2731,3 +2731,153 @@ Next targets, in order:
    see `8845: mov ss:000C,ax`), so on real hardware `SS` cannot be the PSP.
 3. Trace who sets `SS` before the stub call (`1FA5:87F5` loads the module with
    `lcall 0DBD:1944` / `lcall 0DBD:14AD` and then `ljmp 1EBB:07CF`).
+
+
+## Round 17 — the desktop is on screen (only a modal "not enough memory" box is left)
+
+Round 17 was supposed to answer the three questions above.  It answered them,
+and then the whole picture changed: **Windows 1.01 now paints the MS-DOS
+Executive desktop.**  `build/win_frame3.ppm` (host harness,
+`UEFIDOS_EXEC_HIGH_IMAGE=1`, ~30 M steps) shows the shell window with its title
+bar ("MS-DOS Executive"), the menu bar (`File  View  Special`), the drive
+buttons `A`/`B`/`C`/`D` with `C` selected, the path line `C: \`, and a modal
+MS-DOS box on top of the (still empty) file area:
+
+    MS-DOS
+    Not enough memory to display entire directory.
+                          [ Ok ]
+
+The user's two screenshots (`屏幕截图 2026-11-13 101456.png`, the CGA splash,
+and `...101601.png`, the same box filled with the 50 % grey desktop dither)
+were taken on 1.1.6/1.1.7 and are now well behind the current state.
+
+### 1. `UEFIDOS_TRACE_SS=1` — who changes `SS`, and to what
+
+New host-only knob (in `step()` in `src/emu/emu.c`): every instruction that
+changes `SS` prints the old/new value and the frame it left behind, compared
+against the *last value seen* (so a change that happens between instructions is
+reported too):
+
+    [ss] #2455284 1409->0D00 sp=0826->0826 after 0D00:0592 next=0D00:0594 ax=00FF bx=026A ...
+
+A full Windows start yields **13** changes:
+
+    0D00->7496  by 748B:0000     WIN100.BIN entry, own stack
+    7496->748B  by 748B:0016
+    748B->7C0A  by 74C4:6524     kernel picks a task stack
+    7C0A->1503  by 74C4:66A3
+    1503->8B97  by 0DBD:3594
+    8B97->1409  by 8FC3:002E
+    1409<->15B7 (15B7:026B / 15B7:02C3)   timer ISR stack switch, six times
+    1409->0D00  by 0D00:0592    the EXEC child returns to WIN.COM
+
+That last line settles the earlier "why is `SS` the PSP" question: `0D00` is
+**WIN.COM's own stack** and it appears when the EXEC'd child (the kernel)
+*terminates* and `emu_exec_program_ex()` restores the parent context.  The
+"FatalExit code = stack overflow" seen in round 16 is a **post-mortem**: the
+kernel had already been killed, WIN.COM resumed at `0D00:0594`, and the leftover
+Windows timer ISR / module code then ran on WIN.COM's stack, where the module's
+stack probe reads `SS:000A` — the PSP's saved INT 22h vector (`F000:FFE0`) —
+and declares an overflow.  Nothing is actually out of stack, and on real DOS the
+same probe compares against a *small* value (see §3).  `UEFIDOS_HARD_STEPS` (or
+the 200 M instruction budget) was what "killed the kernel" in every one of those
+runs.
+
+### 2. Two more emulator-side facts nailed down this round
+
+* **IRQ1 really arrives.**  With `UEFIDOS_TRACE_IRQ=1` and
+  `UEFIDOS_KBD='ENTER,ENTER,ENTER'`: 17 × `[irq] vec=08` (Windows' timer ISR at
+  `15B7:0244`) and 3 × `[irq] vec=09` to the guest's keyboard ISR
+  (`1607:0199`), all delivered while the kernel sat in its idle loop
+  (`0DBD:350C` / `0DBD:3519`).  `[irqdbg]` shows `IF=1 depth=0 pe=0` and
+  `ivt8=0244:15B7`, i.e. delivery conditions are healthy for hours of runtime.
+* **The PIC is not emulated.**  `emu_in_port()` (`src/emu/emu.c:36`) has no case
+  for 0x20/0x21, so `in al,0x20` always reads 0 and EOI writes are dropped.  The
+  Windows timer ISR does `mov al,0Bh / out 20h,al / in al,20h` (OCW3 "read ISR")
+  and skips its callback walk when the result is non-zero — today we always take
+  the "ISR == 0" path, which happens to be what a real machine shows as well
+  (the BIOS stub has already sent EOI), so this is a *correctness* gap rather
+  than the current blocker.  Worth implementing anyway (ISR/IRR bits, OCW2 EOI
+  forms, IMR at 0x21).
+* **The kernel's idle state matches the reference.**  At 30 M steps the kernel
+  is in `0DBD:3508` (`mov ax,cs:[0016] / or ax,ax / int 28h / jmp`), waiting for
+  `word [28EB:0006]`; the real-DOS reference sits at `0FEB:3510` — the same
+  instruction — while its desktop is up.  So the idle loop is normal; what
+  differs is only what the shell managed to draw.
+
+### 3. `FINDTEST.COM`: our find API measured against real MS-DOS 5.00
+
+`tools/make_find_test.py` builds `FINDTEST.COM`, which calls `INT 21h AH=4Eh`
+then `AH=1Ah`+`AH=4Fh` in a loop exactly the way Windows' KERNEL wrapper does
+(`0x91DD:090D` / `0x91DD:095D`: re-point the DTA at the same stack buffer before
+every call, `mov ah,4Fh / int 21h`, `jb` = error, `xor ax,ax` = success), and
+prints the entry count, the failing `AX`, and the 43 DTA bytes after the end.
+
+Run under real MS-DOS 5.00 in QEMU (`_tmp/win/ref_find.py`, vvfat, same two
+files) the report is:
+
+    entries=2
+    first failure AX=0012
+    dta=03 3F 3F 3F 3F 3F 3F 3F 3F 3F 3F 3F 30 04 00 00 00 00 00 00 00 20 A4 5E 6D 5D 62 02 00 00 46 49 4E 44 54 45 53 54 2E 43 4F 4D 00
+    after-end call 1 0012      (DTA unchanged)
+    after-end call 2 0012      (DTA unchanged)
+
+and under UEFI-DOS the same, except that the **first 21 DTA bytes (DOS' private
+search state) stay zero** — we keep the find state in the emulator instead of in
+the DTA.  Entry count, error code and the 22-byte result area are identical.
+This is now a regression check (`run_tests.ps1`: "DOS: find-next ends with error
+18 and keeps the last entry (MS-DOS 5 reference)").
+
+Conclusion: **the find API is not the bug.**
+
+### 4. The directory-cache routine, and why the dialog is *not* its OOM path
+
+The single `AH=4Eh` in a whole run comes from `0x91DD:0923`; the 1480 `AH=4Fh`
+calls come from `0x91DD:096F`.  The caller is a directory-cache builder at
+`0x91DD:27A0`:
+
+    mov ax,0x14 / mov [0x00BE],ax        ; capacity = 20 entries
+    mov bx,0x16 / mul bx                 ; 20 * 22 = 440 bytes
+    push 0x40 / push dx,ax / lcall 0DBD:61EE   ; GlobalAlloc(flags 0x40, 440)
+    ...                                  ; 0DBD:4FDA  = index array (20*2 bytes)
+    0x280F: if count >= capacity -> 0x283F (grow by 20: GlobalReAlloc + realloc)
+    0x2818: al = ss:[si+0x1E] ; if '.' skip (dot entries)
+    0x282D: rep movsb 22 bytes into the cache at es:di
+    0x283A: call 0x95D                   ; find-next
+    0x2898: or ax,ax / je 0x2895          ; 0 = "one more", non-zero = done
+    0x287B: (any of the three allocations returned 0) message box id 0x1D, then
+            give up  -> "Not enough memory to display entire directory."
+
+`UEFIDOS_DUMP_AT=91DD:287B` **never fires**, so this routine's OOM branch is not
+what we see.  The dialog we get is independent of the directory contents:
+4 files, 34 files and the full 154-file tree all produce a byte-identical frame
+(`build/win_min2.ppm` with 4 files hashes exactly like `build/win_frame3.ppm`
+with 154 files).  So the shell fails to allocate *something else* up front.
+
+What the keyboard *does* prove: `build/win_min.ppm` (34-file tree, `ENTER,ENTER`
+injected) differs from the no-key frame in exactly one 56×10-pixel rectangle at
+x 292..347, y 112..121 — the `Ok` button.  So IRQ1 → Windows' INT 9 handler →
+dialog work all function; the dialog either redraws the button or comes straight
+back because the allocation still fails.
+
+Open lead inside this routine: the trace shows 154 successful find-nexts (the
+number of files) followed by **1326 consecutive error-18 calls** that the loop
+should have stopped at.  Either a second caller repeats the same 1Ah/4Fh pair, or
+the wrapper's `AX` is being clobbered between `int 21h` and the `or ax,ax` — the
+next step is a window trace on `0x91DD:0960-0980` combined with a ring dump
+(`build/limit_dump.txt`) taken while the failures stream.
+
+### 5. Next targets, in order
+
+1. Identify the allocation the shell fails: `UEFIDOS_WATCH` on the KERNEL
+   module's heap heads plus a window trace over `0x0DBD:4C11-4CDD` (local heap
+   allocator) and `0x0DBD:61EE/6219` (GlobalAlloc/ReAlloc), keeping the *last*
+   calls rather than the first (extend `TRACE_STEPS` sampling to "first N then
+   every Nth").
+2. Explain the 1326 post-EOF find-next calls (see above) — if the kernel really
+   does loop there, its directory cache grows by 20 entries per pass and *that*
+   is what reports "not enough memory".
+3. Implement the 8259 PIC subset (ISR/IRR read via OCW3, OCW2 EOI, IMR at 0x21)
+   so `in al,20h` answers like hardware.
+4. Re-take the reference snapshots (`_tmp/win/ref_snap.py`) and compare the
+   Windows arena / heap heads with ours at the same idle point.

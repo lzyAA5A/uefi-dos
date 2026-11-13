@@ -2720,6 +2720,58 @@ do_int: {
 /* FPU / 386 dispatch entry point */
 static int step(Emu *e)
 {
+#ifdef UEFIDOS_HOST
+    /* ---- stack segment watch (UEFIDOS_TRACE_SS=1) ----------------------
+     * A program that suddenly runs on the wrong SS (a PSP instead of its own
+     * stack segment, or a stale frame restored by a bad IRET) is very hard to
+     * spot from DOS call traces: everything still looks legal, the program just
+     * reads nonsense where it expects its stack.  Log every instruction that
+     * changes SS, together with the frame it lands on. */
+    static int ss_on = -1;
+    static FILE *ss_fp = NULL;
+    static u16 last_ss = 0;
+    static int last_ok = 0;
+    static u64 ss_n = 0;
+    u16 ss0 = e->ss;
+    u16 sp0 = e->sp;
+    if (ss_on < 0) {
+        const char *v = getenv("UEFIDOS_TRACE_SS");
+        ss_on = (v && *v && *v != '0') ? 1 : 0;
+        if (ss_on) {
+            const char *f = getenv("UEFIDOS_TRACE_SS_FILE");
+            ss_fp = fopen(f && *f ? f : "build/stack_trace.txt", "w");
+        }
+    }
+    if (ss_on) {
+        u16 cs0 = e->cs, ip0 = e->ip;
+        int rc;
+        if (!last_ok) { last_ss = e->ss; last_ok = 1; }
+        ss_n++;
+        rc = step_8086(e);
+        /* compare against the last value we *saw*, not just the value at the
+         * start of this instruction: an SS that changes between instructions
+         * (an injected interrupt frame, a context the emulator restores) must be
+         * reported too, otherwise the change is invisible exactly where it
+         * matters */
+        if (e->ss != last_ss) {
+            FILE *f = ss_fp ? ss_fp : stderr;
+            if (ss_fp) fprintf(stderr, "[ss] change %04X->%04X (see trace file)\n",
+                               (unsigned)last_ss, (unsigned)e->ss);
+            fprintf(f,
+                    "[ss] #%llu %04X->%04X sp=%04X->%04X after %04X:%04X next=%04X:%04X "
+                    "ax=%04X bx=%04X cx=%04X dx=%04X si=%04X di=%04X bp=%04X "
+                    "ds=%04X es=%04X\n",
+                    (unsigned long long)ss_n, (unsigned)last_ss, (unsigned)e->ss, (unsigned)sp0, (unsigned)e->sp,
+                    (unsigned)cs0, (unsigned)ip0, (unsigned)e->cs, (unsigned)e->ip,
+                    (unsigned)e->ax, (unsigned)e->bx,
+                    (unsigned)e->cx, (unsigned)e->dx, (unsigned)e->si, (unsigned)e->di,
+                    (unsigned)e->bp, (unsigned)e->ds, (unsigned)e->es);
+            fflush(f);
+            last_ss = e->ss;
+        }
+        return rc;
+    }
+#endif
     return step_8086(e);
 }
 

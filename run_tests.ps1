@@ -153,6 +153,26 @@ Run-Check 'DOS4TEST.COM: DPB, list of lists, extended error, AH=6Ch/5Ah/60h' {
     '5a-del: OK', '60h-drive: OK', '60h-root: OK', 'C:\hello.txt', '63h-dbcs: OK',
     'DOS4-OK')
 
+# ---- find-first / find-next: the DOS-visible half of a directory listing ----
+# tools/make_find_test.py calls INT 21h AH=4Eh/4Fh exactly the way Windows 1.x'
+# KERNEL wrapper does (re-point the DTA at the same buffer before every call).
+# The reference is a real MS-DOS 5.00 run over the same two files: it yields
+# entries=2, then fails with AX=0012 and keeps the last entry's record in the
+# DTA, and every later find-next keeps failing with 0012.  Windows 1.01's
+# directory cache grows by 20 entries per refill off this loop, so a find that
+# never reports the end walks straight into 'not enough memory'.
+Run-Check 'DOS: find-next ends with error 18 and keeps the last entry (MS-DOS 5 reference)' {
+    $mkf = Join-Path $Root 'tools\make_find_test.py'
+    & $Python $mkf $Build | Out-Null
+    $img = Join-Path $Build 't_find.img'
+    $mk = Join-Path $Root 'tools\make_image.py'
+    & $Python $mk $img --size-mb 40 --noboot `
+        --file ((Join-Path $Build 'FINDTEST.COM') + '=FINDTEST.COM') `
+        --text 'AAA.TXT=x' | Out-Null
+    & $HostExe --shell $img 'FINDTEST'
+} @('entries=3', 'first failure AX=0012', 'after-end call 1 0012',
+    'after-end call 2 0012')
+
 # ---- bundled utilities (INFO / CAL / SUM / HEX) ----
 # CAL's month name is cross-checked against the host clock, which also proves
 # the INT 21h AH=2Ah wiring end to end.

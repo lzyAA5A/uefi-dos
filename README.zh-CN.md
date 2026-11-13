@@ -42,7 +42,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.8.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.8.zip)
+[**下载 `UEFI-DOS-1.1.9.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.9.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -458,6 +458,7 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_DUMP_AT=CS:IP`（配合 `UEFIDOS_DUMP_AT_FILE=file`） | 执行第一次走到该地址时把低端 640 KB 存盘（默认 `build/mem_at.bin`）——用来在"分配器放弃"的那条指令上抓下程序的内存现场 |
 | `UEFIDOS_TRACE_INTS=1`、`UEFIDOS_TRACE_VRAM=n`、`UEFIDOS_TRACE_STEPS=n`、`UEFIDOS_TRACE_WINDOW=CS:LO-HI`、`UEFIDOS_TRACE_PORTS=1` | 中断、显存写入、单步、地址窗口、端口 I/O 跟踪，输出在 `build/` |
 | `UEFIDOS_TRACE_IRQ=1` | 硬件中断跟踪：每往客户机处理程序压入一个 INT 8h/9h 帧就打一行（`[irq] vec=08 depth=0 from CS:IP to CS:IP`），另加周期性 `[irqdbg]` 行（IF 状态、irq 嵌套深度、向量是否仍指向我们的桩） |
+| `UEFIDOS_TRACE_SS=1` | 打印每一条改变了 `SS` 的指令，以及它落到的栈帧（`[ss] #1234 1409->0D00 sp=0826->0826 after 0D00:0592 next=0D00:0594 ax=...`）——程序悄悄跑到了错误的栈段（本应是自己的栈段却指向 PSP，或被错误的 `IRET` 恢复了过期栈帧）在 DOS 调用轨迹里完全看不出来；Windows 1.01 的 `FatalExit stack overflow` 就是这样被定位到「过期栈帧」而不是真正的栈溢出 |
 | `UEFIDOS_TRACE_IVT=1` | 打印客户机每一次 `INT 21h AH=25h`（`[ivt] set 08 = 15B7:0244 by CS:IP`）——看程序装了哪个中断处理程序、以及到底有没有装，这是最快的手段 |
 | `UEFIDOS_TRACE_PSP=1`、`UEFIDOS_TRACE_EXEC=1` | 打印每个新 PSP 的命令行尾部（及其后 16 字节）、每次 `INT 21h AH=4Bh`（路径、环境段、命令行远指针、调用者 PSP/DS），以及失败的 `AH=48h` 请求 |
 | `UEFIDOS_TRACE_MEM=1` | 在 `INT 21h AH=4Ah` 之后、以及每次 `AH=48h` 失败时打印 DOS 内存 arena（MCB 链：段址、`M`/`Z`、owner PSP、大小、数据范围）——查看程序“先缩小再探测”的内存测算是否算对，这是最快的手段 |
