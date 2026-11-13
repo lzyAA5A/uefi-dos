@@ -12,7 +12,7 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.1.11** —— 35 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.1.12** —— 35 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
 1.1.1 修的是 DOS 的 EXEC 命令行约定：调用方 `PSP:0080h..00FFh` 那 **128 字节
@@ -42,7 +42,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.11.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.10.zip)
+[**下载 `UEFI-DOS-1.1.12.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.12.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -462,6 +462,7 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_TRACE_INTS=1`、`UEFIDOS_TRACE_VRAM=n`、`UEFIDOS_TRACE_STEPS=n`、`UEFIDOS_TRACE_WINDOW=CS:LO-HI`、`UEFIDOS_TRACE_PORTS=1` | 中断、显存写入、单步、地址窗口、端口 I/O 跟踪，输出在 `build/` |
 | `UEFIDOS_TRACE_IRQ=1` | 硬件中断跟踪：每往客户机处理程序压入一个 INT 8h/9h 帧就打一行（`[irq] vec=08 depth=0 from CS:IP to CS:IP`），另加周期性 `[irqdbg]` 行（IF 状态、irq 嵌套深度、向量是否仍指向我们的桩） |
 | `UEFIDOS_TRACE_SS=1` | 打印每一条改变了 `SS` 的指令，以及它落到的栈帧（`[ss] #1234 1409->0D00 sp=0826->0826 after 0D00:0592 next=0D00:0594 ax=...`）——程序悄悄跑到了错误的栈段（本应是自己的栈段却指向 PSP，或被错误的 `IRET` 恢复了过期栈帧）在 DOS 调用轨迹里完全看不出来；Windows 1.01 的 `FatalExit stack overflow` 就是这样被定位到「过期栈帧」而不是真正的栈溢出 |
+| `UEFIDOS_TRACE_MOUSE=1` | 客户机每一次 `INT 33h` 在 `build/mouse_trace.txt` 打印一行（`INT33 AX=.. BX=.. at CS:IP`）——INT 21h 的 trace 看不到这个向量，所以"客户机从来没碰过鼠标"要有这一行才算证据（没选指点设备的 Windows 1.01 就是零调用） |
 | `UEFIDOS_TRACE_FIND=1` | 客户机每一次 `INT 21h AH=4Eh/AH=4Fh` 打印一行，含从 DTA 里恢复的搜索状态与结果（`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`）——区分"程序在死循环是因为搜索永远不结束"和"因为搜索根本没开始"最快的手段 |
 | `UEFIDOS_TRACE_IVT=1` | 打印客户机每一次 `INT 21h AH=25h`（`[ivt] set 08 = 15B7:0244 by CS:IP`）——看程序装了哪个中断处理程序、以及到底有没有装，这是最快的手段 |
 | `UEFIDOS_TRACE_PSP=1`、`UEFIDOS_TRACE_EXEC=1` | 打印每个新 PSP 的命令行尾部（及其后 16 字节）、每次 `INT 21h AH=4Bh`（路径、环境段、命令行远指针、调用者 PSP/DS），以及失败的 `AH=48h` 请求 |

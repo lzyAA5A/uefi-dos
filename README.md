@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.1.11** — 35 of 35 automated checks pass on the Windows host harness
+Version **1.1.12** — 35 of 35 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
 
 1.1.1 fixes the EXEC command-tail contract DOS has and UEFI-DOS did not:
@@ -42,7 +42,7 @@ still missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.1.11.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.10.zip)
+[**Download `UEFI-DOS-1.1.12.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.12.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -498,6 +498,7 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_TRACE_INTS=1`, `UEFIDOS_TRACE_VRAM=n`, `UEFIDOS_TRACE_STEPS=n`, `UEFIDOS_TRACE_WINDOW=CS:LO-HI`, `UEFIDOS_TRACE_PORTS=1` | interrupt, video-write, single-step, address-window and port-I/O traces under `build/` |
 | `UEFIDOS_TRACE_IRQ=1` | hardware-interrupt trace: one line per INT 8h/9h frame pushed into a guest handler (`[irq] vec=08 depth=0 from CS:IP to CS:IP`), plus a periodic `[irqdbg]` line with the delivery conditions (IF, irq depth, whether the vector is still ours) |
 | `UEFIDOS_TRACE_SS=1` | log every instruction that changes `SS`, with the frame it lands on (`[ss] #1234 1409->0D00 sp=0826->0826 after 0D00:0592 next=0D00:0594 ax=...`) — a program that silently ends up on the wrong stack segment (a PSP instead of its own stack, or a stale frame restored by a bad `IRET`) is invisible in DOS call traces; this is how Windows 1.01's FatalExit `stack overflow` was pinned on a stale frame rather than on a real stack exhaustion |
+| `UEFIDOS_TRACE_MOUSE=1` | one line per `INT 33h` call in `build/mouse_trace.txt` (`INT33 AX=.. BX=.. at CS:IP`) — the INT 21h trace cannot see this vector, so this is how "the guest never touches the mouse" becomes provable (Windows 1.01 with no pointing device selected makes zero calls) |
 | `UEFIDOS_TRACE_FIND=1` | one line per `INT 21h AH=4Eh/AH=4Fh` with the search state recovered from the DTA and the result (`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`) — the fastest way to tell "a program loops because the search never ends" from "because the search never started" |
 | `UEFIDOS_TRACE_IVT=1` | log every `INT 21h AH=25h` the guest performs (`[ivt] set 08 = 15B7:0244 by CS:IP`) — the fastest way to see which handler a program installs, and whether it installs one at all |
 | `UEFIDOS_TRACE_PSP=1`, `UEFIDOS_TRACE_EXEC=1` | print every new PSP's command tail (and the bytes after it) and every `INT 21h AH=4Bh` (path, environment segment, command-line far pointer, caller PSP/DS) plus failing `AH=48h` requests |

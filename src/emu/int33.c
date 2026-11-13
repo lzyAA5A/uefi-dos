@@ -14,11 +14,40 @@
 #include "uefidos.h"
 #include "emu/emu.h"
 
+/* Host-only INT 33h trace (UEFIDOS_TRACE_MOUSE=1 -> build/mouse_trace.txt).
+ * The INT 21h trace cannot see this vector, so "Windows never touches the
+ * mouse" was unprovable until every call got its own line. */
+#ifdef UEFIDOS_HOST
+#include <stdio.h>
+#include <stdlib.h>
+static FILE *g_mtrace;
+static unsigned long g_mtrace_n;
+static int g_mtrace_enabled = -1;
+static void mtrace(Emu *e)
+{
+    if (g_mtrace_enabled < 0) {
+        g_mtrace_enabled = getenv("UEFIDOS_TRACE_MOUSE") ? 1 : 0;
+        if (g_mtrace_enabled) g_mtrace = fopen("build/mouse_trace.txt", "w");
+    }
+    if (!g_mtrace_enabled || !g_mtrace) return;
+    g_mtrace_n++;
+    if (g_mtrace_n <= 400 || (g_mtrace_n % 200) == 0) {
+        fprintf(g_mtrace,
+                "%7lu INT33 AX=%04X BX=%04X CX=%04X DX=%04X at %04X:%04X\n",
+                g_mtrace_n, e->ax, e->bx, e->cx, e->dx, e->cs, e->ip);
+        fflush(g_mtrace);
+    }
+}
+#else
+#define mtrace(e) ((void)0)
+#endif
+
 static void set_ax(Emu *e, u16 v) { e->ax = v; }
 
 void int33_handler(Emu *e)
 {
     u16 ax = e->ax;
+    mtrace(e);
     switch (ax) {
     case 0x0000: {                  /* reset driver and read status */
         e->mouse_press[0] = e->mouse_press[1] = e->mouse_press[2] = 0;

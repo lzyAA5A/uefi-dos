@@ -3073,3 +3073,52 @@ shared `dos_error_code()` table.
   `FatalExit code = stack overflow` because it probes `SS:000A` on WIN.COM's PSP
   stack, where that word is the saved `INT 22h` vector — a post-mortem artefact,
   not a real overflow, and unchanged by this round.
+
+## Round 19 -- the "Change Disk" dialog, the aspect ratio and the mouse
+
+### A missing font blocks the run, and the dialog cannot be answered
+
+The user's QEMU run stopped on `Change Disk / Insert COURD.FON disk in drive A:`
+and then exited by itself.  That tree is an incomplete SETUP output: of the 17
+`*.FON` files on the media it has only 14, and the three it lacks are exactly
+the `Set #5` trio its CGA driver asks for -- `COURD.FON`, `HELVD.FON`,
+`TMSRD.FON`.  Copying those three in (`F:\1231\_tmp\win\w101run\WINDOWS`,
+now 31 files) makes the very same installed tree paint the desktop with the
+`C:\WINDOWS` listing (`build\win_run2.png`), no dialog.  Reproduced
+deliberately by deleting only `COURD.FON` from a good tree: byte-identical
+dialog (`build\win_nofont.png`), so the message names the first missing file,
+not the whole set.
+
+`run_win1x.ps1 -Installed` now checks 23 runtime files (`WIN.COM`, `WIN100.BIN`,
+`WIN100.OVL`, `WIN.INI`, `MSDOS.EXE`, `CGA.DRV`, `SYSTEM.DRV`, `KEYBUS.DRV`,
+`COMM.DRV` and the font set `COURA/HELVA/TMSRA/COURC/HELVC/TMSRC/COURD/HELVD/
+TMSRD/HIFONTS/LOFONTS/ROMAN/SCRIPT/MODERN`) before it writes `AUTOEXEC.BAT` and
+prints a `WARNING: N file(s) missing from <dir>` block naming them.
+
+### CGA aspect ratio
+
+`plat_video_gfx_begin()` used one integer upscale for both axes, so 640x200 in a
+1280x800 GOP mode became 1280x400 centred (`dy=200`) -- black bars above and
+below plus squashed text.  It now scales horizontally (`g_gfx_scale`) and maps
+rows through a rational `g_gfx_vy_num/g_gfx_vy_den` so the picture is always
+4:3 (`out_h = out_w*3/4`), which is what a 200-line CGA frame actually looks
+like on a 4:3 monitor.  Verified full-screen in QEMU (`build\win1x_fix2.png`).
+
+### Mouse: this install has no pointing device
+
+`UEFIDOS_TRACE_MOUSE=1` (new knob, `src/emu/int33.c`) proves what the INT 21h
+trace could not: with the desktop up, a scripted
+`UEFIDOS_MOUSE='20,10,0; 20,10,1; -20,-10,0'` injection and several runs, the
+guest makes **zero `INT 33h` calls** -- and it never opens a `*.DRV` either (the
+only `AH=3Dh` opens are `WIN100.OVL`, `WIN.INI` and the `.FON` files).  Adding
+`mouse=MSMOUSE1.DRV` or
+`device=Microsoft Mouse (Bus/Serial),MSMOUSE1.DRV,COM1:` to `WIN.INI` changes
+nothing: Windows 1.01 has no `mouse` key/string at all in `WIN100.BIN` (the only
+`MOUSE` hits there are the driver-module name table `SYSTEM/KEYBOARD/MOUSE/
+DISPLAY/SOUND/COMM/KERNEL/GDI`), and `SETUP.EXE`'s string pool
+(`MSMOUSE1.DRV` / `MSMOUSE2.DRV` / `NOMOUSE.DRV` / `MOUSE.DRV`) shows the choice
+is compiled into `WIN100.BIN`/`WIN100.OVL` by SETUP.  So the pointer needs a
+SETUP run with a pointing device selected -- our `INT 33h`
+(`src/emu/int33.c`, `MOUSETST` check passes) and the firmware simple-pointer
+path (`plat_mouse_poll()`) are both ready for it.
+
