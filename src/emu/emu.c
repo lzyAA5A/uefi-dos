@@ -2564,6 +2564,13 @@ static int step_8086(Emu *e)
         if (width == 32) e->eflags = (fl & 0x00FD5FFFu) | EFLAGS_FIXED;
         else e->flags = (u16)((fl & 0x0FD5) | 0x0002);
         set_cs_ip(e, sel, off);
+        /* A guest handler that we pushed a hardware-interrupt frame for leaves
+         * through its own IRET.  Decrementing here is what keeps IRQ0/IRQ1
+         * flowing: the old "did we land back on the interrupted CS:IP" test only
+         * ran once every 0xFFF steps, so a handler that returned quickly left
+         * irq_depth latched at 1 after the very first timer tick and the guest
+         * never saw another interrupt. */
+        if (e->irq_depth > 0) e->irq_depth--;
         break;
     }
     case 0xC8: { /* ENTER */
@@ -2652,7 +2659,19 @@ do_int: {
             else if (intn == 0x31) int31_handler(e);
             else if (intn == 0x33) int33_handler(e);
             else if (intn == 0x60) int60_handler(e);
-            else { e->halted = 1; e->exit_code = 0; }
+            else {
+                /* INT 20h/27h terminate the program.  Which vector did it, and
+                 * from where, is exactly what you need to find the exit path of
+                 * a program that quits without saying why. */
+#ifdef UEFIDOS_HOST
+                if (getenv("UEFIDOS_TRACE_INTS"))
+                    fprintf(stderr,
+                            "[int-halt] int %02X at %04X:%04X AX=%04X BX=%04X\n",
+                            (unsigned)intn, e->cs, e->ip, e->ax, e->bx);
+#endif
+                e->halted = 1;
+                e->exit_code = 0;
+            }
             return 0;
         }
         /* program / stub handler: hardware-style interrupt */
@@ -3308,6 +3327,15 @@ static int inject_irq(Emu *e, int vec)
     u16 off = emu_rw(e, 0, (u16)(vec * 4));
     u16 seg = emu_rw(e, 0, (u16)(vec * 4 + 2));
     if (!seg) return 0;
+#ifdef UEFIDOS_HOST
+    {
+        static int on = -1;
+        if (on < 0) on = getenv("UEFIDOS_TRACE_IRQ") ? 1 : 0;
+        if (on)
+            fprintf(stderr, "[irq] vec=%02X depth=%d from %04X:%04X to %04X:%04X\n",
+                    (unsigned)vec, (int)e->irq_depth, e->cs, e->ip, seg, off);
+    }
+#endif
     e->irq_ip = (u16)e->eip;
     e->irq_cs = e->cs;
     e->irq_sp = (u16)e->esp;
@@ -3317,6 +3345,7 @@ static int inject_irq(Emu *e, int vec)
     push16(e, (u16)e->eip);
     set_cs_ip(e, seg, off);
     e->irq_depth++;
+    e->irq_steps = 0;
     return 1;
 }
 
@@ -3447,6 +3476,19 @@ int emu_run(Emu *e)
             if (e->irq_depth && e->cs == e->irq_cs && (u16)e->eip == e->irq_ip &&
                 e->ss == e->irq_ss && (u16)e->esp == e->irq_sp)
                 e->irq_depth = 0;
+        }
+        /* Interrupt delivery is sampled far more often than the tick rewrite: a
+         * guest that keeps IF clear for most of its work (a DOS kernel does) only
+         * opens a window of a few instructions, and sampling every 4096 steps
+         * misses it -- which looked like "the guest never gets timer ticks". */
+        if ((steps & 0x3Full) == 0 && !(e->cr0 & CR0_PE)) {
+            /* Watchdog: a handler that never returns through IRET (a stub that
+             * ends with RETF 2, or one that never returns at all) must not latch
+             * irq_depth and starve the guest of every further interrupt. */
+            if (e->irq_depth) {
+                e->irq_steps += 0x40u;
+                if (e->irq_steps > 0x30000u) e->irq_depth = 0;
+            }
             if ((e->eflags & F_IF) && e->irq_depth == 0) {
                 u32 now = plat_ticks_ms();
                 if ((u32)(now - e->irq_last_tick_ms) >= 55) {
@@ -3459,6 +3501,18 @@ int emu_run(Emu *e)
                 }
             }
         }
+#ifdef UEFIDOS_HOST
+        {
+            static int dbg = -1;
+            if (dbg < 0) dbg = getenv("UEFIDOS_TRACE_IRQ") ? 1 : 0;
+            if (dbg && (steps & 0x7FFFFull) == 0)
+                fprintf(stderr,
+                        "[irqdbg] step=%lu IF=%d depth=%d ours8=%d ivt8=%04X:%04X pe=%d\n",
+                        (unsigned long)total, (e->eflags & F_IF) ? 1 : 0,
+                        (int)e->irq_depth, vector_is_ours(e, 8), emu_rw(e, 0, 0x20),
+                        emu_rw(e, 0, 0x22), (e->cr0 & CR0_PE) ? 1 : 0);
+        }
+#endif
         /* an interactive program that is receiving keys is alive, not stuck:
          * refill its instruction budget so it can never be killed while the
          * user is playing */

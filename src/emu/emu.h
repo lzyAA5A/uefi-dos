@@ -101,6 +101,7 @@ typedef struct Emu {
     u16  mouse_cb_ip, mouse_cb_cs, mouse_cb_sp, mouse_cb_ss; /* return point */
     int  mouse_dx, mouse_dy;     /* motion accumulated since the last query */
     int  irq_depth;              /* hardware interrupt currently executing */
+u32  irq_steps;              /* steps spent inside that handler (watchdog) */
     u32  irq_last_tick_ms;       /* last INT 8h injection */
     int  kbd_irq_pending;        /* a key is waiting for IRQ1 delivery */
     u8   kbd_irq_scan;           /* scan code latched for port 60h */

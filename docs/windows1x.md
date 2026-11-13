@@ -2499,3 +2499,90 @@ nothing else we have tested benefits from moving it.  The Windows launcher
   reference run pages modules in from WIN100.OVL after the driver starts) and
   diff the module segments against the reference dump (`build\rd*.bin`), which
   showed modules at 0x17DB, 0x1829, 0x189F, 0x18AF, 0x1AD7, 0x1C3F.
+
+## Round 15: an interrupt-delivery bug, and Windows' own timer-ISR installer
+
+### The bug: the guest got exactly one hardware interrupt per run
+
+`UEFIDOS_TRACE_IRQ=1` (new) prints every INT 8h/9h frame the emulator pushes into
+a guest handler.  A full Windows 1.01 run printed **one** line:
+
+```
+[irq] vec=08 depth=0 from 0DBD:0089 to F000:23E0
+```
+
+One timer tick for a run of millions of instructions.  Two causes, both in
+`emu_run()` (`src/emu/emu.c`):
+
+1. **`irq_depth` latched at 1.**  The "handler finished" test required landing
+   back exactly on the interrupted `CS:IP`/`SS:SP`, but it was only evaluated
+   once every 0x1000 steps, so a handler that returned in a few hundred
+   instructions was never seen returning.  Fixed by decrementing `irq_depth` in
+   the `IRET` case of `step_8086()` (`case 0xCF`), which is where the frame is
+   actually popped.
+2. **Sampling was far too coarse.**  Interrupts were delivered only when
+   `(steps & 0xFFF) == 0` and the guest happened to have `IF` set at that exact
+   instruction boundary.  A kernel that runs most of its work with interrupts
+   disabled (DOS kernels do) opens windows of a few instructions, so the sample
+   almost always missed.  Delivery is now sampled every 0x40 steps, and a
+   watchdog clears `irq_depth` after 0x30000 steps inside a handler that never
+   returns (a stub that ends with `RETF 2`, or one that hangs).
+
+`[irqdbg]` (same knob) prints the delivery conditions periodically:
+
+```
+[irqdbg] step=524288 IF=1 depth=0 ours8=1 ivt8=FFE0:F000 pe=0
+[irqdbg] step=1048576 IF=0 depth=0 ours8=1 ivt8=FFE0:F000 pe=0
+```
+
+That second line is the next interesting fact: for most of the run the Windows
+kernel keeps **`IF` clear**, and `INT 08h`/`09h`/`1Ch` still point at our own ROM
+stub (`F000:FFE0`), i.e. Windows has not made those vectors its own.
+
+### What the kernel is actually doing in that loop
+
+A memory dump taken at the dispatcher entry (`UEFIDOS_DUMP_AT=0DBD:39AE`) shows
+its interrupt state:
+
+```
+cs:[007A]:[007C] saved INT 21h = F000:E084        (our hooked vector, not itself)
+cs:[0086]:[0088]               = F000:FFE0        (our ROM stub)
+IVT 08 -> F000:FFE0   09 -> F000:FFE0   1C -> F000:FFE0   22 -> F000:FFE0
+IVT 20 -> 0DBD:39A4   21 -> 0DBD:39A6   24 -> 0DBD:4072   27 -> 0DBD:399F
+dispatcher table base cs:[3716] = 3720:
+  02->3CAD 09->3C93 40->3B9E 3E->3CFD 42->3CFD 45->3CFD 46->3CFD 57->3CFD
+  5C->3CFD 06->3C1E 0B->3C61 44->3B7D 07->3C59 08->3CC1 0A->3C6F 0C->3BEF
+  01->3C61 3F->3BB1 0E->3CCB 3B->3CDB 25->3CF0 48->3D52 49->3D6E 4A->3D17
+  4B->3D89 00->3E65 4C->3E76 31->39F8 35->3A90 56->20BE
+```
+
+The stack at that dump pointed at `15B7:02DC`, and the code there (module segment
+0x15B7, the second module the loader allocated) is Windows' **timer-ISR
+installer**:
+
+```
+15B7:02CE   cmp  byte cs:[023C],0     ; "we are inside DOS" nesting counter
+15B7:02D4   jne  02F9                 ; if in DOS, skip
+15B7:02D6   mov  ah,35h               ; INT 21h AH=35h = get vector
+15B7:02D8   mov  al,08h               ; ...of INT 08h  -> AX=3508h
+15B7:02DA   int  21h
+15B7:02DC   mov  cs:[0230],bx         ; save the returned offset/segment,
+15B7:02E0   mov  cs:[0232],es         ; then hook INT 08h to itself
+```
+
+So `AX=3508h` in the ring is not a random DOS call storm: the kernel is
+re-entering its own "install my timer ISR" prologue, asking DOS for the INT 08h
+vector each time.  Because the vector it gets back is still our ROM stub and
+because the guest keeps interrupts disabled between those calls, the loop never
+converges into the pass that would let the timer run the Windows scheduler.
+
+Open leads for the next round, in order of expected value:
+
+1. Find who calls `15B7:02CE` in a loop and why: trace `UEFIDOS_TRACE_WINDOW`
+   on the *module* copy (the module segments move between runs: 0x0DBD was one,
+   0x15B7 another) and log the return address of the `int 21h` chain.
+2. Check whether the `cs:[023C]` "in DOS" counter is stuck: a nested
+   `INT 21h` from inside the ISR prologue would leave it non-zero and the
+   prologue would take the `jne 02F9` branch forever.
+3. Compare the same code path on the reference MS-DOS 5.00 run
+   (`python ref_snap.py <tag>`), where these vectors do get updated.

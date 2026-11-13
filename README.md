@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.1.6** — 34 of 34 automated checks pass on the Windows host harness
+Version **1.1.7** — 34 of 34 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
 
 1.1.1 fixes the EXEC command-tail contract DOS has and UEFI-DOS did not:
@@ -42,7 +42,7 @@ still missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.1.6.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.6.zip)
+[**Download `UEFI-DOS-1.1.7.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.7.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -490,6 +490,7 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_DUMP_MEM=file` | write the low 640 KB as the program ends (compare with a QEMU `pmemsave` of the same program under real DOS) |
 | `UEFIDOS_DUMP_AT=CS:IP` (+ `UEFIDOS_DUMP_AT_FILE=file`) | snapshot the low 640 KB the first time execution reaches that address (default `build/mem_at.bin`) — captures a program's arena at the exact instruction where its allocator gives up |
 | `UEFIDOS_TRACE_INTS=1`, `UEFIDOS_TRACE_VRAM=n`, `UEFIDOS_TRACE_STEPS=n`, `UEFIDOS_TRACE_WINDOW=CS:LO-HI`, `UEFIDOS_TRACE_PORTS=1` | interrupt, video-write, single-step, address-window and port-I/O traces under `build/` |
+| `UEFIDOS_TRACE_IRQ=1` | hardware-interrupt trace: one line per INT 8h/9h frame pushed into a guest handler (`[irq] vec=08 depth=0 from CS:IP to CS:IP`), plus a periodic `[irqdbg]` line with the delivery conditions (IF, irq depth, whether the vector is still ours) |
 | `UEFIDOS_TRACE_PSP=1`, `UEFIDOS_TRACE_EXEC=1` | print every new PSP's command tail (and the bytes after it) and every `INT 21h AH=4Bh` (path, environment segment, command-line far pointer, caller PSP/DS) plus failing `AH=48h` requests |
 | `UEFIDOS_TRACE_MEM=1` | dump the DOS memory arena (MCB chain: segment, `M`/`Z`, owner PSP, size, data range) after `INT 21h AH=4Ah` and whenever `AH=48h` fails — the fastest way to see whether a program's shrink-then-probe memory sizing came out right |
 | `UEFIDOS_EXEC_HIGH_IMAGE=1` | an experiment, not the default: load an EXE image flush against the top of the program's block and leave the PSP at the bottom — the geometry a reference MS-DOS 5.00 run shows for Windows 1.01's kernel (default off, because `PSP+0x10` is what programs read as their own segment) |
