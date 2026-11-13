@@ -235,6 +235,9 @@ static int kbd_pop(Emu *e, int *scan, int *ascii)
     return 1;
 }
 
+u16 g_i21_caller_cs = 0;
+u16 g_i21_caller_ip = 0;
+
 static int vector_is_ours(Emu *e, int n);
 
 void emu_kbd_pump(Emu *e)
@@ -1839,6 +1842,7 @@ static void dos_service_call(Emu *e, int intn)
     else if (intn == 0x1A) int1a_handler(e);
     else if (intn == 0x2F) int2f_handler(e);
     else if (intn == 0x31) int31_handler(e);
+    else if (intn == 0x33) int33_handler(e);
     else if (intn == 0x60) int60_handler(e);
     else if (intn == 0x20 || intn == 0x27) { e->halted = 1; e->exit_code = 0; }
     else { e->halted = 1; e->exit_code = 0; }
@@ -1938,6 +1942,12 @@ static int step_8086(Emu *e)
     int i;
     u8 op = 0;
     u8 intn = 0;
+    /* address of the INT instruction being executed, so do_int can tell "the
+     * program far-called the vector we handed out" (executing the INT inside
+     * our own trampoline cell) from "the program issued an INT of its own" */
+    int int_site_ok = 0;
+    u16 int_site_cs = 0;
+    u16 int_site_ip = 0;
 
     e->op32 = 0;
     e->addr32 = 0;
@@ -2593,7 +2603,14 @@ static int step_8086(Emu *e)
         else { e->sp = e->bp; e->bp = pop16(e); }
         break;
     }
-    case 0xCD: intn = fetch8(e); goto do_int;
+    case 0xCD: {
+        u16 at = (u16)(e->ip - 1);      /* opcode byte, operand follows it */
+        intn = fetch8(e);
+        int_site_ok = 1;
+        int_site_cs = e->cs;
+        int_site_ip = at;
+        goto do_int;
+    }
     case 0xCC: intn = 3; goto do_int;
     case 0xCE: if (getf(e, F_OF)) { intn = 4; goto do_int; } break;
     case 0x0F: step_386(e, seg_ov); break;
@@ -2646,6 +2663,22 @@ do_int: {
     {
         u16 vec_off = emu_rw(e, 0, (u16)(intn * 4));
         u16 vec_seg = emu_rw(e, 0, (u16)(intn * 4 + 2));
+        /* A program that saved a vector with INT 21h AH=35h and later chains to
+         * it executes the "INT n; IRET" we placed at TRAMP_SEG:TRAMP_SLOT(n).
+         * On a real machine that address is DOS/BIOS code and the call cannot
+         * come back to the program; here the IVT entry now points at the
+         * program's own hook, so re-reading the IVT would bounce the call
+         * straight back into the hook -- an infinite chain.  Enter our handler
+         * directly whenever the INT is executed inside its own trampoline. */
+        if (int_site_ok && int_site_cs == TRAMP_SEG &&
+            int_site_ip == (u16)TRAMP_SLOT(intn) && hooked_int(intn)) {
+            dos_service_call(e, intn);
+            return 0;
+        }
+        if (intn == 0x21 && int_site_ok && int_site_cs != TRAMP_SEG) {
+            g_i21_caller_cs = int_site_cs;
+            g_i21_caller_ip = int_site_ip;
+        }
         if ((vec_seg == MAGIC_SEG && vec_off == MAGIC_OFF) ||
             (hooked_int(intn) && vec_seg == TRAMP_SEG && vec_off == TRAMP_SLOT(intn))) {
             video_flush(e);
@@ -2742,7 +2775,52 @@ static void install_ivt(Emu *e)
     emu_wb(e, MAGIC_SEG, STUB_OFF, 0xCF);
     emu_wb(e, MAGIC_SEG, (u16)(STUB_OFF + 1), 0x90);
     emu_wb(e, MAGIC_SEG, MAGIC_OFF, 0xCF);
-    /* ---- ROM identification ------------------------------------------ */
+    /* ---- real BIOS handlers for the timer and keyboard vectors ---------- */
+    /* A do-nothing IRET stub is wrong for IRQ0/IRQ1: the timer handler is the
+     * one piece of the BIOS that chains INT 1Ch and bumps 0040:006C, and a
+     * program that hooks either (Windows 1.x/2.x installs a timer ISR) then
+     * never sees a tick.  Emit the classic handler shape instead. */
+    {
+        static const u8 irq8[] = {
+            0x50,              /* push ax                          */
+            0x1E,              /* push ds                          */
+            0xB8, 0x40, 0x00,  /* mov ax,0040                      */
+            0x8E, 0xD8,        /* mov ds,ax                        */
+            0xFF, 0x06, 0x6C, 0x00, /* inc word [006C] (tick low) */
+            0x75, 0x04,        /* jnz +4                           */
+            0xFF, 0x06, 0x6E, 0x00, /* inc word [006E] (midnight) */
+            0xCD, 0x1C,        /* int 1Ch  (user timer hook)        */
+            0xB0, 0x20,        /* mov al,20h   (AX is still saved)  */
+            0xE6, 0x20,        /* out 20h,al   (EOI)               */
+            0x1F,              /* pop ds                           */
+            0x58,              /* pop ax                           */
+            0xCF               /* iret                             */
+        };
+        static const u8 irq9[] = {
+            0x50,              /* push ax                          */
+            0xE4, 0x60,        /* in al,60h  (drain the controller) */
+            0xB0, 0x20,        /* mov al,20h                       */
+            0xE6, 0x20,        /* out 20h,al   (EOI)               */
+            0x58,              /* pop ax                           */
+            0xCF               /* iret                             */
+        };
+        for (int k = 0; k < (int)sizeof(irq8); k++)
+            emu_wb(e, MAGIC_SEG, (u16)(BIOS_IRQ8_OFF + k), irq8[k]);
+        for (int k = 0; k < (int)sizeof(irq9); k++)
+            emu_wb(e, MAGIC_SEG, (u16)(BIOS_IRQ9_OFF + k), irq9[k]);
+#ifdef UEFIDOS_HOST
+        /* diagnostic A/B: UEFIDOS_NO_BIOS_IRQ=1 restores the old do-nothing
+         * stub wiring so two runs can be compared without a rebuild */
+        if (!getenv("UEFIDOS_NO_BIOS_IRQ")) {
+#endif
+        emu_ww(e, 0, 0x08 * 4, BIOS_IRQ8_OFF);
+        emu_ww(e, 0, 0x08 * 4 + 2, MAGIC_SEG);
+        emu_ww(e, 0, 0x09 * 4, BIOS_IRQ9_OFF);
+        emu_ww(e, 0, 0x09 * 4 + 2, MAGIC_SEG);
+#ifdef UEFIDOS_HOST
+        }
+#endif
+    }    /* ---- ROM identification ------------------------------------------ */
     /* Programs older than the PC/AT sniff two places before they trust the
      * machine: the ROM date at F000:FFF5 (8 ASCII bytes) and the model byte at
      * F000:FFFE (FFh PC, FEh XT, FBh XT-286, FCh AT).  Windows 1.x and DR5's
@@ -3314,10 +3392,23 @@ static int vector_is_ours(Emu *e, int n)
     u16 off = emu_rw(e, 0, (u16)(n * 4));
     u16 seg = emu_rw(e, 0, (u16)(n * 4 + 2));
     /* unhooked vectors point at the IRET stub (F000:FFE0), hooked ones at a
-     * per-vector trampoline: either way the guest installed nothing */
+     * per-vector trampoline, and the two hardware vectors at our BIOS-style
+     * IRQ stubs: either way the guest installed nothing */
     if (seg == MAGIC_SEG && (off == STUB_OFF || off == MAGIC_OFF)) return 1;
+    if (seg == MAGIC_SEG && (off == BIOS_IRQ8_OFF || off == BIOS_IRQ9_OFF)) return 1;
     if (hooked_int(n) && seg == TRAMP_SEG && off == TRAMP_SLOT(n)) return 1;
     return 0;
+}
+
+/* 1 when the vector points at UEFI-DOS' BIOS-style IRQ stub.  Delivery must then
+ * happen too -- from "ours" alone you cannot tell a do-nothing IRET stub (no
+ * point in delivering) from a real handler (the stub bumps the tick count, chains
+ * INT 1Ch and sends EOI), and Windows 1.x hooks exactly that chain. */
+static int vector_is_bios_irq(Emu *e, int n)
+{
+    u16 off = emu_rw(e, 0, (u16)(n * 4));
+    u16 seg = emu_rw(e, 0, (u16)(n * 4 + 2));
+    return seg == MAGIC_SEG && (off == BIOS_IRQ8_OFF || off == BIOS_IRQ9_OFF);
 }
 
 /* Deliver hardware-style: push FLAGS:CS:IP and jump to the guest handler.  The
@@ -3493,7 +3584,11 @@ int emu_run(Emu *e)
                 u32 now = plat_ticks_ms();
                 if ((u32)(now - e->irq_last_tick_ms) >= 55) {
                     e->irq_last_tick_ms = now;
-                    if (!vector_is_ours(e, 8)) inject_irq(e, 8);
+                    /* the BIOS-style stub is a real handler, so "ours" must not
+                     * suppress delivery: it bumps 0040:006C, chains INT 1Ch and
+                     * EOIs, which is what a hooking program is waiting for */
+                    if (!vector_is_ours(e, 8) || vector_is_bios_irq(e, 8))
+                        inject_irq(e, 8);
                 }
                 if (e->kbd_irq_pending) {
                     e->kbd_irq_pending = 0;

@@ -2586,3 +2586,148 @@ Open leads for the next round, in order of expected value:
    prologue would take the `jne 02F9` branch forever.
 3. Compare the same code path on the reference MS-DOS 5.00 run
    (`python ref_snap.py <tag>`), where these vectors do get updated.
+
+## Round 16 — the DOS-call deadlock: a chained vector must not re-read the IVT
+
+### Symptom that started it
+
+Every earlier round ended with the guest spinning inside Windows' own INT 21h
+front end while asking DOS for the INT 8h vector (`AX=3508`) thousands of times,
+and the timer ISR (`cs:[023C]`-guarded prologue at `15B7:02CE`) never actually
+installed: `INT 21h AH=25h` for vector 8 was never executed.
+
+### Root cause (a real emulator bug, not a Windows quirk)
+
+`INT 21h AH=35h` returns the address we placed in the IVT for that vector: the
+trampoline cell `TRAMP_SEG:TRAMP_SLOT(n)` (`F000:E000 + n*4`) which holds
+`INT n; IRET`.  That is fine while the program has not replaced the vector.  As
+soon as a program installs its own handler and then **chains** to the saved one
+(the standard TSR / Windows pattern: `pushf; call far [saved]`), the CPU executes
+the `INT n` *inside our own trampoline*, the emulator re-read the IVT, the IVT
+now pointed at the program's hook, and the call bounced straight back into that
+hook — an endless chain.  Windows' front end does exactly this:
+`0DBD:3B04 pop ds / pop bp / dec bp / cli / ljmp *cs:[007A]`, where
+`cs:[007A]` is the vector it saved with `AH=35h`.
+
+Fix: `do_int` remembers the address of the `INT` instruction (`int_site_cs`,
+`int_site_ip`, set in `case 0xCD:` of `step_8086()`); when that address *is* the
+trampoline cell for the same vector, it enters `dos_service_call(e, intn)`
+directly instead of following the IVT.  `dos_service_call()` also learned
+`INT 33h`, so chaining the old mouse vector cannot terminate a program.
+
+Evidence after the fix (host harness, `EXECHIGH`, `UEFIDOS_TRACE_IVT=1`):
+
+```
+[ivt] set 22 = 74C4:6E95 by 74C4:7063
+[ivt] set 24 = 0DBD:4072 by 0DBD:37F2
+[ivt] set 08 = 15B7:0244 by F000:E086     <- the timer ISR, at last
+[ivt] set 09 = 1607:0199 by F000:E086     <- keyboard ISR
+[ivt] set 1B = 1607:02CD by F000:E086     <- ctrl-break ISR
+[ivt] set 00 = 1FA5:6437 by F000:E086
+```
+
+and the traced prologue now continues past the `AH=35h` call into the install:
+
+```
+977425 15B7:02DA AX=3508  CD 21 2E        int 21h   (get INT 8 vector)
+977540 15B7:02DC AX=3508 BX=2300 ES=F000  2E 89 1E  mov cs:[0230],bx
+977543 15B7:02E8 AX=2508 BX=2300           B0 08 1E
+977548 15B7:02F0 AX=2508 DX=0244           CD 21 1F  int 21h (set INT 8 -> 0244)
+```
+
+### Reference cross-check (real MS-DOS 5.00 + Windows 1.01, desktop up)
+
+`python ref_snap.py r16` in `F:\1231\_tmp\win` (6 snapshots, `build/refm_r16_*.bin`),
+IVT read straight out of the 640 KB dump:
+
+| vector | real DOS 5.00 | UEFI-DOS now |
+|---|---|---|
+| INT 08h | `17E5:0244` | `15B7:0244` (module base differs, offset identical) |
+| INT 09h | `1835:0199` | `1607:0199` |
+| INT 1Bh | `1835:02CD` | `1607:02CD` |
+| INT 20h | `0FEB:39A4` | `0DBD:39A4` |
+| INT 21h | `0FEB:39A6` | `0DBD:39A6` |
+| INT 24h | `0FEB:4072` | `0DBD:4072` |
+| INT 16h | `F000:E82E` | our trampoline |
+| INT 1Ch | `F000:FF53` | `F000:FFE0` (IRET stub) |
+
+The two module bases differ by 0x22E, which is the difference between the loaded
+geometry and real DOS's; every offset matches.  Windows now hooks exactly the
+same three vectors it hooks on real hardware.
+
+### The BIOS side of the timer chain
+
+Delivery used to be suppressed whenever the vector still pointed at us, so a
+guest executing `int 8` hit the do-nothing `F000:FFE0` IRET stub and no INT 1Ch
+chain existed anywhere in the machine.  `install_ivt()` now emits two real
+handlers into the ROM window:
+
+* `F000:2300` (INT 08h): `push ax / push ds / mov ax,40h / mov ds,ax /
+  inc word [006C] / (carry) inc word [006E] / int 1Ch / mov al,20h /
+  out 20h,al / pop ds / pop ax / iret`
+* `F000:2340` (INT 09h): `push ax / in al,60h / mov al,20h / out 20h,al /
+  pop ax / iret`
+
+`vector_is_bios_irq()` tells the delivery path that "the vector is ours" no
+longer means "do not deliver": a real handler is exactly what should run.
+`UEFIDOS_NO_BIOS_IRQ=1` (host only) restores the old wiring for A/B runs.
+
+Lesson learned the hard way: the EOI `mov al,20h` must come **before** `pop ax`.
+Writing it after the pop clobbers the interrupted program's AL on every tick —
+which showed up as the arrow-key check failing with `S=48 A=20` instead of
+`S=48 A=00` (`run_tests.ps1`, "keyboard: arrow keys arrive as BIOS scan codes").
+
+### Where Windows 1.01 stands now
+
+* Splash → desktop dither (`1503:0760`, `AX=AAAA`, `ES=B800`, 3900 byte writes,
+  full-screen 50% grey) — unchanged.
+* The `AX=3508` storm is gone; the kernel installs its timer, keyboard and
+  ctrl-break ISRs, and the ring no longer shows the dispatcher scan loop.
+* The guest then **returns from the kernel** (`INT 10h AH=00 AX=0003` at
+  `0D89:0017` = WIN.COM's LOGO entry restoring text mode), prints
+  `FatalExit code =  stack overflow` on stdout, closes handles 13h..0 and
+  terminates with `INT 21h AH=4Ch AL=01`.
+* The fatal exit is raised by Microsoft C's stack probe in the module loader
+  stub, module `1FA5`:
+
+```
+8830: pop  bx            ; bx = return address
+8831: sub  ax,sp         ; ax = frame size - sp
+8833: jae  884d          ; frame >= sp  -> overflow
+8835: neg  ax
+8837: cmp  ax,ss:000A
+883c: ja   884d          ; sp-frame > [ss:000A] -> overflow
+883e: cmp  ax,ss:000C
+8843: jbe  8849
+8845: mov  ss:000C,ax    ; remember the deepest sp seen
+8849: mov  sp,ax
+884b: jmp  *bx
+884d: mov  al,FFh / cbw / push ax / lcall 0DBD:6429   ; FatalExit(-1)
+```
+
+  Traced: `1FA5:88B9 neg ax` (AX=F7A6) → `88BB cmp ax,ss:[000A]` →
+  `88C0 ja 889B` taken → `889B jmp 884D` → `884D` prints the fatal.  At that
+  moment `SS=0D00 SP=085A` and `SS:000A = FFE0`, `SS:000C = F000` — i.e. the
+  "stack limit" cell the probe compares against is the PSP's saved INT 22h
+  vector, because `SS` is WIN.COM's **PSP segment** at that point, not a task
+  stack segment.  `AX = SP - frame size` came out as 0x085A with a requested
+  frame size of 0 (the stub's stack-size table byte at `[bx]` was 0), so the
+  probe fired purely on the garbage "limit".
+
+  `0DBD:6429` is the FatalExit printer: `mov dx,014A` (= "FatalExit code = ",
+  0x14 bytes) / `AH=40h` on handle 1, then either the hex code or, when the
+  code is 0FFFFh, `mov dx,015F` (= " stack overflow", 0x11 bytes), then
+  `mov ax,1 / call 0DBD:38DD` (FatalExit proper).
+
+Next targets, in order:
+
+1. Find out why `SS` is the PSP segment (`0D00`, `SP=0x085A`, a 63 KB-deep
+   stack whose contents at `0890h` are a copy of WIN.COM's own code) when the
+   module-loader stub runs its stack probe — this looks like the same
+   "control ran into the wrong segment" failure seen earlier as
+   `0DBD:D579` / `0DBD:0025` garbage video writes, not a stack problem per se.
+2. Check what a Windows task's stack segment *should* look like: on real DOS
+   the probe must find a small limit at `SS:000A` (only the deepest `SP` seen,
+   see `8845: mov ss:000C,ax`), so on real hardware `SS` cannot be the PSP.
+3. Trace who sets `SS` before the stub call (`1FA5:87F5` loads the module with
+   `lcall 0DBD:1944` / `lcall 0DBD:14AD` and then `ljmp 1EBB:07CF`).

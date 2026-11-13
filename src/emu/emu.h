@@ -148,6 +148,26 @@ u32  irq_steps;              /* steps spent inside that handler (watchdog) */
 #define TRAMP_BASE 0xE000u
 #define TRAMP_SLOT(n) ((u16)(TRAMP_BASE + (n) * 4))
 
+/* The two hardware vectors get a *real* BIOS-style handler instead of the
+ * do-nothing IRET stub, because that is what makes the machine's timer and
+ * keyboard behave like an IBM PC/XT:
+ *   INT 08h: push ax/ds, ds=0040, inc word [006C] (with [006E] carry),
+ *            int 1Ch, EOI on port 20h, pop, iret -- so a program that hooks
+ *            INT 1Ch (or chains the old INT 8) sees every timer tick.
+ *   INT 09h: push ax, in al,60h, EOI on port 20h, pop, iret.
+ * Both live in the unused part of the ROM window (the trampolines start at
+ * F000:E000 and the IRET stub sits at F000:FFE0). */
+#define BIOS_IRQ8_OFF 0x2300u
+#define BIOS_IRQ9_OFF 0x2340u
+
+/* The address of the last INT 21h that was issued by program code rather than
+ * from inside one of our own trampoline cells.  A program that hooks INT 21h and
+ * then chains to the saved vector re-enters the service through the trampoline,
+ * so the instruction pointer at that moment is F000:E084 and useless for
+ * "who called DOS" questions; this remembers the real call site instead. */
+extern u16 g_i21_caller_cs;
+extern u16 g_i21_caller_ip;
+
 u16  emu_in_port(Emu *e, u16 port);
 void emu_kbd_pump(Emu *e);
 int  emu_kbd_peek(Emu *e);

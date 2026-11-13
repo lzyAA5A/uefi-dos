@@ -37,6 +37,11 @@ static void trace_call(Emu *e, int intno)
                 "SI=%04X DI=%04X ES=%04X",
                 g_trace_n, intno, e->cs, e->ip, (unsigned)(e->ax >> 8), e->ax, e->bx,
                 e->cx, e->dx, e->si, e->di, e->es);
+        /* a call chained through our trampoline: name the program that started
+         * the chain, otherwise every such line says F000:E084 */
+        if (e->cs == TRAMP_SEG)
+            fprintf(g_trace, " (via trampoline, caller %04X:%04X)",
+                    g_i21_caller_cs, g_i21_caller_ip);
         /* Path-taking calls: printing the ASCIIZ string turns "DOS error 2"
          * into "it wanted this file, from this directory". */
         if (intno == 0x21) {
@@ -686,6 +691,18 @@ void int21_handler(Emu *e)
          * handler, which is what Windows 1.x does with INT 22h. */
         u8 n = (u8)(e->ax & 0xFF);
         u16 off = e->dx, seg = e->ds;
+#ifdef UEFIDOS_HOST
+        /* Who installs which vector is a frequent question when a guest hands
+         * control to a handler we cannot see; log writes (not the AH=35h reads,
+         * which a busy guest repeats thousands of times). */
+        {
+            static int on = -1;
+            if (on < 0) on = getenv("UEFIDOS_TRACE_IVT") ? 1 : 0;
+            if (on)
+                fprintf(stderr, "[ivt] set %02X = %04X:%04X by %04X:%04X\n",
+                        (unsigned)n, seg, off, e->cs, e->ip);
+        }
+#endif
         emu_ww(e, 0, (u16)(n * 4), off);
         emu_ww(e, 0, (u16)(n * 4 + 2), seg);
         set_ok(e);
