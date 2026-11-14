@@ -44,16 +44,60 @@ static u8  g_crtc_reg[32];
 static unsigned long g_io_ticks = 0;
 
 /* Where SS came from: a fatal exit inside module code while SS points at the
- * wrong segment is only explicable if we can see who loaded SS last. */
-struct SsRec { u16 old_ss, new_ss, cs, ip, sp; };
-static struct SsRec g_ss_ring[16];
+ * wrong segment is only explicable if we can see who loaded SS last.  The ring
+ * has to be long enough to survive the timer ISR's two switches per tick. */
+#define SS_RING_N 96
+/* Set to 1 in a throwaway build to mirror every SS load to the serial console.
+ * The guest switches SS ~40 times a second (two per timer tick plus module
+ * entries), so a run leaves a readable log of exactly where a bogus segment
+ * came from; it must stay 0 in a normal build because it floods the console
+ * that the boot smoke test reads. */
+#ifndef UEFIDOS_SS_LOG
+#define UEFIDOS_SS_LOG 0
+#endif
+struct SsRec { u16 old_ss, new_ss, cs, ip, sp, ret_ip, ret_cs, bp; };
+static struct SsRec g_ss_ring[SS_RING_N];
 static unsigned g_ss_pos, g_ss_cnt;
-static void ss_note(u16 old_ss, u16 new_ss, u16 cs, u16 ip, u16 sp)
+static void ss_note(u16 old_ss, u16 new_ss, u16 cs, u16 ip, u16 sp, u16 ret_ip, u16 ret_cs, u16 bp)
 {
-    struct SsRec *r = &g_ss_ring[g_ss_pos % 16u];
+    struct SsRec *r = &g_ss_ring[g_ss_pos % SS_RING_N];
     r->old_ss = old_ss; r->new_ss = new_ss; r->cs = cs; r->ip = ip; r->sp = sp;
+    r->ret_ip = ret_ip; r->ret_cs = ret_cs; r->bp = bp;
     g_ss_pos++;
-    if (g_ss_cnt < 16) g_ss_cnt++;
+    if (g_ss_cnt < SS_RING_N) g_ss_cnt++;
+#if UEFIDOS_SS_LOG
+    {
+        static const char hexd[] = "0123456789ABCDEF";
+        char b[40];
+        char *p = b;
+        *p++ = '#'; *p++ = '#';
+        *p++ = hexd[(old_ss >> 12) & 15]; *p++ = hexd[(old_ss >> 8) & 15];
+        *p++ = hexd[(old_ss >> 4) & 15]; *p++ = hexd[old_ss & 15];
+        *p++ = '-'; *p++ = '>';
+        *p++ = hexd[(new_ss >> 12) & 15]; *p++ = hexd[(new_ss >> 8) & 15];
+        *p++ = hexd[(new_ss >> 4) & 15]; *p++ = hexd[new_ss & 15];
+        *p++ = ' ';
+        *p++ = hexd[(cs >> 12) & 15]; *p++ = hexd[(cs >> 8) & 15];
+        *p++ = hexd[(cs >> 4) & 15]; *p++ = hexd[cs & 15];
+        *p++ = ':';
+        *p++ = hexd[(ip >> 12) & 15]; *p++ = hexd[(ip >> 8) & 15];
+        *p++ = hexd[(ip >> 4) & 15]; *p++ = hexd[ip & 15];
+        *p++ = ' ';
+        *p++ = 's'; *p++ = 'p'; *p++ = '=';
+        *p++ = hexd[(sp >> 12) & 15]; *p++ = hexd[(sp >> 8) & 15];
+        *p++ = hexd[(sp >> 4) & 15]; *p++ = hexd[sp & 15];
+        *p++ = ' ';
+        *p++ = 'c'; *p++ = 'a'; *p++ = 'l'; *p++ = 'l'; *p++ = '=';
+        *p++ = hexd[(ret_cs >> 12) & 15]; *p++ = hexd[(ret_cs >> 8) & 15];
+        *p++ = hexd[(ret_cs >> 4) & 15]; *p++ = hexd[ret_cs & 15];
+        *p++ = ':';
+        *p++ = hexd[(ret_ip >> 12) & 15]; *p++ = hexd[(ret_ip >> 8) & 15];
+        *p++ = hexd[(ret_ip >> 4) & 15]; *p++ = hexd[ret_ip & 15];
+        *p++ = '\n';
+        *p = 0;
+        plat_serial_puts(b);
+    }
+#endif
 }
 /* keyboard-controller state for the A20 gate (port 64h command D1h) */
 static int g_kbc_pending_out = 0;
@@ -199,10 +243,34 @@ static void timer_pace(u64 total, u32 now_ms)
     if (g_tick_period < 512u) g_tick_period = 512u;
 }
 
+/* ---- 8259A programmable interrupt controller (master only) --------- *
+ * Windows' timer ISR asks the controller WHICH interrupt is in service:
+ *
+ *     push ax / mov al,0Bh / out 20h,al / in al,20h / ...
+ *
+ * (OCW3 with bit 0 set selects the in-service register).  On real hardware
+ * that read always returns at least the IRQ being serviced -- the timer's own
+ * bit -- and Windows takes a different path when it reads zero.  Returning a
+ * hard 0 made it run code the hardware never lets it run, which is one of the
+ * ways the desktop ended up with a corrupted module stack ("FatalExit code =
+ * stack overflow" a few minutes in).  This keeps the request / in-service /
+ * mask registers, sets the in-service bit when an interrupt is delivered and
+ * clears it on EOI (out 20h,20h).  Delivered interrupts are not gated on the
+ * mask register: our own timer, keyboard and mouse sources already decide
+ * that, and a stale mask would silently stop them. */
+static u8 g_pic_irr;        /* interrupt request register */
+static u8 g_pic_isr;        /* in-service register */
+static u8 g_pic_imr = 0xB8; /* interrupt mask register: IRQ0/1/2/6 open, as a PC BIOS leaves it */
+static u8 g_pic_ocw3;       /* last OCW3: bit 0 selects ISR instead of IRR */
+
 u16 emu_in_port(Emu *e, u16 port)
 {
     g_io_ticks++;
     switch (port) {
+    case 0x20:      /* PIC: OCW3 read register selected by g_pic_ocw3 */
+        return (u16)((g_pic_ocw3 & 0x01) ? g_pic_isr : g_pic_irr);
+    case 0x21:      /* PIC mask register (IMR) */
+        return g_pic_imr;
     case 0x3DA:     /* VGA/EGA input status 1: alternate retrace bits */
         return (u16)((g_io_ticks & 1) ? 0x09 : 0x00);
     case 0x3D4: return g_crtc_idx;
@@ -274,6 +342,24 @@ u16 emu_in_port(Emu *e, u16 port)
 void emu_out_port(Emu *e, u16 port, u16 val)
 {
     switch (port) {
+    case 0x20:      /* PIC: OCW1 (mask) / OCW3 (read select) / EOI */
+        if (val & 0x10) {
+            g_pic_imr = (u8)(val & 0xFF);
+        } else if (val & 0x08) {
+            g_pic_ocw3 = (u8)(val & 0x07);
+        } else if ((val & 0xFF) == 0x20) {
+            int i;
+            for (i = 0; i < 8; i++) {
+                if (g_pic_isr & (1u << i)) {
+                    g_pic_isr = (u8)(g_pic_isr & ~(1u << i));
+                    break;
+                }
+            }
+        }
+        break;
+    case 0x21:      /* PIC mask register */
+        g_pic_imr = (u8)(val & 0xFF);
+        break;
     case 0x3D4: g_crtc_idx = (u16)(val & 0x1F); break;
     case 0x3D5: g_crtc_reg[g_crtc_idx & 31] = (u8)val; break;
     case 0x3C7: e->pal_read_index = (u16)(val & 0xFF); e->pal_read_phase = 0; break;
@@ -1195,7 +1281,17 @@ static void set_seg_reg(Emu *e, int i, u16 v)
     case 0: e->es = v; break;
     case 1: e->cs = v; break;
     case 2:
-        if (v != e->ss) ss_note(e->ss, v, e->cs, e->ip, (u16)e->esp);
+        if (v != e->ss) {
+            /* Read the return address the caller left on the old stack: when a
+             * module entry thunk is reached from the wrong stack this is the
+             * only way to name the call site that got it wrong. */
+            u16 r_ip = 0, r_cs = 0;
+            if (!(e->cr0 & 1)) {
+                r_ip = emu_rw(e, e->ss, (u16)(e->esp + 0));
+                r_cs = emu_rw(e, e->ss, (u16)(e->esp + 2));
+            }
+            ss_note(e->ss, v, e->cs, e->ip, (u16)e->esp, r_ip, r_cs, e->bp);
+        }
         e->ss = v;
         /* 8086/80286 rule: after an instruction loads SS the CPU ignores
          * interrupts until the end of the *next* instruction, which is what
@@ -3360,6 +3456,10 @@ int emu_init(Emu *e)
     e->mouse_mask = 0;
     e->irq_last_tick_ms = 0;    /* step count of the last timer tick */
     e->bios_ticks = 0;
+    g_pic_irr = 0;
+    g_pic_isr = 0;
+    g_pic_imr = 0xB8;           /* IRQ0/1/2/6 open, like a PC BIOS leaves it */
+    g_pic_ocw3 = 0;
     e->cr0 = 0;
     e->a20_on = 0;              /* gate masked: real-mode addresses wrap at 1 MB */
     seg_cache_sync(e);          /* real-mode caches: base = sel<<4, limit 64K */
@@ -3638,13 +3738,16 @@ void emu_fatal_trace(Emu *e)
     }
     plat_serial_puts("[ring] last SS loads (old->new at CS:IP sp=)\n");
     for (unsigned i = 0; i < g_ss_cnt; i++) {
-        unsigned k = (g_ss_pos - g_ss_cnt + i) % 16u;
+        unsigned k = (g_ss_pos - g_ss_cnt + i) % SS_RING_N;
         p = line;
         *p++ = 'S'; *p++ = 'S'; *p++ = ' '; p = put4(p, g_ss_ring[k].old_ss);
         *p++ = '-'; *p++ = '>'; p = put4(p, g_ss_ring[k].new_ss);
         *p++ = ' '; *p++ = 'a'; *p++ = 't'; *p++ = ' '; p = put4(p, g_ss_ring[k].cs);
         *p++ = ':'; p = put4(p, g_ss_ring[k].ip);
         *p++ = ' '; *p++ = 'S'; *p++ = 'P'; *p++ = '='; p = put4(p, g_ss_ring[k].sp);
+        *p++ = ' '; *p++ = 'c'; *p++ = 'a'; *p++ = 'l'; *p++ = 'l'; *p++ = '=';
+        p = put4(p, g_ss_ring[k].ret_cs); *p++ = ':'; p = put4(p, g_ss_ring[k].ret_ip);
+        *p++ = ' '; *p++ = 'B'; *p++ = 'P'; *p++ = '='; p = put4(p, g_ss_ring[k].bp);
         *p++ = '\n'; *p = 0;
         plat_serial_puts(line);
     }
@@ -3872,6 +3975,10 @@ static int inject_irq(Emu *e, int vec)
      * depth there would let a second interrupt nest inside the guest handler. */
     e->irq_frame_ss = e->ss;
     e->irq_frame_sp = (u16)e->esp;
+    /* Mark the request in service, exactly like an 8259A does before it hands
+     * the vector to the CPU: the guest ISR reads this back through OCW3. */
+    if (vec >= 0 && vec < 8) g_pic_isr = (u8)(g_pic_isr | (1u << vec));
+    else if (vec >= 8 && vec < 16) g_pic_isr = (u8)(g_pic_isr | 0x04);  /* via IRQ2 */
     set_cs_ip(e, seg, off);
     e->irq_depth++;
     e->irq_steps = 0;

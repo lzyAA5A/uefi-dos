@@ -134,7 +134,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\run_win1x.ps1 -Installed F
 | 双击没反应，只是把行选中了 | 1.1.17 及更早版本存在这个问题（模拟器的定时器按"指令数"而不是真实时间走，Windows 的 500ms 双击窗口在两次按键之间就过去了）。1.1.18 起已按真实时间校准，正常速度的双击即可 |
 | 双击很吃力 | 临时办法：`WINDOWS\WIN.INI` 的 `[windows]` 段把 `DoubleClickSpeed=500` 改大（例如 `2000`），或在 Control Panel 里调双击速度 |
 | 弹出 `Change Disk — Insert COURD.FON disk in drive A:` | `WINDOWS\` 缺字体，把 1.01 的 17 个 `.FON` 补齐 |
-| 一会儿自己退出，回到 `C:\WINDOWS>` 并打印 `FatalExit code = stack overflow` | 已知的遗留问题，正在查（`docs/windows1x.md` 有全部证据） |
+| 一会儿自己退出，回到 `C:\WINDOWS>` 并打印 `FatalExit code = stack overflow` | 已知的遗留问题（1.1.19 仍未根治），触发条件是**启动/关闭程序**这类操作，尤其是关闭一个"有未保存修改"的窗口并点“不保存”。目前的对策：重要内容先 `File → Save` 存盘再关闭窗口；崩了以后重新敲 `WIN` 即可，磁盘上的文件不会损坏。根因分析见 `docs/windows1x.md` 的 Round 25/27 |
 | 画面上下有黑边 / 比例被压扁 | 1.1.11 起按 4:3 输出，不会再压缩；若仍有黑边说明 GOP 模式比 4:3 更宽，属正常留边 |
 | 提示 `Not enough memory to display entire directory` | 目录太大（文件太多）。先用 `View → Partial...` 过滤，或把不用的文件移出目录 |
 | 想换机器/换树 | 换掉 `-Installed` 指向的目录即可，前提仍是那份目录里 `WIN100.OVL` 带鼠标驱动、字体齐全 |

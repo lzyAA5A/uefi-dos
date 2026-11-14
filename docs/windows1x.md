@@ -3595,3 +3595,106 @@ is documented in the new usage guide `docs/windows1x-guide.md`.
 
 Still open: the soak run (`_tmp\win\qmp_soak.py`) still ends with `FatalExit code = stack overflow`
 after ~182 s of mouse activity; the module-1FF7 stack-probe/SS evidence in Round 25 applies.
+
+## Round 27 -- the 8259A PIC answers like hardware, and the stack probe goes on record
+
+The intermittent `FatalExit code =  stack overflow` (a few minutes into a session,
+always with the desktop up and healthy) is still **not** fixed.  This round adds
+two things that make it visible instead of mysterious, plus one genuine hardware
+fidelity gap.
+
+### The PIC had no registers
+
+`emu_in_port()` had no case for ports 20h/21h, so `in al,20h` always answered 0.
+Windows 1.x's timer ISR starts with
+
+```
+push ax / mov al,0Bh / out 20h,al / in al,20h      ; OCW3 -> read the in-service register
+```
+
+and real hardware always answers with at least the interrupt being serviced (the
+timer's own bit).  Our zero made the ISR take the "nothing is in service" branch,
+which is a path the hardware never lets it run.  `src/emu/emu.c` now keeps
+
+* `g_pic_irr` -- interrupt request register,
+* `g_pic_isr` -- in-service register (set by `inject_irq()` for the vector it
+  delivers, cleared by a non-specific EOI `out 20h,20h`),
+* `g_pic_imr` -- mask register, 0xB8 after reset (IRQ0/1/2/6 open, as a PC BIOS
+  leaves it),
+* `g_pic_ocw3` -- the last OCW3, whose bit 0 selects ISR (1) or IRR (0) for the
+  next read of port 20h.
+
+`in al,20h` / `in al,21h` answer from those registers, `out 20h` handles OCW1
+(mask), OCW3 (read select) and the non-specific EOI, `out 21h` writes the mask.
+Delivered interrupts are deliberately **not** gated on the mask register: our own
+timer / keyboard / mouse sources already decide that, and one stale mask bit would
+silently stop the input devices.
+
+The Soak still dies (see below), so this was not the root cause -- but it removes
+a real difference from hardware, and the in-service bit is now correct while an
+ISR runs.
+
+### Why the crash is invisible: `mov ss` was the only thing on record
+
+`emu_fatal_trace()` prints a ring of SS loads, and that ring only saw the
+instruction that writes SS (`set_seg_reg()`, i.e. `mov ss` / `pop ss`).  A crash
+whose bad SS arrives through an IRET frame, an EXEC (`load_exe_at()` sets
+`e->ss = load_seg + e_ss`) or a context switch is therefore *invisible*: the ring
+shows the module thunks restoring a segment that was never recorded being loaded.
+The ring is now
+
+* 96 entries instead of 16 (the timer ISR alone burns two per tick, so 16 entries
+  were under three seconds of history),
+* each entry carries the return address found on the stack at the moment SS was
+  loaded (`call=CS:IP`) and the caller's `BP`, so an entry thunk that was reached
+  from the wrong stack names its call site.
+
+A throwaway build can also mirror every SS load to the serial console
+(`-DUEFIDOS_SS_LOG=1`, off by default because it floods the console the boot smoke
+test reads).
+
+The return address is only read when the CPU is in real mode (`!(e->cr0 & 1)`).
+Reading guest memory from `set_seg_reg()` while CR0.PE is set walks the segment
+cache with real-mode addressing and derails the protected-mode regression: the
+DPMI self test died with `UEFI-DOS: protected-mode interrupt 3 with no IDT gate`
+and the markers `PM32-DOS-OK` / `RMREFLECT-OK` / `DOSMEM-OK` / `REFLECTED-21H-OK`
+went missing until the read was skipped in protected mode -- a register-write hook
+must not touch memory.
+
+### What the ring says about the fatal exit
+
+A four-minute QEMU soak with the mouse clicking ends with (log
+`build\serial-soak-pic2.log`):
+
+```
+SS 1409->1FF7 at 1FF7:5BE3 SP=0F44 call=023E:167D BP=0F6C   <-- normal module entry
+SS 1FF7->1409 at 1FF7:5CF8 SP=5BBC call=090F:4400 BP=0F6C
+SS 1409->15B7 at 15B7:026C SP=0F5E call=0DBD:3508 BP=0F6C   <-- normal timer tick
+SS 15B7->1409 at 15B7:02C8 SP=0230 call=F000:2300 BP=0F6C   <-- chain to the BIOS stub
+SS 0D00->1FF7 at 1FF7:5BE3 SP=0866 call=023E:167D BP=374D   <-- SS is WIN.COM's PSP!
+SS 1FF7->0D00 at 1FF7:5CF8 SP=5BBC call=0008:6600 BP=374D
+FatalExit code =  stack overflow
+```
+
+Module 1FF7's entry thunk is being called with `SS=0D00`, and 0D00 is **WIN.COM's
+PSP segment** -- the real-mode parent of the whole session (that is also why the
+DOS prompt after the crash reads `C:\WINDOWS>`: the prompt is 0D00's).  The
+module's `_chkstk`-style probe then compares the requested frame against
+`SS:000A`, and at 0D00:000A sits the saved INT 22h vector (`F000:FFE0`), so every
+request "overflows" and Windows takes its fatal path.  When SS is a module's own
+segment the same probe passes (`2FD5:000A = 0x0000`).
+
+So the question left is not "what overflows" but **who calls a Windows module with
+SS pointing at WIN.COM's PSP**.  Two leads from the data:
+
+* the SS value arrives through a path the old ring could not see (IRET frame or
+  EXEC), which is why the new `call=`/`BP` fields and the serial mirror exist;
+* `qmp_idle.py` (no clicking) keeps a session alive for 15 minutes, while every
+  `qmp_soak.py` run (which clicks every eighth iteration, i.e. launches and closes
+  applications) dies within minutes -- so the trigger is an application start/stop
+  and not idle time.  That matches the user-visible symptom ("closed Paint, said
+  don't save, and it crashed").
+
+Next step on this thread: reproduce the same sequence in the host harness (where a
+run is 30 seconds instead of 4 minutes) by closing a Paint window through its own
+system menu, then log the SS mirror around the transition to 0D00.
