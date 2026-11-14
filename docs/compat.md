@@ -145,8 +145,8 @@ through the same host harness:
 | --- | --- | --- | --- |
 | **Forth-83 2.1.0** (`8086 Forth 83 Model`) | 3 × 720 KB | `F83 SAMPLE.BLK` then `2 3 + .` | **runs** — banner `Version 2.1.0 Modified 01Jun84`, answer `5  ok` |
 | **Windows 1.01 Demo Slideshow** | 1 × 360 KB | `PRESENT DEMO` (a plain MZ DOS player, not a Windows app) | **runs** — sets 320×200 then 640×200, loads its `*.CLP` slides and paints real slide content (dBase II and Write windows, dithered wallpaper) |
-| **Borland Turbo C++ 1.01** | 4 × 720 KB | `TCC -c ..\..\HELLO.C` | **compiles** — `Turbo C++  Version 1.01`, `HELLO.OBJ` 633 bytes |
-| the same package, link step | — | `TLINK HELLO.OBJ,HELLO.EXE` (also `TLINK @RESP` and `TLINK HELLO`) | **open** — TLINK 3.01 prints its syntax banner instead of linking |
+| **Borland Turbo C++ 1.01** | 4 × 720 KB | `TCC -c ..\..\HELLO.C`, then `TLINK HELLO.OBJ,HELLO.EXE,,..\LIB\C0S.OBJ+..\LIB\CS.LIB`, then `HELLO` | **works** — `Turbo C++  Version 1.01`, `HELLO.OBJ` 633 bytes, `HELLO.EXE` 6426 bytes, and the program prints `Hello from Turbo C++ 1.01 on UEFI-DOS`, `sizeof(int)=2 sizeof(long)=4 sizeof(void*)=2`, `Sum of squares 1..100 = 338350`, `malloc(4096) = ok` |
+| the same package, a size larger than 64 KB | — | `TCC` + `TLINK` on a multi-module program | not attempted; the classic 64 KB segment limits apply as on real DOS |
 
 ### Turbo C++ 1.01: the archive is a hybrid, install it by hand
 
@@ -166,18 +166,31 @@ UEFI-DOS. A working tree is a plain unzip:
 Then `CD \TC\BIN` + `TCC -c ..\..\HELLO.C` produces the object file. Note
 that TCC takes **`-c`**, not `/c` (`/c` is taken as a file name).
 
-### What TLINK needs (open item)
+### Why linking used to fail: `LAHF`/`SAHF` were swapped
 
-Turbo Link 3.01 runs, prints its banner, asks DOS for the switch character
-(`INT 21h AH=37h`, now answered `'/'`), consumes two characters of the
-`PSP:0080h` tail and then prints `Syntax: TLINK objfiles, exefile, mapfile,
-libfiles` and exits with code 2 — no file is ever opened. The identical tree,
-command line and linker produce `HELLO EXE 790` bytes on real MS-DOS 5.00 in the
-same QEMU (vvfat disk), so this is our gap: the tail is verifiably correct
-(`UEFIDOS_TRACE_PSP=1` → `[psp] seg=0D00 len=50 tail= HELLO.OBJ,HELLO.EXE,,...`)
-and the switch character comes back as `2Fh`, so what is left is how TLINK's own
-parser gets its input. Compiling — the part that matters for "sources build" —
-works; linking stays on the open list.
+TLINK 3.01 printed its syntax banner for every argument list. Tracing it showed
+that the tail was fine (`UEFIDOS_TRACE_PSP=1` → `[psp] seg=0D00 len=50 tail=
+HELLO.OBJ,HELLO.EXE,,..\LIB\C0S.OBJ+..\LIB\CS.LIB`), that `INT 21h AH=37h`
+answered `'/'`, and that the parser consumed exactly two characters and then
+gave up. The scanner is
+
+```
+7d1: call 0x3c0        ; read + classify the next character (class in AH)
+7d4: jb 0x7d1          ; CF = delimiter, skip it
+7d6: lahf              ; AH := flags, so that AH bit 0 tells "was a char returned"
+7d7: je  0x7e6         ; ZF set = the character is real -> collect it
+7d9: cmpw $0x0,0x54
+7de: jne 0x7e6
+7e0: jmp 0x89c         ; nothing collected -> "no input files" -> usage screen
+```
+
+The classifier does end with `cmp $2,%ah` (ZF=1 for a name character), so the
+`je` at `0d10:07d7` must be taken — but our emulator's `LAHF` (opcode `9Fh`)
+*wrote AH into the flags* instead of reading the flags into AH, wiping ZF, and the
+`SAHF` implementation (`9Eh`) did the mirror image. Both were fixed in
+`src/emu/emu.c` (they now exchange only the low byte, mask `0D5h`, bits 1/3/5 =
+1/0/0), and TLINK links. Any DOS program that probes flags through `LAHF` was at
+risk, which is why this was worth chasing.
 
 ## Open points
 
@@ -195,7 +208,5 @@ works; linking stays on the open list.
   path (likely a stale attribute/character write) rather than a layout bug.
 * Graphics modes (INT 10h `AH=00` mode 4/6/12/13 and `A000:0000`) are still
   not emulated; only the text screen at `B800:0000` is mirrored.
-* **Turbo Link 3.01 does not link** (see above): it never opens the object
-  file. `TCC`'s compile step is unaffected, so sources can be built to `.OBJ`.
 * `ASM.EXE` with an argument loops; `MININASM`, `DIAG`, `CPPTEST`, `HI`,
   `VID` exit or idle without visible output and need a closer look.

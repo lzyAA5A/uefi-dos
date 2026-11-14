@@ -2727,8 +2727,13 @@ static int step_8086(Emu *e)
         }
         break;
     }
-    case 0x9E: { u8 ah = (u8)((e->flags & 0xFF) | 0x02); w8(e, 4, ah); break; }   /* SAHF */
-    case 0x9F: { e->flags = (u16)((e->flags & 0xFF00) | r8(e, 4) | 0x02); break; } /* LAHF */
+    /* SAHF copies AH into the flags, LAHF copies the flags into AH.  These two
+     * used to be the other way round, which silently destroyed every flag
+     * register a program tested after a LAHF (Turbo Link 3.01 does
+     * `call get_char; lahf; je ...` and gave up parsing its own command line).
+     * Only the low byte is exchanged, bits 1/3/5 read as 1/0/0 (mask 0xD5). */
+    case 0x9E: { u8 ah = r8(e, 4); e->flags = (u16)((e->flags & 0xFF00) | (ah & 0x00D5u) | 0x02u); break; } /* SAHF */
+    case 0x9F: w8(e, 4, (u8)((e->flags & 0x00D5u) | 0x02u)); break;                                     /* LAHF */
     case 0xF5: setf(e, F_CF, !getf(e, F_CF)); break;
     case 0xF8: setf(e, F_CF, 0); break;
     case 0xF9: setf(e, F_CF, 1); break;

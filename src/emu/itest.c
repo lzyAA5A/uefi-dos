@@ -104,6 +104,8 @@ static const u8 c_test[]      = { 0x85, 0xD8 };              /* test ax,bx */
 static const u8 c_and_or[]    = { 0x21, 0xD8, 0x09, 0xD8 };  /* and ax,bx; or ax,bx */
 static const u8 c_xor[]       = { 0x31, 0xD8 };              /* xor ax,bx */
 static const u8 c_neg[]       = { 0xF7, 0xDB };              /* neg bx */
+static const u8 c_sahf[]      = { 0x9E };                    /* sahf */
+static const u8 c_lahf[]      = { 0x9F };                    /* lahf */
 static const u8 c_not[]       = { 0xF7, 0xD3 };              /* not bx */
 static const u8 c_cbw[]       = { 0x98 };                    /* cbw */
 static const u8 c_cwd[]       = { 0x99 };                    /* cwd */
@@ -234,6 +236,11 @@ static const it_case g_cases[] = {
     CASE("test ax,bx nonzero", c_test, ((it_regs){.ax = 1, .bx = 1, .flags = 0x0002}), ((it_regs){.flags = 0x0202}), IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
     CASE("and ax,bx; or ax,bx", c_and_or, ((it_regs){.ax = 0x00FF, .bx = 0x0F0F}), ((it_regs){.ax = 0x0F0F}), IT_C_AX, 2, 0, 0, 0, 0, 0),
     CASE("xor ax,bx", c_xor, ((it_regs){.ax = 0xFFFF, .bx = 0x0F0F}), ((it_regs){.ax = 0xF0F0}), IT_C_AX, 1, 0, 0, 0, 0, 0),
+    /* LAHF/SAHF exchange FLAGS and AH; getting them the wrong way round
+     * hides every flag test that a program does right after a LAHF
+     * (Turbo Link 3.01's command-line scanner does exactly that). */
+    CASE("sahf loads the low flags from ah", c_sahf, ((it_regs){.ax = 0xD700, .flags = 0x0002}), ((it_regs){.ax = 0xD700, .flags = 0x00D7}), IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
+    CASE("lahf copies the low flags into ah", c_lahf, ((it_regs){.ax = 0x1234, .flags = 0x00D7}), ((it_regs){.ax = 0xD734, .flags = 0x00D7}), IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
 
     /* --- unary --- */
     CASE("neg bx", c_neg, ((it_regs){.bx = 1}), ((it_regs){.bx = 0xFFFF}), IT_C_BX, 1, 0, 0, 0, 0, 0),

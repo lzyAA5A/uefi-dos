@@ -13,8 +13,18 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.2.0** — 35 of 35 automated checks pass on the Windows host harness
+Version **1.2.1** — 35 of 35 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
+
+1.2.1 fixes **`LAHF` and `SAHF` being swapped** in the 8086 core — `LAHF`
+wrote AH *into* the flags instead of reading the flags into AH (and `SAHF` did
+the opposite), so every program that tested a flag after a `LAHF` saw garbage.
+Turbo Link 3.01 starts its command-line scanner with `call get_char; lahf; je`
+and consequently rejected its own argument list; with the two instructions the
+right way round **`TLINK HELLO.OBJ,HELLO.EXE,,..\LIB\C0S.OBJ+..\LIB\CS.LIB`
+links a 6426-byte `HELLO.EXE` that runs** (`Hello from Turbo C++ 1.01 on
+UEFI-DOS`, `Sum of squares 1..100 = 338350`, `malloc(4096) = ok`). Turbo C++
+1.01 is therefore fully verified: compile, link, run.
 
 1.2.0 is a compatibility release: three more real DOS packages were taken
 from their original floppy images and driven under the emulator end to end —
@@ -60,7 +70,7 @@ missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.2.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.0.zip)
+[**Download `UEFI-DOS-1.2.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.1.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
