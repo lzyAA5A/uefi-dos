@@ -106,6 +106,7 @@ u32  irq_steps;              /* steps spent inside that handler (watchdog) */
     int  kbd_irq_pending;        /* a key is waiting for IRQ1 delivery */
     u8   kbd_irq_scan;           /* scan code latched for port 60h */
     int  kbd_out_valid;          /* port 60h holds an unread scan code */
+    int  bus_irq_pending;        /* bus mouse (InPort) raised IRQ5 */
     u16  irq_ip, irq_cs, irq_sp, irq_ss;  /* return point of the IRQ handler */
     /* A DOS call that arrives through a chained vector (program hook -> saved
      * vector = our "INT n; IRET" trampoline) returns to the *original* caller

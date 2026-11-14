@@ -25,7 +25,7 @@ screen** in CGA 640x200 before it stops.
 1.1.0 is about the hardware a real-mode GUI needs. `INT 10h` now speaks the
 **CGA modes 4/5/6** (the even/odd-interleaved bitmap at `B800`, palette
 selection through `AH=0Bh` and the `3D8h`/`3D9h` ports), there is a full
-**`INT 33h` mouse driver** backed by the firmware's `EFI_SIMPLE_POINTER_PROTOCOL`
+**`INT 33h` mouse driver** backed by the firmware's `EFI_SIMPLE_POINTER_PROTOCOL` (with a direct i8042 PS/2 fallback, and a Microsoft bus-mouse card at ports 23Ch-23Fh for Windows 1.x, whose driver never touches INT 33h)
 (plus a software pointer drawn into the frame), and the emulator finally
 **injects hardware interrupts** — `INT 8` at 18.2 Hz and `INT 9` with a latched
 scan code on port `60h` — because real-mode Windows installs its own keyboard and
@@ -499,6 +499,8 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_TRACE_IRQ=1` | hardware-interrupt trace: one line per INT 8h/9h frame pushed into a guest handler (`[irq] vec=08 depth=0 from CS:IP to CS:IP`), plus a periodic `[irqdbg]` line with the delivery conditions (IF, irq depth, whether the vector is still ours) |
 | `UEFIDOS_TRACE_SS=1` | log every instruction that changes `SS`, with the frame it lands on (`[ss] #1234 1409->0D00 sp=0826->0826 after 0D00:0592 next=0D00:0594 ax=...`) — a program that silently ends up on the wrong stack segment (a PSP instead of its own stack, or a stale frame restored by a bad `IRET`) is invisible in DOS call traces; this is how Windows 1.01's FatalExit `stack overflow` was pinned on a stale frame rather than on a real stack exhaustion |
 | `UEFIDOS_TRACE_MOUSE=1` | one line per `INT 33h` call in `build/mouse_trace.txt` (`INT33 AX=.. BX=.. at CS:IP`) — the INT 21h trace cannot see this vector, so this is how "the guest never touches the mouse" becomes provable (Windows 1.01 with no pointing device selected makes zero calls) |
+| `UEFIDOS_TRACE_PORT=1` | every access to the emulated Microsoft bus-mouse card (`[port] out 23F = 91 at CS:IP ax=...` in `build/port_trace.txt`) - shows whether the guest actually loaded an InPort driver, and which registers it uses |
+| `UEFIDOS_MOUSE_WAIT=<ms>` | delay the first scripted mouse event (a 24 M-step run finishes in ~4 s, so a script that has to land after the desktop needs `UEFIDOS_MOUSE_WAIT=1000`) |
 | `UEFIDOS_TRACE_FIND=1` | one line per `INT 21h AH=4Eh/AH=4Fh` with the search state recovered from the DTA and the result (`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`) — the fastest way to tell "a program loops because the search never ends" from "because the search never started" |
 | `UEFIDOS_TRACE_IVT=1` | log every `INT 21h AH=25h` the guest performs (`[ivt] set 08 = 15B7:0244 by CS:IP`) — the fastest way to see which handler a program installs, and whether it installs one at all |
 | `UEFIDOS_TRACE_PSP=1`, `UEFIDOS_TRACE_EXEC=1` | print every new PSP's command tail (and the bytes after it) and every `INT 21h AH=4Bh` (path, environment segment, command-line far pointer, caller PSP/DS) plus failing `AH=48h` requests |

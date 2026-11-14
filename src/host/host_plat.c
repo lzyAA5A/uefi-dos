@@ -170,7 +170,7 @@ static void kb_script_init(void)
 /* UEFIDOS_MOUSE: scripted events "dx,dy,buttons; dx,dy,buttons; ..." so the
  * mouse path is testable without a physical device.  Without it the real
  * Windows cursor and buttons are used (relative to the previous sample). */
-static char g_mouse_script[512];
+static char g_mouse_script[4096];
 static int  g_mouse_loaded;
 static POINT g_mouse_last;
 static int  g_mouse_have_last;
@@ -221,6 +221,15 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
     if (!g_mouse_loaded) plat_mouse_present();
     if (g_mouse_script[0]) {
         u64 now = plat_ticks_ms();
+        /* UEFIDOS_MOUSE_WAIT=<ms>: hold the script back so that the events land
+         * after a slowly starting guest (Windows takes minutes) has armed its
+         * mouse interrupt, instead of being swallowed by the splash screen. */
+        static int wait_loaded = 0;
+        if (!wait_loaded) {
+            const char *w = getenv("UEFIDOS_MOUSE_WAIT");
+            wait_loaded = 1;
+            if (w) g_mouse_next_ms = now + (u64)atol(w);
+        }
         if (now < g_mouse_next_ms) return 0;
         int ok = mouse_script_next(dx, dy, buttons);
         if (!ok) return 0;
@@ -280,6 +289,7 @@ void plat_shutdown(void) { g_plat_shutdown_requested = 1; }
 
 u64 plat_ticks_ms(void) { return GetTickCount64(); }
 void plat_sleep_ms(u32 ms) { Sleep(ms); }
+void plat_pump_events(void) { }   /* the host has no firmware event queue */
 
 void plat_get_date(int *y, int *m, int *d)
 {

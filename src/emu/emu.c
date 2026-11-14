@@ -33,6 +33,40 @@ static unsigned long g_io_ticks = 0;
 /* keyboard-controller state for the A20 gate (port 64h command D1h) */
 static int g_kbc_pending_out = 0;
 
+/* ---- Microsoft bus mouse (InPort card, base 23Ch) ------------------ *
+ * Windows 1.x cannot use INT 33h: its mouse driver talks to the card it
+ * was linked against.  MOUSE.DRV probes the InPort interface with
+ *
+ *     mov dx,23Ch / mov al,91h / out 23Fh,al / mov al,5Ah / out 23Dh,al
+ *     in  al,23Dh / cmp al,5Ah / je found
+ *
+ * and then reads the position nibble by nibble through a command register:
+ * out 23Eh,90h / in 23Ch = X low, 0B0h = X high, 0D0h = Y low,
+ * 0F0h = Y high, 00h = buttons.  When the signature is right it arms IRQ5
+ * (INT 0Dh) and expects an interrupt per packet, so this device keeps the
+ * registers plus a position counter fed from the host pointer. */
+static u8 g_bus_latch;      /* 23Dh: signature/latch (5Ah after a reset) */
+static u8 g_bus_cmd;        /* 23Eh: nibble selector written by the driver */
+static u8 g_bus_ctrl;       /* 23Fh: control/reset */
+static int g_bus_dx, g_bus_dy;  /* motion counters the card reports (signed 8 bit) */
+static int g_bus_acc_x, g_bus_acc_y;    /* host-delta remainders (< 16 / < 10) */
+
+#ifdef UEFIDOS_HOST
+/* UEFIDOS_TRACE_PORT=1: log every bus-mouse register access, so the driver's
+ * protocol can be observed instead of guessed. */
+static void bus_trace(Emu *e, const char *dir, u16 port, int val)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("UEFIDOS_TRACE_PORT") ? 1 : 0;
+    if (!on) return;
+    fprintf(stderr, "[port] %s %03X = %02X at %04X:%04X ax=%04X\n",
+            dir, port, val & 0xFF, e->cs, (u16)e->eip, e->ax);
+}
+#else
+static void bus_trace(Emu *e, const char *dir, u16 port, int val)
+{ (void)e; (void)dir; (void)port; (void)val; }
+#endif
+
 u16 emu_in_port(Emu *e, u16 port)
 {
     g_io_ticks++;
@@ -60,6 +94,41 @@ u16 emu_in_port(Emu *e, u16 port)
     case 0x92: return (u16)(e->a20_on ? 0x02 : 0x00); /* system control port A */
     case 0x64:                  /* keyboard controller status */
         return (u16)(0x14 | (e->kbd_out_valid ? 0x01 : 0x00));
+    /* ---- Microsoft bus mouse (InPort) ---- */
+    case 0x23C: {               /* data: nibble picked by the last command */
+        u8 v = 0;
+        if (g_bus_ctrl) {
+            /* The card reports movement counters, not a position: the driver
+             * sign-extends the 8-bit value it assembles from the two nibbles,
+             * so each packet is a signed delta since the last one. */
+            int x = g_bus_dx, y = g_bus_dy;
+            switch (g_bus_cmd & 0xF0) {
+            case 0x90: v = (u8)(x & 0x0F); break;
+            case 0xB0: v = (u8)((x >> 4) & 0x0F); break;
+            case 0xD0: v = (u8)(y & 0x0F); break;
+            case 0xF0: v = (u8)((y >> 4) & 0x0F); break;
+            default:
+                /* Button read: the driver inverts the byte and tests bits 7 and
+                 * 5, so the buttons come back active low.  Only this read may
+                 * carry them -- the driver shifts the motion nibbles left by 4
+                 * without masking, so extra bits here would corrupt the delta. */
+                v = (u8)(e->mouse_buttons & 0x03);
+                if (!(e->mouse_buttons & 0x01)) v |= 0x80;
+                if (!(e->mouse_buttons & 0x02)) v |= 0x20;
+                break;
+            }
+            /* command 00h ends the packet: the counters restart */
+            if ((g_bus_cmd & 0xF0) == 0x00) {
+                g_bus_dx = 0;
+                g_bus_dy = 0;
+            }
+        }
+        bus_trace(e, "in ", 0x23C, v);
+        return v;
+    }
+    case 0x23D: bus_trace(e, "in ", 0x23D, g_bus_latch); return g_bus_latch;
+    case 0x23E: bus_trace(e, "in ", 0x23E, g_bus_cmd); return g_bus_cmd;
+    case 0x23F: bus_trace(e, "in ", 0x23F, g_bus_ctrl); return g_bus_ctrl;
     default: return 0;
     }
 }
@@ -96,6 +165,20 @@ void emu_out_port(Emu *e, u16 port, u16 val)
         if (val == 0xDD) e->a20_on = 1;
         else if (val == 0xDF) e->a20_on = 0;
         else if (val == 0xD1) g_kbc_pending_out = 1;
+        break;
+    /* ---- Microsoft bus mouse (InPort) ---- */
+    case 0x23D:     /* signature/latch, written back by the probe */
+        g_bus_latch = (u8)val;
+        bus_trace(e, "out", 0x23D, val);
+        break;
+    case 0x23E:     /* nibble selector: 90h/0B0h X, 0D0h/0F0h Y, 00h buttons */
+        g_bus_cmd = (u8)val;
+        bus_trace(e, "out", 0x23E, val);
+        break;
+    case 0x23F:     /* control: 91h = reset, which re-loads the signature */
+        g_bus_ctrl = (u8)val;
+        if (val & 0x91) g_bus_latch = 0x5A;
+        bus_trace(e, "out", 0x23F, val);
         break;
     case 0x60:      /* keyboard controller data port (output-port byte) */
         if (g_kbc_pending_out) {
@@ -557,6 +640,7 @@ void emu_wd(Emu *e, u16 seg, u16 off, u32 v)
  * it hundreds of times per second, and every flush rewrites 25 rows, so the
  * mirror is throttled; the force flush at the end of emu_run catches up. */
 static u32 g_last_flush_ms = 0;
+static u32 g_fw_pump_ms = 0;    /* last plat_pump_events() call (firmware input) */
 
 /* CGA modes 4/5/6 keep their pixels at B8000 in the even/odd interleaved
  * layout, packed 2 (mode 4/5) or 1 (mode 6) bits per pixel.  They are expanded
@@ -3559,6 +3643,37 @@ void emu_mouse_pump(Emu *e)
         }
         g_video_dirty = 1;
     }
+    /* A Windows 1.x driver polls the InPort card from its IRQ5 handler, so the
+     * card has to raise one interrupt per packet: accumulate the motion here and
+     * let the handler read it out of the nibble registers.  Windows' CGA mouse
+     * scaling multiplies the reported delta by 4, so the card reports a quarter
+     * of the host delta (the remainder is carried, not dropped). */
+    if (g_bus_ctrl) {
+        int rx = 0, ry = 0;
+        if (dx || dy) {
+            /* Windows' CGA pointer advances about 16 pixels per X count and
+             * 10 per Y count (measured against real QEMU input), so the card
+             * reports 1/11 and 1/20 of the host delta; remainders are carried
+             * so slow movement is not swallowed. */
+            g_bus_acc_x += dx;
+            g_bus_acc_y += dy;
+            rx = g_bus_acc_x / 11;
+            ry = g_bus_acc_y / 20;
+            g_bus_acc_x -= rx * 11;
+            g_bus_acc_y -= ry * 20;
+        }
+        if (rx || ry || e->mouse_buttons != buttons) {
+            int nx = g_bus_dx + rx, ny = g_bus_dy + ry;
+            if (nx > 127) nx = 127;
+            if (nx < -128) nx = -128;
+            if (ny > 127) ny = 127;
+            if (ny < -128) ny = -128;
+            g_bus_dx = nx;
+            g_bus_dy = ny;
+            e->bus_irq_pending = 1;
+            bus_trace(e, "irq", 0x23C, 0xFF);
+        }
+    }
     e->mouse_buttons = buttons;
 }
 
@@ -3626,7 +3741,22 @@ int emu_run(Emu *e)
         }
         if (g_video_dirty && (steps & 0x3FFFFull) == 0) { video_flush(e); }
         if ((total & 0x3FFFFull) == 0) dump_vram(e);   /* steps resets on keys */
-        if ((steps & 0x3FFull) == 0) { emu_kbd_pump(e); emu_mouse_pump(e); }
+        if ((steps & 0x3FFull) == 0) {
+            emu_kbd_pump(e);
+            emu_mouse_pump(e);
+            /* Under a real UEFI the firmware only moves input packets out of its
+             * drivers when its own events get dispatched (Stall/WaitForEvent at
+             * TPL_APPLICATION).  Without this the guest sees a frozen keyboard
+             * and a pointer that never moves, however much the user moves the
+             * mouse.  The host build makes this a no-op. */
+            {
+                u32 now = plat_ticks_ms();
+                if ((u32)(now - g_fw_pump_ms) >= 8) {
+                    g_fw_pump_ms = now;
+                    plat_pump_events();
+                }
+            }
+        }
         /* IRQ0 (timer, 18.2 Hz) and IRQ1 (keyboard) go to the guest's own
          * handlers when it installed some; interrupts stay masked while the
          * guest keeps IF clear, exactly like the hardware would */
@@ -3664,6 +3794,11 @@ int emu_run(Emu *e)
                 if (e->kbd_irq_pending) {
                     e->kbd_irq_pending = 0;
                     if (!vector_is_ours(e, 9)) inject_irq(e, 9);
+                }
+                if (e->bus_irq_pending) {
+                    e->bus_irq_pending = 0;
+                    bus_trace(e, "irq", 0x23D, vector_is_ours(e, 0x0D) ? 0x00 : 0x0D);
+                    if (!vector_is_ours(e, 0x0D)) inject_irq(e, 0x0D);
                 }
             }
         }

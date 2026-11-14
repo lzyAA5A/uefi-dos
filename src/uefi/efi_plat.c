@@ -27,12 +27,16 @@ int g_plat_shutdown_requested = 0;
 static EFI_SIMPLE_POINTER_PROTOCOL *g_mouse;
 static int g_mouse_tried;
 
+void plat_serial_puts(const char *s);
+
 int plat_mouse_present(void)
 {
     if (!g_mouse_tried) {
         g_mouse_tried = 1;
         if (gBS && gBS->LocateProtocol)
             gBS->LocateProtocol(&gEfiSimplePointerProtocolGuid, NULL, (void **)&g_mouse);
+        plat_serial_puts(g_mouse ? "mouse: EFI simple pointer protocol present\n"
+                                 : "mouse: no EFI simple pointer protocol\n");
     }
     return g_mouse != NULL;
 }
@@ -46,15 +50,142 @@ static int half_count(INT64 v)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* PS/2 (i8042 aux) mouse, polled straight from the controller          */
+/*                                                                      */
+/* Some firmware builds expose EFI_SIMPLE_POINTER_PROTOCOL but never     */
+/* hand out a single state update: the 8042 collects the packets and     */
+/* the firmware-side interrupt path stays silent.  Reading the          */
+/* controller by hand works regardless, so this is armed as a fallback   */
+/* once the protocol has gone a while with no event at all.             */
+/* ------------------------------------------------------------------ */
+static u8 io_inb(u16 port)
+{
+    u8 v;
+    __asm__ __volatile__("inb %1, %0" : "=a"(v) : "Nd"(port));
+    return v;
+}
+static void io_outb(u16 port, u8 v)
+{
+    __asm__ __volatile__("outb %0, %1" : : "a"(v), "Nd"(port));
+}
+static int ps2_wait_out(void)         /* input buffer (0x64 bit1) empty */
+{
+    int i;
+    for (i = 0; i < 200000; i++)
+        if (!(io_inb(0x64) & 0x02)) return 0;
+    return -1;
+}
+static int ps2_wait_in(void)          /* output buffer (0x64 bit0) full */
+{
+    int i;
+    for (i = 0; i < 200000; i++)
+        if (io_inb(0x64) & 0x01) return 0;
+    return -1;
+}
+static void ps2_aux_cmd(u8 v)
+{
+    ps2_wait_out();
+    io_outb(0x64, 0xD4);
+    ps2_wait_out();
+    io_outb(0x60, v);
+    if (!ps2_wait_in()) (void)io_inb(0x60);     /* the 0xFA acknowledge */
+}
+
+static int g_ps2_armed;               /* polling fallback active */
+static u8  g_ps2_pkt[3];
+static int g_ps2_len;
+static int g_ps2_tries;               /* polls spent on an idle protocol */
+
+static void ps2_mouse_arm(void)
+{
+    u8 cb;
+    if (g_ps2_armed) return;
+    ps2_wait_out();
+    io_outb(0x64, 0xA8);              /* enable the aux (mouse) device */
+    ps2_wait_out();
+    io_outb(0x64, 0x20);              /* read the controller command byte */
+    if (ps2_wait_in()) return;
+    cb = io_inb(0x60);
+    cb = (u8)(cb & ~0x02);            /* aux interrupt off: we poll it */
+    cb = (u8)(cb & ~0x20);            /* aux clock on */
+    ps2_wait_out();
+    io_outb(0x64, 0x60);
+    ps2_wait_out();
+    io_outb(0x60, cb);
+    ps2_aux_cmd(0xF6);                /* set defaults */
+    ps2_aux_cmd(0xF4);                /* enable data reporting */
+    g_ps2_armed = 1;
+    g_ps2_len = 0;
+}
+
+/* Collect whole 3-byte packets.  Returns 1 when at least one packet was
+ * consumed; the accumulated delta goes into *dx/*dy and the button state into
+ * *buttons (bit0 left, bit1 right, bit2 middle). */
+static int ps2_mouse_read(int *dx, int *dy, int *buttons)
+{
+    int got = 0, rx = 0, ry = 0, btn = -1;
+    while ((io_inb(0x64) & 0x21) == 0x21) {
+        u8 b = io_inb(0x60);
+        /* A packet byte always has bit 3 set; the controller's own 0xFA/0xAA
+         * responses have it set too but are not packets -- treating one as the
+         * first byte desynchronises the stream and produces wild deltas. */
+        if (g_ps2_len == 0 && ((b & 0x08) == 0 || b == 0xFA || b == 0xAA)) continue;
+        g_ps2_pkt[g_ps2_len++] = b;
+        if (g_ps2_len < 3) continue;
+        g_ps2_len = 0;
+        {
+            u8 f = g_ps2_pkt[0];
+            int mx = (int)g_ps2_pkt[1], my = (int)g_ps2_pkt[2];
+            /* Byte 0 carries the signs in bits 4 (X) and 5 (Y); bits 6/7 are the
+             * overflow flags.  Reading bit 7 as the Y sign turned a five-count
+             * move into 251 and slammed the pointer into a corner. */
+            if (f & 0x10) mx -= 256;
+            if (f & 0x20) my -= 256;
+            rx += mx;
+            /* the controller counts Y upward, our card (and Windows) downward */
+            ry += -my;
+            btn = (f & 0x01 ? 1 : 0) | (f & 0x02 ? 2 : 0) | (f & 0x04 ? 4 : 0);
+            got = 1;
+        }
+    }
+    if (!got) return 0;
+    *dx = rx;
+    *dy = ry;
+    if (btn >= 0) *buttons = btn;
+    return 1;
+}
+
 int plat_mouse_poll(int *dx, int *dy, int *buttons)
 {
     EFI_SIMPLE_POINTER_STATE st;
-    if (!plat_mouse_present() || !dx || !dy || !buttons) return 0;
-    if (g_mouse->GetState(g_mouse, &st) != EFI_SUCCESS) return 0;
-    *dx = half_count(st.RelativeMovementX);
-    *dy = half_count(st.RelativeMovementY);
-    *buttons = (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
-    return 1;
+    static int ps2_buttons;
+    int b;
+    if (!dx || !dy || !buttons) return 0;
+    if (plat_mouse_present()) {
+        if (g_mouse->GetState(g_mouse, &st) == EFI_SUCCESS) {
+            *dx = half_count(st.RelativeMovementX);
+            *dy = half_count(st.RelativeMovementY);
+            *buttons = (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
+            if (*dx || *dy || *buttons) return 1;
+        }
+    }
+    /* Nothing from the firmware protocol (some builds expose it and never
+     * report a single state): after a moment of silence take the controller
+     * over and poll the mouse by hand.  Silence here is the normal case, so
+     * nothing is printed -- serial is the console mirror, and a diagnostic
+     * line in the middle of a program's output breaks it. */
+    if (!g_ps2_armed) {
+        if (++g_ps2_tries > 4) ps2_mouse_arm();
+        return 0;
+    }
+    b = ps2_buttons;
+    if (ps2_mouse_read(dx, dy, &b)) {
+        ps2_buttons = b;
+        *buttons = b;
+        return 1;
+    }
+    return 0;
 }
 
 /* EFI_TIME (EDK2 layout) */
@@ -319,6 +450,17 @@ int plat_abi_selftest(u32 *year_out)
 void plat_sleep_ms(u32 ms)
 {
     if (gBS && gBS->Stall) gBS->Stall((UINTN)ms * 1000);
+}
+
+/* Give the firmware a slice of CPU so its own event groups run.  DxeCore's
+ * Stall() arms a timer event and waits for it through WaitForEvent(), which
+ * dispatches every ready notification at a lower TPL -- that is where the PS/2
+ * and USB input drivers move their packets out of the controller and into the
+ * protocol queue.  A tight emulation loop never reaches that code, so keys and
+ * mouse packets simply pile up in the firmware and the guest sees no input. */
+void plat_pump_events(void)
+{
+    if (gBS && gBS->Stall) gBS->Stall(1000);   /* 1 ms */
 }
 
 void plat_get_date(int *y, int *m, int *d)

@@ -3122,3 +3122,97 @@ SETUP run with a pointing device selected -- our `INT 33h`
 (`src/emu/int33.c`, `MOUSETST` check passes) and the firmware simple-pointer
 path (`plat_mouse_poll()`) are both ready for it.
 
+
+## Round 20 -- the mouse: Windows 1.x never calls INT 33h
+
+### Why the pointer never moved
+
+A full Windows 1.01 run makes **zero** `INT 33h` calls (`UEFIDOS_TRACE_MOUSE`,
+`build/mouse_trace.txt` is empty), and the only files it opens are `WIN100.OVL`,
+`WIN.INI` and the fonts -- no `*.DRV` is loaded at run time.  The pointing
+device is *linked into the kernel by SETUP*:
+
+| SETUP choice | driver | what it talks to |
+| --- | --- | --- |
+| 1 `NOMOUSE.DRV` | none | nothing (the desktop still runs, no pointer) |
+| 2 `MOUSE.DRV` | Microsoft Mouse (Bus/Serial) | the InPort card at ports `23Ch`-`23Fh`, IRQ 5 |
+| 3 `MSMOUSE1.DRV` | Mouse Systems / VisiOn (COM1) | the serial port (its single `CD 33` is in the *uninstall* path) |
+| 4/5/6 | `MSMOUSE2.DRV` / `LMOUSE.DRV` / `JOYMOUSE.DRV` | COM2, Logitech serial, joystick port |
+
+So a tree installed with "no pointing device" cannot be given a pointer at all:
+its `WIN100.OVL` contains no driver to drive.  An option-2 install links the
+InPort driver (`WIN100.OVL` then holds `Microsoft Mouse` and `Bus/Serial`, and
+`[ivt] set 0D = 167D:0020` shows Windows arming IRQ 5).
+
+### The emulated InPort card
+
+`src/emu/emu.c` now answers the card's four registers:
+
+* `23Fh` control -- writing `0x91` (or `Ctrl+0`, `0xA5` in 1.04) latches `5Ah`
+  into `23Dh`, which is what the driver's presence probe reads back;
+* `23Eh` command -- the nibble selector the driver writes before each read;
+* `23Dh` latch -- `5Ah` after a reset;
+* `23Ch` data -- `90h` X low, `B0h` X high, `D0h` Y low, `F0h` Y high, `00h`
+  ends the packet and restarts the counters.
+
+The values are **movement counters, not a position**: the driver assembles
+`shl ax,4 / or al,ch / cbtw`, i.e. a signed 8-bit delta since the last packet.
+Two details cost real debugging time:
+
+* the buttons may only ride on the `00h` read, because the driver shifts the
+  motion nibbles left by four **without masking** -- extra bits in the high
+  nibble corrupt the delta (that bug parked the pointer in a corner);
+* Windows' CGA pointer advances about 11 pixels per X count and 20 per Y count,
+  so the card reports `1/11` and `1/20` of the host delta and carries the
+  remainders (measured with `UEFIDOS_MOUSE='20,10,0; ...'` on the host build:
+  a (16,0) event lands the pointer 43 pixels to the right).
+
+### The UEFI side: a Simple Pointer protocol that never speaks
+
+Under QEMU/OVMF the firmware *does* expose `EFI_SIMPLE_POINTER_PROTOCOL`
+(`mouse: EFI simple pointer protocol present`) but never reported a single
+state, even though QMP `input-send-event rel` demonstrably reaches the firmware
+(the same channel types `dir` into the UEFI shell).  `plat_mouse_poll()` now
+falls back to the controller itself: after five polls of silence it sends `0xA8`
+(enable aux), clears the aux-interrupt bit in the 8042 command byte, then
+`0xF6`/`0xF4` and reads 3-byte packets straight from port `60h` whenever port
+`64h` reports "output buffer full, data from aux".  The first packet arrives as
+soon as QEMU injects motion, so the firmware path is bypassed, not repaired.
+
+Three PS/2 packet traps, all of them hit here:
+
+* byte 0 always has bit 3 set -- use it to resync after a stray byte;
+* `0xFA`/`0xAA` (controller ACKs) have bit 3 set too and are **not** packets;
+  treating one as the first byte desynchronises the stream into huge deltas;
+* the signs live in bits 4 (X) and 5 (Y); bits 6/7 are the overflow flags.
+  Reading bit 7 as a Y sign turned a five-count move into 251 and slammed the
+  pointer into the bottom of the screen.
+
+`plat_pump_events()` (a 1 ms `gBS->Stall()` every 8 ms of emulated time) gives
+the firmware's own input drivers a chance to run their callbacks -- a tight
+emulation loop otherwise keeps them parked.
+
+### Verification
+
+`F:\1231\_tmp\win\qmp_mouse.py` boots `build\w101m.img` (the option-2 install
+tree), waits for the desktop, injects `rel` motion through QMP and screendumps
+before/after.  After the fixes the pointer is drawn and follows the input:
+`build\qmp_q11_b.png` shows it at (363,119) after `(64,40)` of injected motion
+from the centre, and clicks reach Windows (the file list scrolls).  On the host
+build the same path is proven with `UEFIDOS_MOUSE`/`UEFIDOS_MOUSE_WAIT`.
+
+### What a user has to do
+
+The install must contain the bus-mouse driver: run SETUP and answer the
+pointing-device question with `2` (Microsoft Mouse (Bus/Serial)).  There is no
+runtime way to add it afterwards -- the driver lives inside the kernel image
+that SETUP builds.
+
+### Still open
+
+* the 1.04 install dies in a font renderer (`idiv cx` with a zeroed
+  `DS:05A6`) before it can paint anything but the title bar;
+* the pointer speed above is calibrated to roughly 0.7 px per host count in X
+  and 0.5 in Y -- correct in direction, still a bit slow;
+* the PIC is still not emulated (`in al,20h` always reads 0), so the Windows
+  timer ISR's IRQ-in-service probe never sees its own bit.

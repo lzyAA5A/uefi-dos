@@ -36,11 +36,14 @@ int  plat_kbd_scan(void);        /* last scan code seen (0 if none) */
 int  plat_mouse_poll(int *dx, int *dy, int *buttons);
 /* 1 when the firmware/host actually has a pointing device. */
 int  plat_mouse_present(void);
-/* 1 when the firmware/host actually has a pointing device. */
-int  plat_mouse_present(void);
 void plat_shutdown(void);
 u64  plat_ticks_ms(void);
 void plat_sleep_ms(u32 ms);
+/* Let the firmware run its own events (USB/PS2 polling, console timers) for a
+ * moment.  A UEFI application that never calls back into Boot Services keeps
+ * those callbacks parked, so freshly pressed keys and mouse packets stay in the
+ * driver's queue and never reach the emulated machine. */
+void plat_pump_events(void);
 void plat_get_date(int *y, int *m, int *d);
 void plat_get_time(int *h, int *mi, int *s);
 u64  plat_timer_units_per_ms(void); /* 0 = not calibrated yet */

@@ -3,7 +3,7 @@
 #define UEFIDOS_CONFIG_H
 
 #define UEFIDOS_NAME       "UEFI-DOS"
-#define UEFIDOS_VERSION    "1.1.12"
+#define UEFIDOS_VERSION    "1.1.13"
 /* DOS API level.  The kernel implements MS-DOS 4.0 semantics (SHARE modes,
  * FCB calls, FILES=, extended error reporting, AH=6Ch extended open), and
  * INT 21h AH=30h now reports that level: AL=major, AH=minor -> AX=0x0004

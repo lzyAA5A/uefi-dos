@@ -21,7 +21,7 @@ FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以
 
 1.1.0 补的是「实模式 GUI 需要的硬件」：`INT 10h` 现在支持 **CGA 模式 4/5/6**
 （`B800` 的奇偶场交错位图，`AH=0Bh` 与 `3D8h`/`3D9h` 端口选择调色板），有了完整的
-**`INT 33h` 鼠标驱动**（底层是固件的 `EFI_SIMPLE_POINTER_PROTOCOL`，指针由模拟器画进
+**`INT 33h` 鼠标驱动**（带 i8042 PS/2 直读回退，以及 23Ch-23Fh 的 Microsoft 总线鼠标卡，Windows 1.x 的驱动只用后者、从不调用 INT 33h）（底层是固件的 `EFI_SIMPLE_POINTER_PROTOCOL`，指针由模拟器画进
 帧缓冲），并且模拟器终于会**注入硬件中断** —— 18.2 Hz 的 `INT 8`，以及带 `60h` 端口
 扫描码锁存的 `INT 9`：实模式 Windows 自己接管键盘与定时器中断，根本不读 BIOS 键盘缓冲。
 `HLT` 变成「空转一步」，所以 `sti; hlt` 消息循环能正常等待；`0040:006C` 的 BIOS 计时
@@ -463,6 +463,8 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_TRACE_IRQ=1` | 硬件中断跟踪：每往客户机处理程序压入一个 INT 8h/9h 帧就打一行（`[irq] vec=08 depth=0 from CS:IP to CS:IP`），另加周期性 `[irqdbg]` 行（IF 状态、irq 嵌套深度、向量是否仍指向我们的桩） |
 | `UEFIDOS_TRACE_SS=1` | 打印每一条改变了 `SS` 的指令，以及它落到的栈帧（`[ss] #1234 1409->0D00 sp=0826->0826 after 0D00:0592 next=0D00:0594 ax=...`）——程序悄悄跑到了错误的栈段（本应是自己的栈段却指向 PSP，或被错误的 `IRET` 恢复了过期栈帧）在 DOS 调用轨迹里完全看不出来；Windows 1.01 的 `FatalExit stack overflow` 就是这样被定位到「过期栈帧」而不是真正的栈溢出 |
 | `UEFIDOS_TRACE_MOUSE=1` | 客户机每一次 `INT 33h` 在 `build/mouse_trace.txt` 打印一行（`INT33 AX=.. BX=.. at CS:IP`）——INT 21h 的 trace 看不到这个向量，所以"客户机从来没碰过鼠标"要有这一行才算证据（没选指点设备的 Windows 1.01 就是零调用） |
+| `UEFIDOS_TRACE_PORT=1` | every access to the emulated Microsoft bus-mouse card (`[port] out 23F = 91 at CS:IP ax=...` in `build/port_trace.txt`) - shows whether the guest actually loaded an InPort driver, and which registers it uses |
+| `UEFIDOS_MOUSE_WAIT=<ms>` | delay the first scripted mouse event (a 24 M-step run finishes in ~4 s, so a script that has to land after the desktop needs `UEFIDOS_MOUSE_WAIT=1000`) |
 | `UEFIDOS_TRACE_FIND=1` | 客户机每一次 `INT 21h AH=4Eh/AH=4Fh` 打印一行，含从 DTA 里恢复的搜索状态与结果（`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`）——区分"程序在死循环是因为搜索永远不结束"和"因为搜索根本没开始"最快的手段 |
 | `UEFIDOS_TRACE_IVT=1` | 打印客户机每一次 `INT 21h AH=25h`（`[ivt] set 08 = 15B7:0244 by CS:IP`）——看程序装了哪个中断处理程序、以及到底有没有装，这是最快的手段 |
 | `UEFIDOS_TRACE_PSP=1`、`UEFIDOS_TRACE_EXEC=1` | 打印每个新 PSP 的命令行尾部（及其后 16 字节）、每次 `INT 21h AH=4Bh`（路径、环境段、命令行远指针、调用者 PSP/DS），以及失败的 `AH=48h` 请求 |
