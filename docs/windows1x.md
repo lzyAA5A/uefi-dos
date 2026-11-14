@@ -3844,3 +3844,29 @@ tick / IRQ nesting around the close.
 
 Workaround shipped in the guide: leave the app running as an icon
 (double click the `MS-DOS` icon in the bottom left) instead of closing it.
+
+## Round 32 -- LAHF/SAHF were swapped (found while verifying Turbo C++ 1.01)
+
+The 8086 core implemented `LAHF` (`9Fh`) as *"AH into FLAGS"* and `SAHF` (`9Eh`) as
+*"FLAGS into AH"*, i.e. the two instructions the wrong way round. Any program that
+tested a flag after a `LAHF` therefore saw the value in AH instead. Turbo Link
+3.01's command-line scanner is exactly that shape (`call get_char; lahf; je ...`),
+which is why it always reported "no input files"; with the pair fixed TLINK links
+and Turbo C++ 1.01 compiles, links and runs end to end (`docs/compat.md`). Two
+instruction vectors now guard it in `src/emu/itest.c`
+(`sahf loads the low flags from ah`, `lahf copies the low flags into ah`).
+
+Re-checked after the fix, because Windows 1.x uses `LAHF`/`SAHF` in its own
+interrupt code:
+
+* the MS-DOS Executive desktop under the host harness is unchanged (title bar,
+  menu, drive buttons, `C:\WINDOWS` listing, pointer) and still idles in
+  `0DBD:3510`;
+* **closing a Calculator window still ends the whole Windows session** -- the
+  serial log shows the orderly kernel shutdown path, not a crash:
+  `[halt] AH=4Ch terminate at F000:E086 ss:sp=312F:1AF0 ax=4C2F exit=002F`
+  preceded by `i21 AH=4C at 8D15:400B`, `AH=25 at 8D15:3FF6` and five
+  `AH=3E at 8D15:4107`. So the `LAHF` fix is not the cause and not the cure for
+  that one; the open item of Round 31 stands (workaround: leave the app running,
+  double click the `MS-DOS` icon at the bottom left, or `Special -> End Session`
+  to quit Windows on purpose).
