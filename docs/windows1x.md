@@ -3811,3 +3811,36 @@ Closing a window crashing (`FatalExit code =  stack overflow`) was the Round 28
 bug -- it is fixed from 1.1.20 on, so a machine still showing that text is running
 1.1.19 or older.
 
+## Round 31 -- closing an application still ends the session (open)
+
+Round 30 shipped 1.1.21 (mouse speed).  The user then confirmed the remaining
+behaviour on 1.1.21: double clicking the Calculator's control box (or choosing
+`Close` from its control menu) does **not** print `FatalExit` any more, but it
+still drops straight back to `C:\WINDOWS>`.
+
+Reproduced in QEMU/OVMF with `_tmp\win\qmp_close.py` / `qmp_steps.py`:
+
+* one button press on the window's control box opens the Control menu
+  (`Size / Move / Icon / Zoom / Close` + `About...`, hosted at CGA x 0..100,
+  y 1..72, `Close` on y 48..53); a press+release without dragging opens and
+  immediately cancels it, which is why a single click looked inert;
+* dragging onto `Close` and releasing (screenshot `build\cl1_item.png` shows the
+  highlighted item) closes the window **and** ends the session
+  (`build\cl1_after.png` = `C:\WINDOWS>`);
+* the serial log shows a *clean* shutdown, not a crash:
+  `[halt] AH=4Ch terminate at F000:E086 ss:sp=312F:1AF0 ax=4C2F exit=002F`,
+  preceded by `i21 AH=3E` x5 and `i21 AH=25` -- i.e. the kernel closed its five
+  DOS handles, restored a vector and exited, exactly the `Special -> End
+  Session` path, with no `FatalExit` text and no step-ring anomaly;
+* the shell is **not** gone: double clicking the `MS-DOS` icon restores the
+  Executive *while Calculator keeps running* (`build\ic1_after.png`), so this is
+  not Windows' "no windows left" logic.
+
+The same mouse script in the host harness keeps the session alive and restores
+the Executive (`build\clf.ppm.00014.ppm`), so the difference is specific to the
+UEFI build (timing/IRQ/pacing, not the DOS answers).  Next: dump the kernel's
+window-table bookkeeping after a close in both builds, and compare the timer
+tick / IRQ nesting around the close.
+
+Workaround shipped in the guide: leave the app running as an icon
+(double click the `MS-DOS` icon in the bottom left) instead of closing it.

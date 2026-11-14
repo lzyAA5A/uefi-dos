@@ -137,7 +137,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\run_win1x.ps1 -Installed F
 | 弹出 `Change Disk — Insert COURD.FON disk in drive A:` | `WINDOWS\` 缺字体，把 1.01 的 17 个 `.FON` 补齐 |
 | 一会儿自己退出，回到 `C:\WINDOWS>` 并打印 `FatalExit code = stack overflow` | 旧版本的 bug，**1.1.20 起已修复**。根因：模拟器把未提供的中断向量指到了 `F000:FFE0`（ROM 顶端），而这个值会被 DOS 写进 PSP 的 `000A` 处（INT 22h 终止地址），Windows 1.x 写回任务时把 `SS:000A` 当成堆栈上限来比，`0xFFE0` 一定“溢出”，于是关一个窗口就自杀。现在该 stub 位于 `F000:0100`。详情见 `docs/windows1x.md` 的 Round 28 |
 | 时间一长（几分钟）就自己退出，回到 `C:\WINDOWS>`，不打印 FatalExit | 旧版本的模拟器限制，**1.1.20 起已取消**：一个 DOS 程序最多只能执行 2 亿条指令（本来只是为了自动测试能脱离死循环），按实测速度大约 3 分钟就到上限，而 Windows 靠鼠标交互、不会给键盘事件，预算不会被重置。现在 UEFI 版的上限提到 200 亿条（约 5 小时），且鼠标活动也会重置计数。详情见 `docs/windows1x.md` 的 Round 29 |
-| 关掉一个窗口就退回 `C:\WINDOWS>`，还打印 `FatalExit code = stack overflow` | 旧版本的 bug，**1.1.20 起已修复**（细节见下面那条）。1.1.20/1.1.21 上关掉程序窗口（双击窗口左上角的小方框，或用系统菜单里的 `Close`）只会把窗口关掉、回到 Executive；只有关 **MS-DOS Executive 自己**才会弹 `This will end your Windows session.` 确认框，那是 1.0 的正常行为，点 `Cancel` 就留下 |
+| 关掉一个窗口就退回 `C:\WINDOWS>`，还打印 `FatalExit code = stack overflow` | 旧版本的 bug，**1.1.20 起不再打印 FatalExit**（细节见下面那条）。但 **1.1.20/1.1.21 上关掉程序窗口仍会直接结束 Windows 回到 DOS**（不再报错、只是安静地退出）：这是已知的遗留问题，正在查。**绕法**：用完 CALC / PAINT / NOTEPAD 等程序时不用关它——双击屏幕左下角的 `MS-DOS` 图标回到 Executive 即可（已验证），程序继续以图标形式留着；真要结束整个 Windows 用 `Special` → `End Session` |
 | 玩了五分钟左右整个机器突然重启（又回到开机屏幕），也不打印 FatalExit | 固件的引导看门狗（boot watchdog，EDK2 默认 5 分钟）在到期后重置机器，**1.1.20 起已在启动时关掉**（`gBS->SetWatchdogTimer(0,0,0,NULL)`）。旧版本遇到这个现象就是这个原因 |
 | 画面上下有黑边 / 比例被压扁 | 1.1.11 起按 4:3 输出，不会再压缩；若仍有黑边说明 GOP 模式比 4:3 更宽，属正常留边 |
 | 提示 `Not enough memory to display entire directory` | 目录太大（文件太多）。先用 `View → Partial...` 过滤，或把不用的文件移出目录 |

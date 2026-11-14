@@ -425,10 +425,9 @@ int plat_video_gfx_begin(int w, int h)
 }
 
 /* dump the 8bpp framebuffer as a P6 PPM (the tests convert it to PNG) */
-void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
+static void gfx_write_ppm(const char *path, const u8 *fb, int w, int h, const u8 *dac)
 {
-    if (!g_gfx_dump) return;
-    FILE *f = fopen(g_gfx_dump, "wb");
+    FILE *f = fopen(path, "wb");
     if (!f) return;
     char hdr[32];
     int n = snprintf(hdr, sizeof(hdr), "P6\n%d %d\n255\n", w, h);
@@ -442,6 +441,23 @@ void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
         fwrite(rgb, 1, 3, f);
     }
     fclose(f);
+}
+
+void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
+{
+    static int every = -1;
+    if (!g_gfx_dump) return;
+    if (every < 0) {
+        const char *s = getenv("UEFIDOS_GFX_DUMP_EVERY");
+        every = (s && *s) ? atoi(s) : 0;
+    }
+    gfx_write_ppm(g_gfx_dump, fb, w, h, dac);
+    if (every > 0 && (g_gfx_frames % every) == 0) {
+        /* keep a numbered history so a run can be reviewed step by step */
+        char path[512];
+        snprintf(path, sizeof(path), "%s.%05d.ppm", g_gfx_dump, g_gfx_frames);
+        gfx_write_ppm(path, fb, w, h, dac);
+    }
     if (g_gfx_frames == 0) {
         printf("gfx: %dx%d framebuffer -> %s (first pixel index %u = %u,%u,%u)\n",
                w, h, g_gfx_dump, (unsigned)fb[0],
