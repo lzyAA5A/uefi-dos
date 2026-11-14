@@ -6,6 +6,9 @@
 #include "kernel/dos.h"
 #include "plat.h"
 
+/* AH=37h switch character.  DOS 3.3+ default is '/'; TOOLS (Turbo Link, some
+ * installers) read it through AH=37h to know how to write option switches. */
+static u8 g_switch_char = '/';
 static int g_pending_key = -1;
 static int g_pending_scan = -1;
 static int g_pending_asc = -1;
@@ -574,19 +577,43 @@ static void ext_error(u16 code, u8 *cls, u8 *act, u8 *locus)
     }
 }
 
+/* See the note above check_key(): an extended key is handed to the program as
+   AL = 0 followed by AL = scan code on the next read, exactly like MS-DOS 5.00. */
+static int g_ext_scan = -1;
+
 static int input_key(Emu *e)
 {
     int scan = 0, asc = 0;
+    if (g_ext_scan >= 0) {              /* second half of an extended key */
+        int s = g_ext_scan;
+        g_ext_scan = -1;
+        return s;
+    }
     if (g_pending_key >= 0) {
         int k = g_pending_key;
         g_pending_key = -1;
         g_pending_scan = g_pending_asc = -1;
+        if (k & 0x100) {                /* extended: hand out the prefix, queue the scan */
+            g_ext_scan = k & 0xFF;
+            return 0;
+        }
         return k;
     }
     emu_kbd_get_full(e, &scan, &asc);
-    return asc ? asc : (0x100 | (scan & 0xFF));
+    if (asc) return asc;
+    g_ext_scan = scan & 0xFF;
+    return 0;
 }
 
+/* An extended key (F-keys, arrows, Ins/Del, Home/End, PgUp/PgDn) is handed to
+   the program as TWO characters: the console read returns AL = 0, and the next
+   read returns the BIOS scan code in AL.  That is what MS-DOS 5.00 really does
+   (measured with a probe program on real DOS: F9 gives AX=0x0700 and then
+   AX=0x0743, i.e. AH is not even touched), and it is what Borland's INSTALL
+   utility relies on -- it reads a byte, and when it sees 0 it reads again and
+   adds 0x80 to build its function-key code.  Returning the scan code in AH
+   instead (as an earlier build did) makes such programs wait for a second
+   keystroke and drop every F-key. */
 static int check_key(Emu *e)
 {
     int scan = 0, asc = 0;
@@ -899,6 +926,27 @@ void int21_handler(Emu *e)
         e->cx = (u16)v->bytes_per_sector;
         e->dx = (u16)(v->cluster_count > 0xFFFFu ? 0xFFFFu : v->cluster_count);
         set_ok(e);
+        return;
+    }
+    case 0x37: {
+        /* AH=37h: get/set the command-line switch character.  Borland's Turbo
+         * Link probes this before parsing its own command line and takes the
+         * answer as the option prefix; answering with a stale DL (our old
+         * fall-through) made TLINK 3.01 reject every argument list and print
+         * its syntax screen instead of linking.  DOS 3.3+ default is '/'. */
+        if ((e->ax & 0xFF) == 0x00) {          /* AL=0: get */
+            e->dx = (u16)((e->dx & 0xFF00) | g_switch_char);
+            e->ax = (u16)(e->ax & 0xFF00);
+            set_ok(e);
+            return;
+        }
+        if ((e->ax & 0xFF) == 0x01) {          /* AL=1: set */
+            g_switch_char = (u8)(e->dx & 0xFF);
+            e->ax = (u16)(e->ax & 0xFF00);
+            set_ok(e);
+            return;
+        }
+        set_err(e, 1);
         return;
     }
     case 0x39: {

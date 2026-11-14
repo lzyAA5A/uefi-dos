@@ -12,8 +12,10 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.1.21** —— 35 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.2.0** —— 35 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
+
+1.2.0 是兼容性版本：又把三个真实 DOS 软件包从原版软盘镜像装起来跑通 —— **Forth-83 2.1.0**（块文件 `F83 SAMPLE.BLK`，输入 `2 3 + .` 得到 `5  ok`）、**Windows 1.01 演示幻灯片**（`PRESENT DEMO`，CGA 320×200 幻灯片）与 **Borland Turbo C++ 1.01**（编译器 `TCC -c HELLO.C` 生成 `HELLO.OBJ` 633 字节）。为此修了三处 DOS 约定：`005Ch`/`006Ch` 的 **PSP 默认 FCB** 现在从命令行解析（CP/M 时代的程序只从那里取文件名，否则 Forth-83 打印 `Open error in .`）、**扩展键**（F 键、方向键）按 MS-DOS 5.00 实测的方式交付（先读到 `AL=0`，下一次读到扫描码）、`INT 21h AH=37h`（读写开关字符）现在返回 `AL=0`、`DL='/'`，不再落到未处理的默认分支。Turbo Link 仍不认自己的命令行，链接是那个包唯一的未完成项（见 docs/compat.md）。
 
 1.1.1 修的是 DOS 的 EXEC 命令行约定：调用方 `PSP:0080h..00FFh` 那 **128 字节
 原样**复制给子进程（`WIN.COM` 的 `'XW'` 标记就藏在这里），且计数字节不含结尾 CR。
@@ -38,7 +40,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.21.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.21.zip)
+[**下载 `UEFI-DOS-1.2.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.0.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：

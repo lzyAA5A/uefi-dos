@@ -13,8 +13,24 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.1.21** — 35 of 35 automated checks pass on the Windows host harness
+Version **1.2.0** — 35 of 35 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
+
+1.2.0 is a compatibility release: three more real DOS packages were taken
+from their original floppy images and driven under the emulator end to end —
+**Forth-83 2.1.0** (block files, `F83 SAMPLE.BLK`, `2 3 + . 5  ok`),
+the **Windows 1.01 Demo Slideshow** (the `PRESENT DEMO` player, CGA 320×200
+slides with dithered windows) and **Borland Turbo C++ 1.01**, whose compiler
+builds a real object file (`TCC -c HELLO.C` → `HELLO.OBJ 633`). Getting there
+fixed three DOS contracts: the **PSP default FCBs** at `005Ch`/`006Ch` are now
+parsed from the command tail (CP/M-era programs read their file name from
+there — Forth-83 printed `Open error in .` without it), **extended keys**
+(F-keys, arrows) are handed to a program the way MS-DOS 5.00 does it
+(`AL=0` first, then the scan code in `AL`, measured against real DOS 5.00 with
+a probe program), and `INT 21h AH=37h` (get/set switch character) answers
+`AL=0`, `DL='/'` instead of falling through to a stale register. Turbo Link
+still refuses its own command line, so linking is the one open item from that
+package (see [`docs/compat.md`](docs/compat.md)).
 
 1.1.1 fixes the EXEC command-tail contract DOS has and UEFI-DOS did not:
 the whole 128-byte `PSP:0080h..00FFh` buffer is copied verbatim (that is
@@ -44,7 +60,7 @@ missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.1.21.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.21.zip)
+[**Download `UEFI-DOS-1.2.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.0.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):

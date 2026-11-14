@@ -3355,6 +3355,46 @@ int emu_unsupported_quiet;
  * stores the word 'XW' at PSP:00FEh and the kernel refuses to boot without it
  * (CS:653Eh).  `tail128` is that buffer; when NULL the tail is synthesised
  * from `argline` the way DOS would for a normal command line. */
+/* Fill one of the PSP's two default FCBs from a command-tail word, the way
+   DOS does it: drive byte, 8-character name padded with blanks, 3-character
+   extension padded with blanks, the extent/record/size fields zeroed. */
+static void psp_parse_fcb(Emu *e, u16 psp, u16 off, const char *arg)
+{
+    int i, drv = 0;
+    char nm[8], ex[3];
+    const char *p, *base;
+
+    for (i = 0; i < 8; i++) nm[i] = ' ';
+    for (i = 0; i < 3; i++) ex[i] = ' ';
+    if (!arg || !*arg) {
+        emu_wb(e, psp, off, 0x00);
+        for (i = 0; i < 11; i++) emu_wb(e, psp, (u16)(off + 1 + i), 0x00);
+        for (i = 0; i < 12; i++) emu_wb(e, psp, (u16)(off + 12 + i), 0x00);
+        return;
+    }
+    if (arg[0] && arg[1] == ':') {
+        char d = arg[0];
+        if (d >= 'a' && d <= 'z') d = (char)(d - 'a' + 'A');
+        if (d >= 'A' && d <= 'Z') { drv = d - 'A' + 1; arg += 2; }
+    }
+    /* a path in the argument: only the last element belongs in the FCB */
+    base = arg;
+    for (p = arg; *p; p++)
+        if (*p == '\\' || *p == '/' || *p == ':') base = p + 1;
+    i = 0;
+    for (p = base; *p && *p != '.'; p++)
+        if (i < 8) nm[i++] = (char)((*p >= 'a' && *p <= 'z') ? *p - 'a' + 'A' : *p);
+    if (*p == '.') {
+        i = 0;
+        for (p++; *p; p++)
+            if (i < 3) ex[i++] = (char)((*p >= 'a' && *p <= 'z') ? *p - 'a' + 'A' : *p);
+    }
+    emu_wb(e, psp, off, (u8)drv);
+    for (i = 0; i < 8; i++) emu_wb(e, psp, (u16)(off + 1 + i), (u8)nm[i]);
+    for (i = 0; i < 3; i++) emu_wb(e, psp, (u16)(off + 9 + i), (u8)ex[i]);
+    for (i = 0; i < 12; i++) emu_wb(e, psp, (u16)(off + 12 + i), 0x00);
+}
+
 static void build_psp_ex(Emu *e, u16 psp_seg, const char *argline, const u8 *tail128)
 {
     u16 s = psp_seg;
@@ -3418,9 +3458,40 @@ static void build_psp_ex(Emu *e, u16 psp_seg, const char *argline, const u8 *tai
     emu_ww(e, s, 0x34, 0x18);                /* -> JFT */
     emu_ww(e, s, 0x36, s);
     emu_ww(e, s, 0x38, e->psp_seg ? e->psp_seg : s); /* previous PSP */
-    /* two default FCBs: drive byte 0 then 11 blanks means "empty" */
-    emu_wb(e, s, 0x5C, 0x00);
-    emu_wb(e, s, 0x6C, 0x00);
+    /* Two default FCBs.  DOS parses the first two words of the command tail
+       into PSP:005Ch and PSP:006Ch; CP/M-era programs (Forth-83 and friends)
+       take their file name from there and never look at the tail text, so an
+       empty FCB makes them open "" and print "Open error in .". */
+    {
+        const char *a1 = 0;
+        const char *a2 = 0;
+        char tail[132];
+        tail[0] = 0;
+        if (tail128) {
+            int n = tail128[0];
+            if (n < 0 || n > 127) n = 0;
+            for (int i = 0; i < n; i++) tail[i] = (char)tail128[1 + i];
+            tail[n] = 0;
+        } else if (argline && *argline) {
+            int i = 0;
+            for (const char *p = argline; *p && i < 126; p++) tail[i++] = *p;
+            tail[i] = 0;
+        }
+        {
+            int argn = 0;
+            char *p = tail;
+            while (*p) {
+                while (*p == ' ' || *p == '\t') p++;
+                if (!*p) break;
+                if (argn == 0) a1 = p; else if (argn == 1) a2 = p;
+                argn++;
+                while (*p && *p != ' ' && *p != '\t') p++;
+                if (*p) *p++ = 0;
+            }
+        }
+        psp_parse_fcb(e, s, 0x5C, a1);
+        psp_parse_fcb(e, s, 0x6C, a2);
+    }
     /* command tail */
     u32 len = 0;
     if (tail128) {

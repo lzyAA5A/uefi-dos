@@ -135,6 +135,50 @@ Additionally the emulator now answers the video-retrace polling port
 (`IN 0x3DA` alternates) and keeps a minimal CRTC register set, so text-mode
 code that waits for vertical retrace no longer hangs.
 
+## Apps from original floppy images (1.2.0)
+
+Three more packages were taken from their retail floppy images (7-Zip → FAT
+extraction → `tools/make_tree_image.py`, 40–64 MB test images) and driven
+through the same host harness:
+
+| Package | Media | What was run | Result |
+| --- | --- | --- | --- |
+| **Forth-83 2.1.0** (`8086 Forth 83 Model`) | 3 × 720 KB | `F83 SAMPLE.BLK` then `2 3 + .` | **runs** — banner `Version 2.1.0 Modified 01Jun84`, answer `5  ok` |
+| **Windows 1.01 Demo Slideshow** | 1 × 360 KB | `PRESENT DEMO` (a plain MZ DOS player, not a Windows app) | **runs** — sets 320×200 then 640×200, loads its `*.CLP` slides and paints real slide content (dBase II and Write windows, dithered wallpaper) |
+| **Borland Turbo C++ 1.01** | 4 × 720 KB | `TCC -c ..\..\HELLO.C` | **compiles** — `Turbo C++  Version 1.01`, `HELLO.OBJ` 633 bytes |
+| the same package, link step | — | `TLINK HELLO.OBJ,HELLO.EXE` (also `TLINK @RESP` and `TLINK HELLO`) | **open** — TLINK 3.01 prints its syntax banner instead of linking |
+
+### Turbo C++ 1.01: the archive is a hybrid, install it by hand
+
+`INSTALL.EXE` identifies itself as *"Turbo C++ 2nd Edition Installation
+Utility, Copyright (c) 1991"* while the disks are the 1990 1.01 set, so it looks
+for `HELP.ZIP`/`TC.ZIP`/`THELP.COM` that these disks do not carry (`TC.CA1`,
+`TC.CA2`, `HELP.CA1`, `HELP.CA2` instead) and stops at `Cannot find THELP.COM,
+C)ontinue or A)bort?`. That is a property of the downloaded archive, not of
+UEFI-DOS. A working tree is a plain unzip:
+
+* `BIN1.ZIP`, `BIN2.ZIP`, `TCC.ZIP` → `TC\BIN`
+* `INCLUDE.ZIP`, `CLASSINC.ZIP` → `TC\INCLUDE`
+* `CLIB/LLIB/MLIB/SLIB/HLIB/XLIB.ZIP` → `TC\LIB`, `BGI.ZIP` → `TC\BGI`
+* `CLASSLIB/CLASSEXM/CLASSSRC/EXAMPLES/TOUR/STARTUP/DOC/TCALC.ZIP` → `TC\*`
+* `TC\BIN\TURBOC.CFG` holding `-I..\INCLUDE` and `-L..\LIB`
+
+Then `CD \TC\BIN` + `TCC -c ..\..\HELLO.C` produces the object file. Note
+that TCC takes **`-c`**, not `/c` (`/c` is taken as a file name).
+
+### What TLINK needs (open item)
+
+Turbo Link 3.01 runs, prints its banner, asks DOS for the switch character
+(`INT 21h AH=37h`, now answered `'/'`), consumes two characters of the
+`PSP:0080h` tail and then prints `Syntax: TLINK objfiles, exefile, mapfile,
+libfiles` and exits with code 2 — no file is ever opened. The identical tree,
+command line and linker produce `HELLO EXE 790` bytes on real MS-DOS 5.00 in the
+same QEMU (vvfat disk), so this is our gap: the tail is verifiably correct
+(`UEFIDOS_TRACE_PSP=1` → `[psp] seg=0D00 len=50 tail= HELLO.OBJ,HELLO.EXE,,...`)
+and the switch character comes back as `2Fh`, so what is left is how TLINK's own
+parser gets its input. Compiling — the part that matters for "sources build" —
+works; linking stays on the open list.
+
 ## Open points
 
 * `C86HELLO.COM` (and other Digital Mars COMs built for the CardPuter86
@@ -151,5 +195,7 @@ code that waits for vertical retrace no longer hangs.
   path (likely a stale attribute/character write) rather than a layout bug.
 * Graphics modes (INT 10h `AH=00` mode 4/6/12/13 and `A000:0000`) are still
   not emulated; only the text screen at `B800:0000` is mirrored.
+* **Turbo Link 3.01 does not link** (see above): it never opens the object
+  file. `TCC`'s compile step is unaffected, so sources can be built to `.OBJ`.
 * `ASM.EXE` with an argument loops; `MININASM`, `DIAG`, `CPPTEST`, `HI`,
   `VID` exit or idle without visible output and need a closer look.
