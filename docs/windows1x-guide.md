@@ -65,8 +65,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\run_win1x.ps1 -Installed F
 - **双击**：打开 —— 目录会进去，`.EXE`/`.COM`/`.BAT` 会运行，`.PIF` 会按 PIF 设置运行程序。
 - 双击 `.FON`、`.TXT` 这类不可执行文件，Windows 会弹
   `MS-DOS — Cannot run XXX` 并给一个 `Ok` 按钮，这是正常的。
-- 窗口**不能重叠**（Windows 1.x 的平铺模型）：打开的窗口会互相挤占，可以被拖到
-  底部灰色区里当作"最小化"。
+- 窗口**不能重叠**（Windows 1.x 的平铺模型）：打开的窗口会互相挤占。把窗口拖到底部
+  灰色抖动区松手，它就缩成一个小图标呆在那儿（等价于后来的"最小化"）；双击那个小图标
+  可以再打开。关闭窗口用系统菜单（标题栏左上角小方块）里的 `Close`。
 
 ### 菜单
 
@@ -75,7 +76,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\run_win1x.ps1 -Installed F
 | **File** | `Run...`（输入命令运行）、`Load...`（把程序装进内存备用）、`Copy...`、`Get Info`（选中项的信息）、`Delete...`、`Print...`、`Rename...` |
 | **View** | `Short`（短格式）/ `Long`（长格式：大小、日期）/ `Partial...`（按通配符筛）/ `By Name` / `By Date` / `By Size` / `By Kind`（排序） |
 | **Special** | `End Session`（结束 Windows 会话）、`Create Directory...`、`Change Directory...`、`Format Data Disk...`、`Make System Disk...`、`Set Volume Name...` |
-| 系统菜单（标题栏左上角小方块） | `About...`（版本信息） |
+| 系统菜单（标题栏左上角小方块） | `Close`（关窗口）、`Zoom`（放大/还原）、`Icon`（缩成小图标放到桌面底部）、`About...`（版本信息） |
 
 用法（Windows 1.0 的菜单是**按住不放**才展开的，和我们后来习惯的"点一下就弹开"不同）：
 
