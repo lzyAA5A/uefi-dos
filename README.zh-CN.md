@@ -12,7 +12,7 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.1.14** —— 35 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.1.16** —— 35 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
 1.1.1 修的是 DOS 的 EXEC 命令行约定：调用方 `PSP:0080h..00FFh` 那 **128 字节
@@ -42,7 +42,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.14.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.14.zip)
+[**下载 `UEFI-DOS-1.1.16.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.15.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -183,6 +183,7 @@ seek 的 whence 与 INT 21h 相同，`find_first`/`find_next` 回填的字段与
 | 报告版本 | `AH=30h` 返回 `AX=0x0004`（DOS 4.00），`VER` 显示同一级别；想报告别的版本改 `src/uefidos_config.h` 里的 `UEFIDOS_DOSVER_*` |
 | 数据结构 | `AH=32h` 在保留 ROM 窗口里为每个已挂载盘生成一个 DPB；`AH=52h` 返回 list of lists，其 `+2` 指向该 DPB 链 |
 | EXE 映像装载位置 | `CONFIG.SYS` 写 `EXECHIGH=ON` 时，EXE 映像贴着程序块的**顶端**装载（不再是 PSP 之后的默认位置）；`CONFIG` 显示当前模式，宿主测试器用 `UEFIDOS_EXEC_HIGH_IMAGE` |
+| 鼠标速度 | `CONFIG.SYS` 写 `MOUSESPEED=n` 设定模拟的 Microsoft 总线鼠标（Windows 1.x 用的那块卡）每上报 1 个计数需要多少个宿主计数：默认 1（一个宿主计数上报一次，即 2 个 CGA 像素），写 2 慢一半、定位更细 |
 | 错误上报 | `AH=59h` 把上次失败映射成 class / 建议动作 / locus 三元组（`2`→class 8、`5`/`21h`→class 3、`27h`→class 11、`50h`→class 12 …） |
 | 扩展打开 | `AH=6Ch` 支持 DOS 的 action 位：打开已有 / 不存在则创建 / 覆盖已有，`AX` 返回句柄、`CX` 返回 `1`/`2`/`3`；`AH=68h` 提交 |
 | 临时文件 | `AH=5Ah` 在指定目录下生成 `TMPxxxxx.TMP` 并带冲突重试，两个程序不会撞名 |
@@ -465,6 +466,8 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_TRACE_MOUSE=1` | 客户机每一次 `INT 33h` 在 `build/mouse_trace.txt` 打印一行（`INT33 AX=.. BX=.. at CS:IP`）——INT 21h 的 trace 看不到这个向量，所以"客户机从来没碰过鼠标"要有这一行才算证据（没选指点设备的 Windows 1.01 就是零调用） |
 | `UEFIDOS_TRACE_PORT=1` | every access to the emulated Microsoft bus-mouse card (`[port] out 23F = 91 at CS:IP ax=...` in `build/port_trace.txt`) - shows whether the guest actually loaded an InPort driver, and which registers it uses |
 | `UEFIDOS_MOUSE_WAIT=<ms>` | delay the first scripted mouse event (a 24 M-step run finishes in ~4 s, so a script that has to land after the desktop needs `UEFIDOS_MOUSE_WAIT=1000`) |
+| `UEFIDOS_MOUSE_SCALE=n` | host counts per count the emulated bus mouse reports (`n` or `nx,ny`; default 1 = about two CGA pixels per count) |
+| `UEFIDOS_TICK_STEPS=<n>` | 每个 BIOS 定时器 tick 对应的模拟指令数（默认 16384，即原装机 18.2 Hz）—— tick 按模拟步数计，不按宿主毫秒，所以宿主测试器与 UEFI 下的中断节奏一致；调小可给客人更多定时中断做压力测试 |
 | `UEFIDOS_TRACE_FIND=1` | 客户机每一次 `INT 21h AH=4Eh/AH=4Fh` 打印一行，含从 DTA 里恢复的搜索状态与结果（`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`）——区分"程序在死循环是因为搜索永远不结束"和"因为搜索根本没开始"最快的手段 |
 | `UEFIDOS_TRACE_IVT=1` | 打印客户机每一次 `INT 21h AH=25h`（`[ivt] set 08 = 15B7:0244 by CS:IP`）——看程序装了哪个中断处理程序、以及到底有没有装，这是最快的手段 |
 | `UEFIDOS_TRACE_PSP=1`、`UEFIDOS_TRACE_EXEC=1` | 打印每个新 PSP 的命令行尾部（及其后 16 字节）、每次 `INT 21h AH=4Bh`（路径、环境段、命令行远指针、调用者 PSP/DS），以及失败的 `AH=48h` 请求 |

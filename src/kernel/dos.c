@@ -1436,6 +1436,16 @@ void dos_read_config_sys(void)
              * machine ends up in for it.  Default OFF: DOS itself loads low. */
             char v = cfg_upper((char)*q);
             g_exec_image_high = (v == 'O' || v == 'Y' || v == '1') ? 1 : 0;
+        } else if (strcmp(key, "MOUSESPEED") == 0) {
+            /* MOUSESPEED=n  -- host counts per mouse count reported to the
+             * guest (default 1 = 2 CGA pixels per host count).  2 is half as
+             * fast and gives finer control; it only affects the emulated
+             * Microsoft bus mouse Windows 1.x drives, not INT 33h. */
+            extern int g_mouse_speed;
+            int v = cfg_num(q, 0);
+            if (v < 1) v = 1;
+            if (v > 16) v = 16;
+            g_mouse_speed = v;
         } else if (strcmp(key, "SETVER") == 0 || strcmp(key, "DOSVER") == 0) {
             /* SETVER NAME 3.30  -- report another DOS version to that program */
             char nm[16];

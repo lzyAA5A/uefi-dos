@@ -67,6 +67,70 @@ static void bus_trace(Emu *e, const char *dir, u16 port, int val)
 { (void)e; (void)dir; (void)port; (void)val; }
 #endif
 
+/* Host counts (PS/2 counts) per count the card reports.  Windows 1.x scales a
+ * reported mouse count up when it moves the pointer, so the card has to divide
+ * the host delta; the remainder is carried across packets.  UEFIDOS_MOUSE_SCALE
+ * takes "n" or "nx,ny" for host-side calibration. */
+static int bus_scale(int axis)
+{
+    static int sx = -1, sy = -1;
+    if (sx < 0) {
+        /* Windows 1.x moves the CGA pointer two pixels per reported count in
+         * both axes (measured: 60 counts -> +122 px, 40 counts -> +80 px), and a
+         * PS/2 count is about 1/100 inch of hand movement, so reporting every
+         * host count puts the whole 640-pixel screen about 3 inches (8 cm) of
+         * hand travel away -- a real mouse's feel.  CONFIG.SYS MOUSESPEED=n
+         * overrides it: n is the number of host counts per reported count, so 2
+         * is half as fast and needs finer hand control. */
+        sx = 1;
+        sy = 1;
+        if (g_mouse_speed > 0) {
+            sx = g_mouse_speed;
+            sy = g_mouse_speed;
+        }
+#ifdef UEFIDOS_HOST
+        {
+            const char *s = getenv("UEFIDOS_MOUSE_SCALE");
+            if (s && *s) {
+                int vx = atoi(s);
+                int vy = vx;
+                const char *c = strchr(s, ',');
+                if (c) vy = atoi(c + 1);
+                if (vx < 1) vx = 1;
+                if (vy < 1) vy = 1;
+                sx = vx;
+                sy = vy;
+            }
+        }
+#endif
+    }
+    return axis ? sy : sx;
+}
+
+/* Emulated instructions per BIOS timer tick.  An original PC runs 18.2 timer
+ * interrupts per second while executing roughly 300k instructions/s, so one
+ * tick is ~16384 instructions of emulated time.  Counting steps rather than
+ * host milliseconds keeps the interrupt rate identical no matter how fast the
+ * emulator runs, which matters because a guest like Windows 1.x is sensitive to
+ * how many timer interrupts land inside its critical sections. */
+static u64 timer_period_steps(void)
+{
+    static u64 period = 0;
+    if (period == 0) {
+        period = 0x4000u;
+#ifdef UEFIDOS_HOST
+        {
+            const char *s = getenv("UEFIDOS_TICK_STEPS");
+            if (s && *s) {
+                long v = atol(s);
+                if (v >= 64) period = (u64)v;
+            }
+        }
+#endif
+    }
+    return period;
+}
+
 u16 emu_in_port(Emu *e, u16 port)
 {
     g_io_ticks++;
@@ -106,21 +170,27 @@ u16 emu_in_port(Emu *e, u16 port)
             case 0x90: v = (u8)(x & 0x0F); break;
             case 0xB0: v = (u8)((x >> 4) & 0x0F); break;
             case 0xD0: v = (u8)(y & 0x0F); break;
-            case 0xF0: v = (u8)((y >> 4) & 0x0F); break;
-            default:
-                /* Button read: the driver inverts the byte and tests bits 7 and
-                 * 5, so the buttons come back active low.  Only this read may
-                 * carry them -- the driver shifts the motion nibbles left by 4
-                 * without masking, so extra bits here would corrupt the delta. */
-                v = (u8)(e->mouse_buttons & 0x03);
-                if (!(e->mouse_buttons & 0x01)) v |= 0x80;
-                if (!(e->mouse_buttons & 0x02)) v |= 0x20;
+            case 0xF0:
+                /* The Y-high read is the only one MOUSE.DRV takes without
+                 * masking, so this is where the card's switch bits live: the
+                 * driver shifts the byte left by four (so AH = this byte's high
+                 * nibble), does `not ax`, then `mov dl,ah / shr dl,3 / and dx,1`
+                 * for the left button and `mov al,ah / and ax,2` for the right
+                 * one.  Both switches are therefore ACTIVE LOW -- bit 7 = left
+                 * released, bit 6 = middle released, bit 5 = right released --
+                 * and an idle card reads 0xE0 here.  Returning 0x00 made Windows
+                 * see both buttons held down for ever, so no click ever
+                 * arrived. */
+                v = (u8)(((y >> 4) & 0x0F) | 0xE0);
+                if (e->mouse_buttons & 0x01) v = (u8)(v & ~0x80);   /* left down */
+                if (e->mouse_buttons & 0x04) v = (u8)(v & ~0x40);   /* middle down */
+                if (e->mouse_buttons & 0x02) v = (u8)(v & ~0x20);   /* right down */
                 break;
-            }
-            /* command 00h ends the packet: the counters restart */
-            if ((g_bus_cmd & 0xF0) == 0x00) {
-                g_bus_dx = 0;
-                g_bus_dy = 0;
+            default:
+                /* Packet end (selector 00h): the driver does not read data
+                 * here, it only uses this write to restart the packet. */
+                v = 0;
+                break;
             }
         }
         bus_trace(e, "in ", 0x23C, v);
@@ -173,6 +243,15 @@ void emu_out_port(Emu *e, u16 port, u16 val)
         break;
     case 0x23E:     /* nibble selector: 90h/0B0h X, 0D0h/0F0h Y, 00h buttons */
         g_bus_cmd = (u8)val;
+        /* Selecting 00h is how MOUSE.DRV closes a packet (it writes 00h and
+         * never reads), so this -- not a read -- is where the movement
+         * counters restart.  Clearing them on a read that never happens made
+         * every later interrupt report the same delta again, which Windows saw
+         * as a permanent drag: menus never opened, clicks never landed. */
+        if ((val & 0xF0) == 0x00) {
+            g_bus_dx = 0;
+            g_bus_dy = 0;
+        }
         bus_trace(e, "out", 0x23E, val);
         break;
     case 0x23F:     /* control: 91h = reset, which re-loads the signature */
@@ -3186,7 +3265,7 @@ int emu_init(Emu *e)
     e->mouse_y = 100;
     e->mouse_show_count = 0;
     e->mouse_mask = 0;
-    e->irq_last_tick_ms = plat_ticks_ms();
+    e->irq_last_tick_ms = 0;    /* step count of the last timer tick */
     e->cr0 = 0;
     e->a20_on = 0;              /* gate masked: real-mode addresses wrap at 1 MB */
     seg_cache_sync(e);          /* real-mode caches: base = sel<<4, limit 64K */
@@ -3236,6 +3315,11 @@ static int load_com_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char 
  * Set g_exec_image_high = 1 to opt in.  Today only the host harness does that
  * (UEFIDOS_EXEC_HIGH_IMAGE=1); CONFIG.SYS does not parse a keyword for it yet. */
 int g_exec_image_high = 0;   /* see load_exe_at(): place EXE images high */
+
+/* Host counts per count reported by the emulated Microsoft bus mouse card.
+ * 0 = use the built-in default (2, i.e. about one screen pixel per count); set
+ * from CONFIG.SYS MOUSESPEED=<n>. */
+int g_mouse_speed = 0;
 
 static int load_exe_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const char *args,
                        const u8 *tail128)
@@ -3650,17 +3734,14 @@ void emu_mouse_pump(Emu *e)
      * of the host delta (the remainder is carried, not dropped). */
     if (g_bus_ctrl) {
         int rx = 0, ry = 0;
+        int scx = bus_scale(0), scy = bus_scale(1);
         if (dx || dy) {
-            /* Windows' CGA pointer advances about 16 pixels per X count and
-             * 10 per Y count (measured against real QEMU input), so the card
-             * reports 1/11 and 1/20 of the host delta; remainders are carried
-             * so slow movement is not swallowed. */
             g_bus_acc_x += dx;
             g_bus_acc_y += dy;
-            rx = g_bus_acc_x / 11;
-            ry = g_bus_acc_y / 20;
-            g_bus_acc_x -= rx * 11;
-            g_bus_acc_y -= ry * 20;
+            rx = g_bus_acc_x / scx;
+            ry = g_bus_acc_y / scy;
+            g_bus_acc_x -= rx * scx;
+            g_bus_acc_y -= ry * scy;
         }
         if (rx || ry || e->mouse_buttons != buttons) {
             int nx = g_bus_dx + rx, ny = g_bus_dy + ry;
@@ -3764,7 +3845,7 @@ int emu_run(Emu *e)
             /* BIOS tick counter (40:6C): real hardware bumps it from the timer
              * interrupt, so programs that poll the variable directly (Windows'
              * idle loop does) see time move even without INT 1Ah */
-            emu_wd(e, 0x40, 0x6C, (u32)(plat_ticks_ms() / 55u));
+            emu_wd(e, 0x40, 0x6C, (u32)(total / (u64)timer_period_steps()));
             if (e->irq_depth && e->cs == e->irq_cs && (u16)e->eip == e->irq_ip &&
                 e->ss == e->irq_ss && (u16)e->esp == e->irq_sp)
                 e->irq_depth = 0;
@@ -3782,9 +3863,18 @@ int emu_run(Emu *e)
                 if (e->irq_steps > 0x30000u) e->irq_depth = 0;
             }
             if ((e->eflags & F_IF) && e->irq_depth == 0) {
-                u32 now = plat_ticks_ms();
-                if ((u32)(now - e->irq_last_tick_ms) >= 55) {
-                    e->irq_last_tick_ms = now;
+                /* The BIOS timer is 18.2 Hz on an original PC, which is one
+                 * tick every ~16384 instructions of emulated time.  Timing it
+                 * off the host clock made the interrupt rate depend on how fast
+                 * the emulator happened to run (a UEFI session is far slower
+                 * than the host harness), so the guest saw a different number of
+                 * timer interrupts per instruction in each environment -- which
+                 * is exactly the kind of difference that turns a working guest
+                 * into an intermittent one.  Counting emulated steps instead
+                 * makes both environments behave identically. */
+                u32 period = (u32)timer_period_steps();
+                if ((u32)(total - e->irq_last_tick_ms) >= period) {
+                    e->irq_last_tick_ms = (u32)total;
                     /* the BIOS-style stub is a real handler, so "ours" must not
                      * suppress delivery: it bumps 0040:006C, chains INT 1Ch and
                      * EOIs, which is what a hooking program is waiting for */

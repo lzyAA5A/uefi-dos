@@ -111,6 +111,27 @@ if ($Installed) {
         Write-Host '           files) before booting, the setup you pointed at is incomplete.'
         Write-Host ''
     }
+    # The pointing device is not loaded at run time: Windows 1.x SETUP *links* the
+    # driver it was given into the kernel, so a kernel built with "no pointing
+    # device" has no pointer support at all and nothing in WIN.INI can add it.
+    # The driver name string is the only evidence in the installed files.
+    $ovl = Join-Path $winDir 'WIN100.OVL'
+    if (Test-Path $ovl) {
+        $bytes = [System.IO.File]::ReadAllBytes($ovl)
+        $txt = [System.Text.Encoding]::ASCII.GetString($bytes)
+        $hasMouse = ($txt.Contains('Bus/Serial') -or $txt.Contains('VisiOn') -or
+                     $txt.Contains('Mouse Systems') -or $txt.Contains('Logitech'))
+        if (-not $hasMouse) {
+            Write-Host ''
+            Write-Host "  NOTE: $ovl carries no pointing-device driver."
+            Write-Host '        Windows will start and show its desktop, but the mouse'
+            Write-Host '        will not move and clicks will do nothing -- SETUP links the'
+            Write-Host '        driver into the kernel, so the only fix is to re-run SETUP'
+            Write-Host '        and answer "Microsoft Mouse (Bus/Serial)" to the pointing'
+            Write-Host '        device question (UEFI-DOS emulates that InPort card).'
+            Write-Host ''
+        }
+    }
     $auto_path = Join-Path $Installed 'AUTOEXEC.BAT'
     $needs_auto = $true
     if (Test-Path $auto_path) {

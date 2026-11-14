@@ -3250,3 +3250,90 @@ still printed ``mouse: EFI simple pointer protocol present`` to the serial
 console on every boot -- a leftover diagnostic from Round 21 that split the
 console mirror and could make the QEMU smoke test miss its
 ``Hello UEFI-DOS!.`` marker. The print is gone.
+
+## Round 23 -- the bus mouse: buttons, packet reset and speed
+
+The pointer moved but nothing could be clicked.  Three separate defects, all in
+the emulated card (`src/emu/emu.c`), found by tracing the driver at the register
+level (`UEFIDOS_TRACE_PORT=1`) and disassembling `MOUSE.DRV`:
+
+1. **The button bits live in the Y-high read, in its *upper* nibble.**
+   `MOUSE.DRV` file 0xB12 (in the kernel at `167D:0054`) does
+
+   ```
+   b1d mov al,90 / out dx,al (0x23E) / in al,dx (0x23C) / and al,0F / mov ch,al
+   b2b mov al,B0 / out / in / shl ax,4 / or al,ch / cbw        -> X delta
+   b3e mov al,D0 / out / in / and al,0F / mov ch,al
+   b4c mov al,F0 / out / in / shl ax,4 / mov di,ax / or al,ch  -> Y delta
+   b60 xor ax,ax / out dx,al                                    (packet end)
+   b66 mov ax,di / not ax / mov dl,ah / shr dl,3 / and dx,1     -> LEFT  (active low)
+   b98 mov al,ah / and ax,2                                     -> RIGHT (active high)
+   ```
+
+   Only the 0xF0 read is taken without `and al,0F`, so the byte there is
+   `(switches << 4) | y_high`, and all three switches are **active low**:
+   bit 7 = left *released*, bit 6 = middle *released*, bit 5 = right
+   *released*, i.e. an idle card reads `0xE0` and a left press reads `0x60`.
+   We returned `0x00`, so the driver computed "left button held down" on every
+   packet and Windows never saw a fresh press.
+
+2. **The movement counters were reset on a read the driver never performs.**
+   Selecting `00h` on `0x23E` closes the packet; the reset was written into the
+   `0x23C` read path instead, which `MOUSE.DRV` only enters for the four nibble
+   reads.  Every later interrupt therefore re-reported the same delta, and
+   Windows saw a permanent drag -- which is why a menu title highlighted but its
+   menu never opened.  The reset now happens on the `0x23E = 00h` write.
+
+3. **The speed was 5-10x too slow.**  Measured with a single scripted event:
+   60 host counts moved the CGA pointer +122 px, 40 counts moved it +80 px, so
+   Windows' pointer advances 2 pixels per reported count in both axes.  The card
+   used to report `host/11` (X) and `host/20` (Y) -- about 20 counts of hand
+   movement per pixel, i.e. the "huge lag".  It now reports **every** host count,
+   so one PS/2 count (about 1/100 inch of hand travel) moves the pointer 2
+   pixels and the whole 640-pixel screen is ~8 cm of hand movement away.
+   `CONFIG.SYS MOUSESPEED=n` overrides it (n = host counts per reported count:
+   2 is half as fast, 4 needs very fine control) and the host harness can use
+   `UEFIDOS_MOUSE_SCALE=n` (or `nx,ny`).
+
+Verified in the host harness with `UEFIDOS_MOUSE='-254,0,0; -56,20,0; 0,0,0;
+0,0,1; 0,0,0; 0,0,1; 0,0,0'`: the pointer travels from the middle of the list to
+the left column and the double-click raises Windows' own
+`MS-DOS / Cannot run COURD.FON / Ok` box -- a press/release pair Windows acted
+on.  Pointer displacement matches the injected counts 1:1 after the scale
+change (`build\cm3.png`, `build\cd1.png`).
+
+The packet sequence after the fix, straight out of the port trace
+(`UEFIDOS_TRACE_PORT=1`, `UEFIDOS_MOUSE='30,10,0; 30,10,0; 0,0,1; 0,0,0;
+0,0,2; 0,0,0'`): four reads per packet (`0x23C` values `0F 00 05 E0` = X low,
+X high, Y low, Y high-of-an-idle-packet), then the button bytes `60` (left
+down), `E0` (released), `C0` (right down), `E0` (released) -- exactly the
+active-low encoding the driver expects, and 24 `in 23C` reads for 6 packets
+proves the counters restart per packet.
+
+## Round 24 -- the timer interrupt no longer runs on the host clock
+
+Windows 1.01 would sometimes start, show the desktop and then die with
+``FatalExit code = stack overflow`` -- the false "stack overflow" the module
+stubs report when they are entered on the wrong stack (Round 16).  It happened
+in one QEMU boot and not the next, while the host harness reached the desktop
+every single time, which pointed at something that is *not* part of the guest
+state: the timer interrupt was timed with ``plat_ticks_ms()``, i.e. off the host
+clock.
+
+That makes the interrupt rate depend on how fast the emulator happens to run.
+The host harness executes ~6M instructions/s, so a 55 ms tick is one interrupt
+per ~330000 instructions.  A UEFI session under OVMF is far slower (the input
+pump calls ``gBS->Stall`` every 8 ms), so the same 55 ms is one interrupt per a
+few thousand instructions -- tens of times more timer interrupts per instruction
+than the host harness, and far more than the 18.2 Hz of a real PC.  Windows 1.x
+is very sensitive to a timer interrupt landing inside one of its critical
+sections (its own ISR keeps its saved ``SS:SP`` in a single word at
+``cs:[0238]``/``cs:[023a]`` and guards the DOS front end with the counter at
+``cs:[023c]``), and the visible result was the "stack overflow" FatalExit.
+
+The tick is now counted in **emulated instructions**: one timer interrupt (and
+one bump of the BIOS tick counter at ``0040:006C``) every 16384 steps, which is
+18.2 Hz on an original PC (300k instructions/s).  Host harness and UEFI now see
+the same interrupt pattern for the same guest code, so a failure reproduces in
+the fast harness instead of only in QEMU.  ``UEFIDOS_TICK_STEPS=<n>`` overrides
+the period in the host harness for experiments.

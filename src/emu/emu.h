@@ -255,6 +255,12 @@ extern int emu_unsupported_quiet;   /* 1 = do not print them (fuzz mode) */
  * UEFIDOS_EXEC_HIGH_IMAGE). */
 extern int g_exec_image_high;
 
+/* Host counts per count reported by the emulated Microsoft bus mouse (the card
+ * Windows 1.x drives).  0 = built-in default 1 (one reported count per host
+ * count, i.e. 2 CGA pixels); CONFIG.SYS "MOUSESPEED=<n>" sets it, larger is
+ * slower. */
+extern int g_mouse_speed;
+
 /* Linear address of the DPMI host LDT handed to protected-mode clients. */
 #define DPMI_LDT_LIN 0x00F00000u
 /* DPMI host descriptor tables and the real-mode entry point. */
