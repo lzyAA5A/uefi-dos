@@ -152,10 +152,19 @@ u32  irq_steps;              /* steps spent inside that handler (watchdog) */
 /* IVT wiring: serviced vectors point at a per-interrupt trampoline cell
  * (F000:E000 + n*4, holding "INT n; IRET") so that programs which fetch a
  * vector with INT 21h AH=35h and far-call it get real BIOS-like behaviour.
- * Unserviced vectors point at the F000:FFE0 IRET stub. */
+ * Unserviced vectors point at the F000:0100 IRET stub.
+ *
+ * The stub offset deliberately looks like a *program* address instead of the
+ * top of the ROM (it used to be 0xFFE0).  That word ends up in the PSP as the
+ * INT 22h terminate address (PSP:000A), and Windows 1.x reads PSP:000A as a
+ * stack limit while unwinding a task: with 0xFFE0 there the comparison said
+ * "stack overflow" every time a window was closed and the session died with
+ * `FatalExit code = stack overflow`.  Real DOS never hands out a 0xFFE0
+ * offset -- INT 22h points into the program that is terminating -- so a low
+ * offset is both closer to hardware and no longer an outlier. */
 #define MAGIC_SEG 0xF000u
 #define MAGIC_OFF 0xFFF0u
-#define STUB_OFF  0xFFE0u
+#define STUB_OFF  0x0100u
 #define TRAMP_SEG 0xF000u
 #define TRAMP_BASE 0xE000u
 #define TRAMP_SLOT(n) ((u16)(TRAMP_BASE + (n) * 4))
@@ -281,6 +290,9 @@ extern int g_mouse_speed;
 /* Dump the last emulated steps to the serial console when the guest prints its
  * own fatal message (Windows 1.x FatalExit). */
 void emu_fatal_trace(Emu *e);
+
+/* One line on the serial console naming why a program ended. */
+void emu_halt_note(Emu *e, const char *why);
 
 /* Record a DOS call and its caller for the fatal-exit ring. */
 void emu_i21_note(u16 cs, u16 ip, u8 ah);

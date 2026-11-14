@@ -3698,3 +3698,87 @@ SS pointing at WIN.COM's PSP**.  Two leads from the data:
 Next step on this thread: reproduce the same sequence in the host harness (where a
 run is 30 seconds instead of 4 minutes) by closing a Paint window through its own
 system menu, then log the SS mirror around the transition to 0D00.
+
+## Round 29 -- "after a while it quits by itself": two timers, neither of them Windows'
+
+The desktop came up, the mouse worked, and then -- a few minutes later, every time
+-- the session was simply gone.  Two different clocks were responsible and both of
+them were ours.
+
+### 1. The firmware watchdog (5 minutes) -- the real "it quits by itself"
+
+The symptom is unmistakable once you know what to look for: the guest never prints
+`FatalExit`, never returns to `C:\WINDOWS>`, the step ring has nothing to say, and
+yet the serial log shows the firmware booting the option again:
+
+```
+BdsDxe: starting Boot0001 "UEFI QEMU HARDDISK QM00001 " ...
+UEFI-DOS v1.1.19 -- UEFI-native DOS shell (boot OK)
+```
+
+That is a *machine reset*, not a program exit.  To prove it, the soak was rerun with
+`-no-reboot -d int,cpu_reset,guest_errors` (`F:\1231\_tmp\win\qmp_dbg3.py`): QEMU
+exits at **t = 298 s** with an empty stderr, no logged exception, no `Triple fault`
+and no `CPU Reset` entry -- i.e. the guest asked for a reset and `-no-reboot` turned
+that into an exit.
+
+The request comes from the firmware.  EDK2's boot manager arms the **boot watchdog**
+before it starts a boot option (`MdeModulePkg/BdsDxe`: 5 minutes), and when it
+expires the platform resets.  Five minutes is a fine budget for a loader that hands
+over to an OS; it is not a budget a DOS session -- let alone a Windows 1.x desktop --
+can live with.
+
+Fix (`src/uefi/efi_plat.c`, `plat_init()`):
+
+```c
+    /* Turn off the boot watchdog. ... */
+    if (gBS->SetWatchdogTimer) gBS->SetWatchdogTimer(0, 0x0000, 0x00, NULL);
+```
+
+Every real loader does this (Windows, the Linux EFI stub, GRUB).  Measured effect:
+a 13-minute mouse soak (continuous motion plus a click every eight moves) keeps the
+`UEFI-DOS v1` counter at 1 and the desktop up, where the same soak used to reset at
+298 s.
+
+### 2. The instruction quota (200M steps)
+
+Independently of the watchdog, `step_budget()` returned a flat `200000000` for
+firmware builds, and the counter only refilled on a **keystroke**
+(`if (g_kbd_seq != kbd_seen) { ... steps = 0; }`).  A Windows session driven by the
+mouse never sends one, so at the ~1.1M instr/s the UEFI build manages, the session
+was killed after ~3 minutes with
+
+```
+UEFI-DOS: program exceeded instruction limit; terminating
+```
+
+two minutes before the watchdog would have done it anyway.  Now:
+
+* `#define UEFIDOS_UEFI_STEP_LIMIT 20000000000ull` -- about five hours at the measured
+  speed, i.e. no quota for a user session, still finite so a runaway guest stops;
+* the budget refills on **any input**: `static u32 g_input_seq` is bumped in
+  `kbd_push()` and in `emu_mouse_pump()` (motion and button transitions), and
+  `emu_run()` watches that instead of `g_kbd_seq`.
+
+The host harness keeps its own knobs (`UEFIDOS_MAX_STEPS`, `UEFIDOS_HARD_STEPS`)
+because a bounded budget is exactly what an automated test wants.
+
+### 3. The diagnostics that made it visible
+
+Because "the session vanished" left no trace anywhere, every way a DOS program can
+end now says so on the serial console (`emu_halt_note()` in `src/emu/emu.c`):
+
+```
+[halt] AH=4Ch terminate at_cs_ip=... ss_sp=... ax=... exit_code=...
+[halt] INT 20h terminate ...
+[halt] no handler for INT 21 ...
+[halt] divide overflow / unsupported 8086 opcode / segment trap / instruction limit reached
+```
+
+and, when the exit code is not zero, the last ten INT 21h calls with their callers.
+`gfx: linear framebuffer BGR guest=... panel=...` likewise names the geometry of
+every graphics mode we take over, and `[show] n=` ticks every 1000 presented frames.
+
+The lesson is the same one as Round 28's: the machine around the emulator has
+timers of its own.  A DOS session is not a boot option, and an emulator that runs
+for hours needs the platform's limits lifted explicitly -- the watchdog first.

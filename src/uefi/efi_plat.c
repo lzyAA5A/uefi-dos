@@ -305,6 +305,15 @@ int plat_init(void *sys_table, void *image_handle)
         if (best != (UINTN)-1) gOut->SetMode(gOut, best);
         else if (gOut->Mode->CursorRow >= 25) gOut->SetCursorPosition(gOut, 0, 0);
     }
+    /* Turn off the boot watchdog.  Firmware arms it before starting a boot
+     * option (5 minutes is the usual value, MdeModulePkg BdsDxe does exactly
+     * that) and resets the machine when it expires.  A DOS session -- and above
+     * all a Windows 1.x desktop -- is expected to run far longer than that, and
+     * the symptom without this call is that the machine simply reboots about
+     * five minutes into the session, with nothing on screen, in the serial log
+     * or in the emulator's step ring to explain it. */
+    if (gBS->SetWatchdogTimer) gBS->SetWatchdogTimer(0, 0x0000, 0x00, NULL);
+
     if (gBS->HandleProtocol((EFI_HANDLE)image_handle, &gEfiLoadedImageProtocolGuid,
                             (void **)&gLoadedImage) != EFI_SUCCESS)
         return 1;
@@ -706,6 +715,8 @@ int plat_video_gfx_begin(int w, int h)
     gfx_clear();
     plat_serial_puts("gfx: linear framebuffer ");
     plat_serial_puts(g_gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor ? "BGR" : "RGB");
+    plat_serial_hex(" guest=", ((u64)w << 32) | (u32)h);
+    plat_serial_hex(" panel=", ((u64)gw << 32) | (u32)gh);
     return 0;
 }
 
@@ -724,6 +735,8 @@ void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
     if (!stride) stride = gw;
     UINTN sc = g_gfx_scale;
     int bgr = (g_gop->Mode->Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor);
+    if ((g_show_count % 1000u) == 0u)
+        plat_serial_hex("[show] n=", (u64)g_show_count);
     u8 *base = (u8 *)(UINTN)g_gop->Mode->FrameBufferBase;
 
 
@@ -797,6 +810,7 @@ static void gfx_clear(void)
 
 void plat_video_text(void)
 {
+    plat_serial_puts("[app] plat_video_text\n");
     if (!g_gfx_on) return;
     g_gfx_on = 0;
     gfx_clear();

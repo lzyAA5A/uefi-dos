@@ -638,6 +638,7 @@ void int21_handler(Emu *e)
     case 0x00:
         emu_fatal_trace(e);     /* INT 21h AH=00h terminates silently otherwise */
         e->halted = 1; e->exit_code = 0;
+        emu_halt_note(e, "INT 20h / AH=00h terminate");
         return;
     case 0x26: { /* delete file from DTA */
         u8 attr;
@@ -1272,6 +1273,7 @@ void int21_handler(Emu *e)
         if ((u8)(e->ax & 0xFF) != 0) emu_fatal_trace(e);
         e->halted = 1;
         e->exit_code = (u8)(e->ax & 0xFF);
+        emu_halt_note(e, "AH=4Ch terminate");
         return;
     case 0x4D: e->ax = e->last_exit_code; set_ok(e); return;
     case 0x4E: {

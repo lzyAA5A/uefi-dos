@@ -524,7 +524,15 @@ static int kbd_count(Emu *e)
     return ((tail - head + KBD_BUF_LEN) % KBD_BUF_LEN) / 2;
 }
 
+/* Instruction budget for one DOS program on real firmware (no environment
+ * variables there).  20 billion steps is ~5 hours at the ~1.1M instr/s the
+ * UEFI build manages, i.e. effectively "no quota" for a user session, while a
+ * program that spins forever still terminates instead of hanging the machine
+ * until the power button. */
+#define UEFIDOS_UEFI_STEP_LIMIT 20000000000ull
+
 static u32 g_kbd_seq = 0;   /* bumped on every key delivery */
+static u32 g_input_seq = 0; /* bumped on every key OR mouse event */
 
 static void kbd_push(Emu *e, int scan, int ascii)
 {
@@ -535,6 +543,7 @@ static void kbd_push(Emu *e, int scan, int ascii)
     tail = (tail + 2) % KBD_BUF_LEN;
     emu_ww(e, KBD_SEG, KBD_TAIL, (u16)(KBD_BUF + tail));
     g_kbd_seq++;
+    g_input_seq++;
 }
 
 static int kbd_pop(Emu *e, int *scan, int *ascii)
@@ -1770,6 +1779,13 @@ static u32 do_shift(Emu *e, int op, u32 v, unsigned cnt, int width)
 #ifdef UEFIDOS_HOST
 static void ring_dump(Emu *e, FILE *f);
 #endif
+/* One line on the serial console for every way a program can end.  The user
+ * only sees "back to the DOS prompt" (or a firmware reboot, because returning
+ * from the boot application reboots the machine) and the graphics screen
+ * belongs to the guest, so this is the only place the reason stays visible. */
+static int g_halt_noted;
+void emu_halt_note(Emu *e, const char *why);
+
 static int trap_div(Emu *e)
 {
 #ifdef UEFIDOS_HOST
@@ -1784,6 +1800,7 @@ static int trap_div(Emu *e)
     plat_puts("Divide overflow in 16-bit program\n");
     e->halted = 1;
     e->exit_code = 0xFF;
+    emu_halt_note(e, "divide overflow");
     return 0;
 }
 
@@ -2159,6 +2176,7 @@ static int step_386(Emu *e, int seg_ov)
         }
         e->halted = 1;
         e->exit_code = 0xFF;
+        emu_halt_note(e, "unsupported 386 opcode");
         return 0;
     }
 }
@@ -2182,7 +2200,10 @@ static void dos_service_call(Emu *e, int intn)
     else if (intn == 0x31) int31_handler(e);
     else if (intn == 0x33) int33_handler(e);
     else if (intn == 0x60) int60_handler(e);
-    else if (intn == 0x20 || intn == 0x27) { e->halted = 1; e->exit_code = 0; }
+    else if (intn == 0x20 || intn == 0x27) {
+        e->halted = 1; e->exit_code = 0;
+        emu_halt_note(e, intn == 0x20 ? "INT 20h terminate" : "INT 27h terminate");
+    }
     else { e->halted = 1; e->exit_code = 0; }
 }
 
@@ -2259,6 +2280,7 @@ static void do_int_prot(Emu *e, int vec)
         plat_puts(" with no IDT gate\n");
         e->halted = 1;
         e->exit_code = 0xFF;
+        emu_halt_note(e, "protected-mode interrupt without an IDT gate");
         return;
     }
     is32 = idt_gate_type32(type_attr);
@@ -2984,7 +3006,10 @@ static int step_8086(Emu *e)
                       * sleeps until the next timer tick, so with interrupts
                       * enabled this is just a wasted step; only a HLT with IF
                       * clear really ends the program */
-            if (!(e->eflags & F_IF)) { e->halted = 1; e->exit_code = 0; }
+            if (!(e->eflags & F_IF)) {
+                e->halted = 1; e->exit_code = 0;
+                emu_halt_note(e, "HLT with interrupts disabled");
+            }
             break;
     case 0x9B: break;                                    /* WAIT */
     case 0xD8: case 0xD9: case 0xDA: case 0xDB:
@@ -3019,6 +3044,7 @@ static int step_8086(Emu *e)
         }
         e->halted = 1;
         e->exit_code = 0xFF;
+        emu_halt_note(e, "unsupported 8086 opcode");
         return 0;
     }
     }
@@ -3076,6 +3102,16 @@ do_int: {
 #endif
                 e->halted = 1;
                 e->exit_code = 0;
+                {
+                    char why[48];
+                    int n = 0;
+                    const char *p = "no handler for INT ";
+                    while (*p) why[n++] = *p++;
+                    why[n++] = "0123456789ABCDEF"[(intn >> 4) & 15];
+                    why[n++] = "0123456789ABCDEF"[intn & 15];
+                    why[n] = 0;
+                    emu_halt_note(e, why);
+                }
             }
             return 0;
         }
@@ -3456,6 +3492,7 @@ int emu_init(Emu *e)
     e->mouse_mask = 0;
     e->irq_last_tick_ms = 0;    /* step count of the last timer tick */
     e->bios_ticks = 0;
+    g_halt_noted = 0;
     g_pic_irr = 0;
     g_pic_isr = 0;
     g_pic_imr = 0xB8;           /* IRQ0/1/2/6 open, like a PC BIOS leaves it */
@@ -3643,6 +3680,54 @@ static unsigned g_ring_pos, g_ring_cnt;
 struct I21Rec { u16 cs, ip; u8 ah; };
 static struct I21Rec g_i21_ring[24];
 static unsigned g_i21_pos, g_i21_cnt;
+static void halt_hex4(u16 v)
+{
+    for (int sh = 12; sh >= 0; sh -= 4) plat_putc("0123456789ABCDEF"[(v >> sh) & 15]);
+}
+
+/* One line for every way a DOS program can end.  It goes through plat_puts --
+ * i.e. the console in text mode and the serial port in graphics mode -- and not
+ * through plat_serial_puts, because a direct serial write lands in the middle of
+ * whatever the console is printing and splits the line (the boot smoke test
+ * looks for markers in exactly that stream).  The last DOS calls follow only for
+ * an abnormal end, which is what someone reading this actually cares about. */
+void emu_halt_note(Emu *e, const char *why)
+{
+    if (g_halt_noted) return;
+    g_halt_noted = 1;
+    plat_puts("\n[halt] ");
+    plat_puts(why);
+    plat_puts(" at ");
+    halt_hex4(e->cs);
+    plat_putc(':');
+    halt_hex4(e->ip);
+    plat_puts(" ss:sp=");
+    halt_hex4(e->ss);
+    plat_putc(':');
+    halt_hex4((u16)e->esp);
+    plat_puts(" ax=");
+    halt_hex4(e->ax);
+    plat_puts(" exit=");
+    halt_hex4((u16)(e->exit_code & 0xFF));
+    plat_putc('\n');
+    if ((e->exit_code & 0xFF) == 0) return;
+    /* The last DOS calls name what the program was doing when it decided to
+     * stop, which is the question an abnormal exit otherwise leaves open. */
+    for (unsigned k = 0; k < g_i21_cnt && k < 10u; k++) {
+        unsigned idx = (g_i21_pos + 24u - 1u - k) % 24u;
+        struct I21Rec *r = &g_i21_ring[idx];
+        if (!r->cs && !r->ip && !r->ah) break;
+        plat_puts("[halt]   i21 AH=");
+        plat_putc("0123456789ABCDEF"[(r->ah >> 4) & 15]);
+        plat_putc("0123456789ABCDEF"[r->ah & 15]);
+        plat_puts(" at ");
+        halt_hex4(r->cs);
+        plat_putc(':');
+        halt_hex4(r->ip);
+        plat_putc('\n');
+    }
+}
+
 void emu_i21_note(u16 cs, u16 ip, u8 ah)
 {
     struct I21Rec *r = &g_i21_ring[g_i21_pos % 24u];
@@ -3883,7 +3968,13 @@ static u64 step_budget(void)
     }
     return lim;
 #else
-    return 200000000ull;
+    /* A real PC has no instruction quota: an operating system that boots and
+     * then sits idle (Windows 1.x, which busy-polls its own message loop and
+     * never HLTs) must not be killed for it.  The old 200M ceiling ended every
+     * Windows session after a few minutes with "program exceeded instruction
+     * limit", which the user then saw as Windows quitting by itself.  Keep a
+     * finite value only so a truly runaway guest still stops eventually. */
+    return UEFIDOS_UEFI_STEP_LIMIT;
 #endif
 }
 
@@ -4018,12 +4109,14 @@ void emu_mouse_pump(Emu *e)
         e->mouse_dy += dy;
         e->mouse_pending_events |= 0x01;        /* motion */
         g_video_dirty = 1;
+        g_input_seq++;
     }
     for (int b = 0; b < 3; b++) {
         int bit = 1 << b;
         int was = (e->mouse_buttons & bit) != 0;
         int now = (buttons & bit) != 0;
         if (was == now) continue;
+        g_input_seq++;
         if (now) {
             e->mouse_press[b]++;
             e->mouse_pending_events |= 1 << (2 + 2 * b);
@@ -4109,7 +4202,7 @@ int emu_run(Emu *e)
         hard = s ? (u64)strtoull(s, 0, 10) : 0;
     }
 #endif
-    u32 kbd_seen = g_kbd_seq;
+    u32 input_seen = g_input_seq;
     while (!e->halted && !g_plat_shutdown_requested) {
         trace_step(e, steps);
         ring_note(e);
@@ -4124,6 +4217,7 @@ int emu_run(Emu *e)
             cs_trap(e, total);
             e->halted = 1;
             e->exit_code = 0xFE;
+            emu_halt_note(e, "segment trap");
             break;
         }
         if (g_video_dirty && (steps & 0x3FFFFull) == 0) { video_flush(e); }
@@ -4252,15 +4346,18 @@ int emu_run(Emu *e)
                         emu_rw(e, 0, 0x22), (e->cr0 & CR0_PE) ? 1 : 0);
         }
 #endif
-        /* an interactive program that is receiving keys is alive, not stuck:
-         * refill its instruction budget so it can never be killed while the
-         * user is playing */
-        if (g_kbd_seq != kbd_seen) { kbd_seen = g_kbd_seq; steps = 0; }
+        /* an interactive program that is receiving input (keys OR mouse) is
+         * alive, not stuck: refill its instruction budget so it can never be
+         * killed while the user is working.  A mouse-driven session such as
+         * Windows 1.x never sees a keystroke, which is why refilling on keys
+         * alone still ended the session when the quota ran out. */
+        if (g_input_seq != input_seen) { input_seen = g_input_seq; steps = 0; }
         if (steps > limit || (hard && total > hard)) {
             trace_regs(e, steps);
             plat_puts("\nUEFI-DOS: program exceeded instruction limit; terminating\n");
             e->halted = 1;
             e->exit_code = 0xFF;
+            emu_halt_note(e, "instruction limit reached");
             break;
         }
     }
