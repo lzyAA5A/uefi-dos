@@ -727,13 +727,32 @@ void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
     u8 *base = (u8 *)(UINTN)g_gop->Mode->FrameBufferBase;
 
 
+    /* TEMP diagnostic: a blit that runs off the end of the linear framebuffer
+     * would write into whatever follows it -- including our own emulated RAM. */
+    UINTN fbsize = (UINTN)g_gop->Mode->FrameBufferSize;
+    UINTN need = ((UINTN)w * sc + 1u) * 4u;
     for (int y = 0; y < h; y++) {
         const u8 *row = fb + (UINTN)y * (UINTN)w;
         UINTN ry0 = (UINTN)y * g_gfx_vy_num / g_gfx_vy_den;
         UINTN ry1 = (UINTN)(y + 1) * g_gfx_vy_num / g_gfx_vy_den;
         if (ry1 <= ry0) ry1 = ry0 + 1;      /* never drop a source row */
         for (UINTN ry = ry0; ry < ry1; ry++) {
-            u8 *dst = base + ((g_gfx_dy + ry) * stride + g_gfx_dx) * 4;
+            UINTN roff = ((g_gfx_dy + ry) * stride + g_gfx_dx) * 4;
+            if (roff + need > fbsize) {
+                static int told;
+                if (!told) {
+                    told = 1;
+                    plat_serial_puts("GFX-OOB off=");
+                    plat_serial_hex("", roff);
+                    plat_serial_hex(" size=", fbsize);
+                    plat_serial_hex(" stride=", stride);
+                    plat_serial_hex(" dx=", g_gfx_dx);
+                    plat_serial_hex(" dy=", g_gfx_dy);
+                    plat_serial_puts("\n");
+                }
+                continue;
+            }
+            u8 *dst = base + roff;
             for (int x = 0; x < w; x++) {
                 u8 idx = row[x];
                 u8 r = (u8)((dac[idx * 3 + 0] << 2) | (dac[idx * 3 + 0] >> 4));

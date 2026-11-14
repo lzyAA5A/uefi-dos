@@ -613,15 +613,30 @@ static void dta_set(Emu *e, const char *name, u8 attr, u32 size, u16 tm, u16 dt)
 /* ------------------------------------------------------------------ */
 /* INT 21h                                                             */
 /* ------------------------------------------------------------------ */
+/* Does the guest buffer at DS:DX spell "FatalExit"?  Windows 1.x ends a crash
+ * by writing that text; the emulator then dumps the last steps so the crash can
+ * be located from the serial console of a UEFI session. */
+static int fatal_probe(Emu *e, u16 seg, u16 off, u32 left)
+{
+    static const char want[] = "FatalExit";
+    if (left < 9) return 0;
+    for (int i = 0; i < 9; i++)
+        if ((char)emu_rb(e, seg, (u16)(off + i)) != want[i]) return 0;
+    return 1;
+}
+
 void int21_handler(Emu *e)
 {
     trace_call(e, 0x21);
     u8 ah = (u8)(e->ax >> 8);
+    emu_i21_note(g_i21_caller_cs ? g_i21_caller_cs : e->cs,
+                 g_i21_caller_cs ? g_i21_caller_ip : e->ip, ah);
     dos_jft_sync(e);
     /* DOS 4.0 FCB call family (AH=0Fh..17h, 21h..23h, 27h, 28h) lives in fcb.c */
     if (fcb_int21(e, ah)) return;
     switch (ah) {
     case 0x00:
+        emu_fatal_trace(e);     /* INT 21h AH=00h terminates silently otherwise */
         e->halted = 1; e->exit_code = 0;
         return;
     case 0x26: { /* delete file from DTA */
@@ -1018,7 +1033,11 @@ void int21_handler(Emu *e)
         u32 len = e->cx;
         u16 seg = e->ds, off = e->dx;
         if (h == 1 || h == 2) {
-            for (u32 i = 0; i < len; i++) con_put(e, (char)emu_rb(e, seg, (u16)(off + i)));
+            for (u32 i = 0; i < len; i++) {
+                char ch = (char)emu_rb(e, seg, (u16)(off + i));
+                if (ch == 'F' && fatal_probe(e, seg, (u16)(off + i), len - i)) emu_fatal_trace(e);
+                con_put(e, ch);
+            }
             set_ok(e);
             e->ax = (u16)len;
             return;
@@ -1029,6 +1048,8 @@ void int21_handler(Emu *e)
             u32 chunk = len - total;
             if (chunk > sizeof(tmp)) chunk = sizeof(tmp);
             for (u32 i = 0; i < chunk; i++) tmp[i] = (char)emu_rb(e, seg, (u16)(off + total + i));
+            for (u32 i = 0; i + 9 <= chunk; i++)
+                if (tmp[i] == 'F' && memcmp(tmp + i, "FatalExit", 9) == 0) { emu_fatal_trace(e); break; }
             u32 put = 0;
             int rc = dos_write(h, tmp, chunk, &put);
             if (rc != FAT_OK) { set_err(e, (u8)dos_error_code(rc)); return; }
@@ -1244,6 +1265,11 @@ void int21_handler(Emu *e)
         return;
     }
     case 0x4C:
+        /* A program that terminates is about to leave the emulator, and a
+         * Windows 1.x session that ends without its FatalExit text gives no
+         * other clue; print the last steps so such an exit can be read off the
+         * serial console too. */
+        if ((u8)(e->ax & 0xFF) != 0) emu_fatal_trace(e);
         e->halted = 1;
         e->exit_code = (u8)(e->ax & 0xFF);
         return;

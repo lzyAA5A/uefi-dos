@@ -219,6 +219,29 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
 {
     if (!dx || !dy || !buttons) return 0;
     if (!g_mouse_loaded) plat_mouse_present();
+    /* UEFIDOS_MOUSE_AUTO=<ms>: instead of a finite script, wiggle the mouse for
+     * ever at that interval and press/release the left button every 40 events.
+     * A soak test needs thousands of packets, which does not fit a script. */
+    {
+        static int auto_ms = -2;
+        static unsigned long auto_n;
+        if (auto_ms == -2) {
+            const char *a = getenv("UEFIDOS_MOUSE_AUTO");
+            auto_ms = a ? atoi(a) : -1;
+            if (auto_ms == 0) auto_ms = 30;
+        }
+        if (auto_ms > 0) {
+            u64 now = plat_ticks_ms();
+            static u64 next_ms;
+            if (now < next_ms) return 0;
+            next_ms = now + (u64)auto_ms;
+            auto_n++;
+            *dx = (auto_n & 1) ? 9 : -9;
+            *dy = (auto_n & 2) ? 5 : -5;
+            *buttons = ((auto_n % 40) == 38) ? 1 : 0;
+            return 1;
+        }
+    }
     if (g_mouse_script[0]) {
         u64 now = plat_ticks_ms();
         /* UEFIDOS_MOUSE_WAIT=<ms>: hold the script back so that the events land
@@ -233,7 +256,18 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
         if (now < g_mouse_next_ms) return 0;
         int ok = mouse_script_next(dx, dy, buttons);
         if (!ok) return 0;
-        g_mouse_next_ms = now + 120;    /* one scripted event every 120 ms */
+        /* One scripted event per interval.  120 ms mimics a human; a soak test
+         * that needs thousands of packets shortens it with
+         * UEFIDOS_MOUSE_MS=<ms>. */
+        {
+            static int interval = -1;
+            if (interval < 0) {
+                const char *ms = getenv("UEFIDOS_MOUSE_MS");
+                interval = ms ? atoi(ms) : 120;
+                if (interval < 1) interval = 1;
+            }
+            g_mouse_next_ms = now + (u64)interval;
+        }
         return 1;
     }
     /* real pointer: GetCursorPos works for the whole desktop */

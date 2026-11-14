@@ -27,9 +27,34 @@ static int hooked_int(int n);
 /* Text-mode DOS programs poll the video status register and poke CRTC /
  * CGA registers; a retrace bit that never changes hangs them forever, so
  * the status port alternates.  Everything else reads back as 0. */
+#ifdef UEFIDOS_HOST
+/* Diagnostics for the hardware-interrupt guard.  UEFIDOS_IRQ_OLDGUARD=1 puts
+ * back the old "any IRET ends the interrupt" rule so the two behaviours can be
+ * compared; UEFIDOS_TRACE_IRQ reports how often a tick had to be held back
+ * because the guest handler was still open. */
+static int g_irq_oldguard = -1;
+static int irq_oldguard(void)
+{
+    if (g_irq_oldguard < 0) g_irq_oldguard = getenv("UEFIDOS_IRQ_OLDGUARD") ? 1 : 0;
+    return g_irq_oldguard;
+}
+#endif
 static u16 g_crtc_idx = 0;
 static u8  g_crtc_reg[32];
 static unsigned long g_io_ticks = 0;
+
+/* Where SS came from: a fatal exit inside module code while SS points at the
+ * wrong segment is only explicable if we can see who loaded SS last. */
+struct SsRec { u16 old_ss, new_ss, cs, ip, sp; };
+static struct SsRec g_ss_ring[16];
+static unsigned g_ss_pos, g_ss_cnt;
+static void ss_note(u16 old_ss, u16 new_ss, u16 cs, u16 ip, u16 sp)
+{
+    struct SsRec *r = &g_ss_ring[g_ss_pos % 16u];
+    r->old_ss = old_ss; r->new_ss = new_ss; r->cs = cs; r->ip = ip; r->sp = sp;
+    g_ss_pos++;
+    if (g_ss_cnt < 16) g_ss_cnt++;
+}
 /* keyboard-controller state for the A20 gate (port 64h command D1h) */
 static int g_kbc_pending_out = 0;
 
@@ -1126,7 +1151,18 @@ static void set_seg_reg(Emu *e, int i, u16 v)
     switch (i) {
     case 0: e->es = v; break;
     case 1: e->cs = v; break;
-    case 2: e->ss = v; break;
+    case 2:
+        if (v != e->ss) ss_note(e->ss, v, e->cs, e->ip, (u16)e->esp);
+        e->ss = v;
+        /* 8086/80286 rule: after an instruction loads SS the CPU ignores
+         * interrupts until the end of the *next* instruction, which is what
+         * makes "mov ss,ax / mov sp,bx" safe.  An interrupt landing between the
+         * two would push its frame at the new SS with the old SP.  Windows 1.x's
+         * timer ISR switches stacks exactly that way (`push cs / pop ss /
+         * mov sp,0x230`), so interrupt delivery is skipped for the instruction
+         * right after an SS load (emu_run reads this flag). */
+        e->wrote_ss = 1;
+        break;
     case 3: e->ds = v; break;
     case 4: e->fs = v; break;
     default:e->gs = v; break;
@@ -2114,6 +2150,7 @@ static int step_8086(Emu *e)
 
     e->op32 = 0;
     e->addr32 = 0;
+    e->wrote_ss = 0;            /* set by set_seg_reg() when this instruction loads SS */
     while (!prefix_done) {
         op = fetch8(e);
         switch (op) {
@@ -2757,7 +2794,20 @@ static int step_8086(Emu *e)
          * ran once every 0xFFF steps, so a handler that returned quickly left
          * irq_depth latched at 1 after the very first timer tick and the guest
          * never saw another interrupt. */
-        if (e->irq_depth > 0) e->irq_depth--;
+        /* Only the IRET that pops OUR frame ends the interrupt.  An inner IRET
+         * is a chained handler returning (the guest's own ISR calls the vector
+         * it saved, and the BIOS stub at F000:2300 that Windows saves ends with
+         * IRET): treating that as "handler finished" dropped the guard in the
+         * middle of the guest's ISR, so the next timer tick could be delivered
+         * on top of it -- inside its stack switch, inside its bookkeeping --
+         * and corrupt the kernel.  That surfaced minutes later as a false
+         * "FatalExit code = stack overflow". */
+#ifdef UEFIDOS_HOST
+        if (irq_oldguard()) { if (e->irq_depth > 0) e->irq_depth--; }
+        else
+#endif
+            if (e->irq_depth > 0 && ss_before == e->irq_frame_ss && sp_before == e->irq_frame_sp)
+                e->irq_depth--;
         break;
     }
     case 0xC8: { /* ENTER */
@@ -3436,13 +3486,26 @@ static int load_program_at(Emu *e, u16 psp_seg, const u8 *img, u32 size, const c
 
 /* Instruction budget for one emu_run() call.  Overridable on the host harness
  * (UEFIDOS_MAX_STEPS) so automated compatibility tests can bound spin loops. */
-#ifdef UEFIDOS_HOST
-/* ring buffer of the most recent steps, dumped when a program hits the
- * instruction limit so a spin loop can be located without a debugger */
+/* Ring buffer of the most recent steps.  Dumped when a program hits the
+ * instruction limit (host harness) and when the guest prints its own fatal
+ * message, which is the only way to see where a Windows 1.x "FatalExit" came
+ * from inside a UEFI session. */
 typedef struct { u16 cs, ip, ax, bx, cx, dx, si, di, bp, sp, ds, es, ss; } StepRec;
 #define RING_N 4096
 static StepRec g_ring[RING_N];
 static unsigned g_ring_pos, g_ring_cnt;
+/* the last few DOS calls and where they came from: a fatal exit usually follows
+ * a specific sequence of calls, and that sequence is not in the step ring */
+struct I21Rec { u16 cs, ip; u8 ah; };
+static struct I21Rec g_i21_ring[24];
+static unsigned g_i21_pos, g_i21_cnt;
+void emu_i21_note(u16 cs, u16 ip, u8 ah)
+{
+    struct I21Rec *r = &g_i21_ring[g_i21_pos % 24u];
+    r->cs = cs; r->ip = ip; r->ah = ah;
+    g_i21_pos++;
+    if (g_i21_cnt < 24) g_i21_cnt++;
+}
 static void ring_note(Emu *e)
 {
     StepRec *r = &g_ring[g_ring_pos % RING_N];
@@ -3453,6 +3516,7 @@ static void ring_note(Emu *e)
     g_ring_pos++;
     if (g_ring_cnt < RING_N) g_ring_cnt++;
 }
+#ifdef UEFIDOS_HOST
 static void ring_dump(Emu *e, FILE *f)
 {
     fprintf(f, "--- last %u steps ---\n", g_ring_cnt);
@@ -3465,9 +3529,94 @@ static void ring_dump(Emu *e, FILE *f)
     }
 }
 #else
-static void ring_note(Emu *e) { (void)e; }
 static void ring_dump(Emu *e, void *fp) { (void)e; (void)fp; }
 #endif
+
+/* Hex helper: the UEFI build is freestanding (-nostdlib), so no snprintf. */
+static char *put4(char *p, unsigned v)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    *p++ = hex[(v >> 12) & 15]; *p++ = hex[(v >> 8) & 15];
+    *p++ = hex[(v >> 4) & 15];  *p++ = hex[v & 15];
+    return p;
+}
+
+static char *put2(char *p, unsigned v)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    *p++ = hex[(v >> 4) & 15]; *p++ = hex[v & 15];
+    return p;
+}
+
+/* The guest's FatalExit printer gives a code and nothing else.  Print the last
+ * few hundred instructions and the stack around SS:SP when it shows up, so a
+ * crash inside a UEFI session can be read off the serial console. */
+void emu_fatal_trace(Emu *e)
+{
+    static int done = 0;
+    char line[128];
+    char *p;
+    if (done) return;
+    done = 1;
+    plat_serial_puts("[ring] guest reported a fatal exit: last steps\n");
+    {
+        unsigned n = g_ring_cnt;
+        unsigned start = n > 300 ? n - 300 : 0;
+        for (unsigned i = start; i < n; i++) {
+            StepRec *r = &g_ring[(g_ring_pos - n + i) % RING_N];
+            p = line;
+            p = put4(p, r->cs); *p++ = ':'; p = put4(p, r->ip);
+            *p++ = ' '; *p++ = 'A'; *p++ = 'X'; *p++ = '='; p = put4(p, r->ax);
+            *p++ = ' '; *p++ = 'B'; *p++ = 'X'; *p++ = '='; p = put4(p, r->bx);
+            *p++ = ' '; *p++ = 'C'; *p++ = 'X'; *p++ = '='; p = put4(p, r->cx);
+            *p++ = ' '; *p++ = 'D'; *p++ = 'X'; *p++ = '='; p = put4(p, r->dx);
+            *p++ = ' '; *p++ = 'S'; *p++ = 'P'; *p++ = '='; p = put4(p, r->sp);
+            *p++ = ' '; *p++ = 'S'; *p++ = 'S'; *p++ = '='; p = put4(p, r->ss);
+            *p++ = ' '; *p++ = 'D'; *p++ = 'S'; *p++ = '='; p = put4(p, r->ds);
+            *p++ = ' '; *p++ = 'E'; *p++ = 'S'; *p++ = '='; p = put4(p, r->es);
+            *p++ = ' '; *p++ = 'B'; *p++ = 'P'; *p++ = '='; p = put4(p, r->bp);
+            *p++ = ' '; *p++ = 'S'; *p++ = 'I'; *p++ = '='; p = put4(p, r->si);
+            *p++ = ' '; *p++ = 'D'; *p++ = 'I'; *p++ = '='; p = put4(p, r->di);
+            *p++ = ' ';
+            for (int k = 0; k < 6; k++) { p = put2(p, (unsigned)emu_rb(e, r->cs, (u16)(r->ip + k))); *p++ = ' '; }
+            *p++ = '\n'; *p = 0;
+            plat_serial_puts(line);
+        }
+    }
+    plat_serial_puts("[ring] last INT 21h calls (AH at caller)\n");
+    for (unsigned i = 0; i < g_i21_cnt; i++) {
+        unsigned k = (g_i21_pos - g_i21_cnt + i) % 24u;
+        p = line;
+        p = put4(p, g_i21_ring[k].cs); *p++ = ':'; p = put4(p, g_i21_ring[k].ip);
+        *p++ = ' '; *p++ = 'A'; *p++ = 'H'; *p++ = '='; p = put2(p, g_i21_ring[k].ah);
+        *p++ = '\n'; *p = 0;
+        plat_serial_puts(line);
+    }
+    plat_serial_puts("[ring] last SS loads (old->new at CS:IP sp=)\n");
+    for (unsigned i = 0; i < g_ss_cnt; i++) {
+        unsigned k = (g_ss_pos - g_ss_cnt + i) % 16u;
+        p = line;
+        *p++ = 'S'; *p++ = 'S'; *p++ = ' '; p = put4(p, g_ss_ring[k].old_ss);
+        *p++ = '-'; *p++ = '>'; p = put4(p, g_ss_ring[k].new_ss);
+        *p++ = ' '; *p++ = 'a'; *p++ = 't'; *p++ = ' '; p = put4(p, g_ss_ring[k].cs);
+        *p++ = ':'; p = put4(p, g_ss_ring[k].ip);
+        *p++ = ' '; *p++ = 'S'; *p++ = 'P'; *p++ = '='; p = put4(p, g_ss_ring[k].sp);
+        *p++ = '\n'; *p = 0;
+        plat_serial_puts(line);
+    }
+    plat_serial_puts("[ring] stack at SS:SP\n");
+    for (int i = 0; i < 24; i++) {
+        u16 v = emu_rw(e, e->ss, (u16)(e->sp + i * 2));
+        p = line;
+        *p++ = 'S'; *p++ = 'P'; *p++ = '+'; p = put4(p, (unsigned)(i * 2));
+        *p++ = ' '; p = put4(p, v);
+        *p++ = ' '; *p++ = 's'; *p++ = 'e'; *p++ = 'g'; *p++ = '=';
+        p = put4(p, (unsigned)emu_rw(e, v, 2));
+        *p++ = ':'; p = put4(p, (unsigned)emu_rw(e, v, 0));
+        *p++ = '\n'; *p = 0;
+        plat_serial_puts(line);
+    }
+}
 
 #ifdef UEFIDOS_HOST
 static void trace_regs(Emu *e, u64 steps)
@@ -3673,6 +3822,12 @@ static int inject_irq(Emu *e, int vec)
     pushv(e, e->eflags, 16);
     push16(e, e->cs);
     push16(e, (u16)e->eip);
+    /* Remember where the frame sits.  An IRET only ends *this* interrupt when it
+     * pops exactly this frame: a chained handler (Windows chains itself to the
+     * BIOS INT 8 stub) returns through its own IRET first, and clearing the
+     * depth there would let a second interrupt nest inside the guest handler. */
+    e->irq_frame_ss = e->ss;
+    e->irq_frame_sp = (u16)e->esp;
     set_cs_ip(e, seg, off);
     e->irq_depth++;
     e->irq_steps = 0;
@@ -3862,7 +4017,19 @@ int emu_run(Emu *e)
                 e->irq_steps += 0x40u;
                 if (e->irq_steps > 0x30000u) e->irq_depth = 0;
             }
-            if ((e->eflags & F_IF) && e->irq_depth == 0) {
+#ifdef UEFIDOS_HOST
+            if (e->irq_depth && (u32)(total - e->irq_last_tick_ms) >= (u32)timer_period_steps()) {
+                static int held = 0;
+                static int told = 0;
+                held++;
+                if (!told && getenv("UEFIDOS_TRACE_IRQ")) {
+                    fprintf(stderr, "[irq] tick held back: guest handler still open at %04X:%04X depth=%d (count %d)\n",
+                            e->cs, (u16)e->eip, (int)e->irq_depth, held);
+                    told = held > 400;
+                }
+            }
+#endif
+            if ((e->eflags & F_IF) && e->irq_depth == 0 && !e->wrote_ss) {
                 /* The BIOS timer is 18.2 Hz on an original PC, which is one
                  * tick every ~16384 instructions of emulated time.  Timing it
                  * off the host clock made the interrupt rate depend on how fast
@@ -3873,19 +4040,34 @@ int emu_run(Emu *e)
                  * into an intermittent one.  Counting emulated steps instead
                  * makes both environments behave identically. */
                 u32 period = (u32)timer_period_steps();
+                int delivered = 0;
                 if ((u32)(total - e->irq_last_tick_ms) >= period) {
                     e->irq_last_tick_ms = (u32)total;
                     /* the BIOS-style stub is a real handler, so "ours" must not
                      * suppress delivery: it bumps 0040:006C, chains INT 1Ch and
                      * EOIs, which is what a hooking program is waiting for */
-                    if (!vector_is_ours(e, 8) || vector_is_bios_irq(e, 8))
+                    if (!vector_is_ours(e, 8) || vector_is_bios_irq(e, 8)) {
                         inject_irq(e, 8);
+                        delivered = 1;
+                    }
                 }
-                if (e->kbd_irq_pending) {
+                /* Only ONE interrupt per sample.  The CPU takes an interrupt at
+                 * an instruction boundary and then runs the handler; delivering
+                 * a second one in the same sample pushes a frame on top of the
+                 * handler's *first few instructions*, i.e. a nested interrupt the
+                 * handler never sees coming.  Windows 1.x's ISR switches to its
+                 * own stack a few instructions in (it saves SS:SP in a single word
+                 * at cs:[0238]/[023a]) and a mouse interrupt landing there
+                 * corrupts that stack -- which surfaced minutes later as a false
+                 * "FatalExit code = stack overflow".  A pending keyboard/mouse
+                 * packet now waits for the next sample, exactly like hardware
+                 * waiting for the handler to finish (it is still pending, so
+                 * nothing is lost). */
+                if (!delivered && e->kbd_irq_pending) {
                     e->kbd_irq_pending = 0;
-                    if (!vector_is_ours(e, 9)) inject_irq(e, 9);
+                    if (!vector_is_ours(e, 9)) { inject_irq(e, 9); delivered = 1; }
                 }
-                if (e->bus_irq_pending) {
+                if (!delivered && e->bus_irq_pending) {
                     e->bus_irq_pending = 0;
                     bus_trace(e, "irq", 0x23D, vector_is_ours(e, 0x0D) ? 0x00 : 0x0D);
                     if (!vector_is_ours(e, 0x0D)) inject_irq(e, 0x0D);

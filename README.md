@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.1.16** — 35 of 35 automated checks pass on the Windows host harness
+Version **1.1.17** — 35 of 35 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
 
 1.1.1 fixes the EXEC command-tail contract DOS has and UEFI-DOS did not:
@@ -42,7 +42,7 @@ still missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.1.16.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.15.zip)
+[**Download `UEFI-DOS-1.1.17.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.17.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -505,6 +505,7 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_MOUSE_SCALE=n` | host counts per count the emulated bus mouse reports (`n` or `nx,ny`; default 1 = about two CGA pixels per count) |
 | `UEFIDOS_TICK_STEPS=<n>` | emulated instructions per BIOS timer tick (default 16384, the 18.2 Hz of an original PC) -- the tick is counted in emulated steps, not host milliseconds, so the host harness and a UEFI session deliver the same interrupt pattern; lower it to stress a guest with more timer interrupts |
 | `UEFIDOS_TRACE_FIND=1` | one line per `INT 21h AH=4Eh/AH=4Fh` with the search state recovered from the DTA and the result (`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`) — the fastest way to tell "a program loops because the search never ends" from "because the search never started" |
+| `UEFIDOS_IRQ_OLDGUARD=1` | put back the old "any IRET ends the hardware interrupt" rule, so the frame-accurate guard can be compared with it (the old rule let a timer tick nest inside a guest handler that chains to the previous vector) |
 | `UEFIDOS_TRACE_IVT=1` | log every `INT 21h AH=25h` the guest performs (`[ivt] set 08 = 15B7:0244 by CS:IP`) — the fastest way to see which handler a program installs, and whether it installs one at all |
 | `UEFIDOS_TRACE_PSP=1`, `UEFIDOS_TRACE_EXEC=1` | print every new PSP's command tail (and the bytes after it) and every `INT 21h AH=4Bh` (path, environment segment, command-line far pointer, caller PSP/DS) plus failing `AH=48h` requests |
 | `UEFIDOS_TRACE_MEM=1` | dump the DOS memory arena (MCB chain: segment, `M`/`Z`, owner PSP, size, data range) after `INT 21h AH=4Ah` and whenever `AH=48h` fails — the fastest way to see whether a program's shrink-then-probe memory sizing came out right |

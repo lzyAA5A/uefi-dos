@@ -102,12 +102,14 @@ typedef struct Emu {
     int  mouse_dx, mouse_dy;     /* motion accumulated since the last query */
     int  irq_depth;              /* hardware interrupt currently executing */
 u32  irq_steps;              /* steps spent inside that handler (watchdog) */
+    int  wrote_ss;               /* this instruction loaded SS: no IRQ yet (8086 rule) */
     u32  irq_last_tick_ms;       /* last INT 8h injection */
     int  kbd_irq_pending;        /* a key is waiting for IRQ1 delivery */
     u8   kbd_irq_scan;           /* scan code latched for port 60h */
     int  kbd_out_valid;          /* port 60h holds an unread scan code */
     int  bus_irq_pending;        /* bus mouse (InPort) raised IRQ5 */
     u16  irq_ip, irq_cs, irq_sp, irq_ss;  /* return point of the IRQ handler */
+    u16  irq_frame_ss, irq_frame_sp;     /* where our frame sits in the guest stack */
     /* A DOS call that arrives through a chained vector (program hook -> saved
      * vector = our "INT n; IRET" trampoline) returns to the *original* caller
      * with the trampoline's IRET, which pops the flags pushed by that INT.  DOS
@@ -274,3 +276,10 @@ extern int g_mouse_speed;
 #define DPMI_ENTRY_OFF 0xF000u
 
 #endif
+
+/* Dump the last emulated steps to the serial console when the guest prints its
+ * own fatal message (Windows 1.x FatalExit). */
+void emu_fatal_trace(Emu *e);
+
+/* Record a DOS call and its caller for the fatal-exit ring. */
+void emu_i21_note(u16 cs, u16 ip, u8 ah);

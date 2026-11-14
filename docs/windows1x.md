@@ -3337,3 +3337,208 @@ one bump of the BIOS tick counter at ``0040:006C``) every 16384 steps, which is
 the same interrupt pattern for the same guest code, so a failure reproduces in
 the fast harness instead of only in QEMU.  ``UEFIDOS_TICK_STEPS=<n>`` overrides
 the period in the host harness for experiments.
+
+## Round 25 -- the timer interrupt nested inside Windows' own handler
+
+### Symptom
+
+Under a UEFI session Windows 1.01 comes up, draws the MS-DOS Executive with the
+directory listing, answers the mouse and clicks -- and then, minutes later, prints
+
+```
+FatalExit code =  stack overflow
+```
+
+and drops back to `C:\WINDOWS>`.  It happens with the mouse being moved, with
+clicks and with **no input at all**, and it never happens in the host harness
+(which happily runs 400M instructions idle).  Because it is intermittent
+(deaths were observed 137 s, 164 s, 169 s, 228 s, 364 s and 612 s after the
+desktop appeared) it looked like a timing fault from the start.
+
+### Instrumenting a UEFI-only failure
+
+The guest RAM of the emulator is a firmware `AllocatePool` buffer, so the QEMU
+monitor's `pmemsave 0 ...` reads firmware leftovers, not the guest (655360 zero
+bytes -- an easy trap).  It can be located in one full RAM dump by looking for
+the two vectors Windows installs back to back at guest offset 0x80:
+
+```
+INT 20h -> 0DBD:39A4     bytes A4 39 BD 0D
+INT 21h -> 0DBD:39A6     bytes A6 39 BD 0D
+```
+
+`F:\1231\_tmp\win\qmp_memfind.py` / `qmp_ffind.py` dump the whole 256 MB of RAM
+once, find the base (here `0xCE9D018`), then `pmemsave` 640 KB / 1 MB around it
+every few seconds while watching the serial log for `FatalExit`.  Findings:
+
+* the BIOS tick counter at `0040:006C` grows by ~174 per 10 s of wall clock, i.e.
+  17.4 Hz, exactly the step-based 1:16384 tick -- the guest's clock is correct;
+* only ~170 bytes of guest memory change between samples, and they are the timer
+  ring at `2933:0004` (10-byte records), the seconds counter at `292F:0008` and
+  the BDA tick -- there is **no** slow leak that could exhaust a stack;
+* phantom input is not the cause either: with a temporary log in
+  `plat_kbd_poll()` / `plat_mouse_poll()` a 15-minute idle run produced **zero**
+  key or mouse events from the UEFI side.
+
+So the corruption had to be something the emulator does to the guest, rarely and
+at an arbitrary moment.
+
+### Root cause
+
+The emulator delivers a hardware interrupt by pushing FLAGS:CS:IP and jumping to
+the guest's vector, and it kept a single flag, `irq_depth`, to stop a second
+interrupt from landing inside a handler:
+
+```c
+case 0xCF:                     /* IRET */
+    ...
+    if (e->irq_depth > 0) e->irq_depth--;
+```
+
+Windows chains itself to the vector it saved, so its timer ISR at `15B7:0244`
+runs `lcall *cs:[0230]` -- and the vector it saved is the BIOS stub at
+`F000:2300`, which ends in its own `IRET`.  That inner IRET cleared `irq_depth`
+**in the middle of the Windows ISR**, and from then on the guard was gone for the
+rest of the handler.  The Windows ISR is the one piece of code in the system that
+switches stacks while it holds interrupts open:
+
+```
+17E5:025x  cmpb $0x0,%cs:0x23d / je -13   ; another instance inside?
+           cmpb $0x1,%cs:0x23c / jne     ; nesting counter
+           incb %cs:0x23c
+           pushf
+           lcall *%cs:0x230              ; chain to the BIOS INT 8 stub  <-- IRET here
+           cli
+           mov %ss,%cs:0x23a             ; save the interrupted SS
+           mov %sp,%cs:0x238             ; save the interrupted SP
+           push %cs ; pop %ss
+           mov $0x230,%sp                ; ... and run on cs:0230
+           sti
+```
+
+A timer tick delivered right after the chained call lands *inside* that switch:
+it pushes its frame on the old stack, the nested entry overwrites
+`cs:[0238]/[023A]` (the outer instance's return SS:SP) and the nesting counter
+`cs:[023C]`, and when the frames unwind the guest returns to a stack pointer that
+no task owns any more.  The damage is not immediate -- the kernel keeps running
+on corrupted bookkeeping until a stack-space probe fires and prints
+`FatalExit code = stack overflow`.
+
+### Fix
+
+`inject_irq()` now records where its frame sits (`irq_frame_ss`/`irq_frame_sp`
+in `Emu`) and only the IRET that pops **that** frame ends the interrupt:
+
+```c
+if (e->irq_depth > 0 && ss_before == e->irq_frame_ss && sp_before == e->irq_frame_sp)
+    e->irq_depth--;
+```
+
+A chained handler's IRET (different SS:SP) no longer releases the guard, so no
+interrupt can be injected while a guest handler is still open -- which is also
+what the real 8259 does by keeping IRQ0 in service until EOI.  The step watchdog
+(`irq_steps > 0x30000`) still frees a handler that never returns through IRET.
+
+Host-side A/B switch for future work: `UEFIDOS_IRQ_OLDGUARD=1` restores the old
+"any IRET ends the interrupt" rule, and under `UEFIDOS_TRACE_IRQ=1` the emulator
+prints how often a tick has to wait:
+
+```
+[irq] tick held back: guest handler still open at 1607:0267 depth=1 (count 12)
+```
+
+That counter reaches ~130 per 200M host instructions, i.e. without the fix about
+one timer tick in twenty was injected on top of a running handler.
+
+### Seeing a fatal exit inside a UEFI session
+
+The guest's own fatal message used to be the only symptom: no registers, no
+stack, no serial.  The step ring (previously host-only) is now built into every
+binary, and when the guest writes the text `FatalExit` (INT 21h AH=40h, either to
+the console or to a file) the emulator dumps to the serial console:
+
+* `[ring] guest reported a fatal exit: last steps` -- the last 200 instructions
+  with CS:IP, AX/BX, SP/SS, DS/ES, BP, SI, DI and the first six bytes at IP;
+* `[ring] stack at SS:SP` -- the 24 words at the stack pointer, each annotated
+  with the far pointer it looks like (`seg:off`), which is what identifies the
+  caller of the fatal path.
+
+It is harmless (a few lines on serial, once per session) and it is the only tool
+that works when the failure cannot be reproduced in the fast harness.
+
+### Measured result, and what is still open
+
+| build | idle | with mouse |
+| --- | --- | --- |
+| 1.1.16 (guard released by any IRET) | died at 137 s, 164 s, 228 s, 612 s | died at 228 s, 364 s |
+| 1.1.17 (frame-accurate guard) | 792 s, 950 s alive; one death at 612 s | 720 s alive; deaths at 182 s (twice) |
+
+The frame-accurate guard removes a real emulator defect, but it does **not** end
+the intermittent exit: the same `FatalExit code =  stack overflow` still shows up
+in roughly half of the runs.  The step ring now says exactly where it comes from.
+
+### The fatal exit is a false stack probe inside a module
+
+The ring catches two things that repeat in every run that dies:
+
+```
+[ring] last INT 21h calls (AH at caller)
+0DBD:4A0C AH=1A       ; kernel: set DTA ...
+0DBD:4A0C AH=50       ; ... get PSP          (a find/list storm)
+0D00:03C4 AH=41       ; delete the swap file
+0D00:04E4 AH=19       ; get drive
+0D00:04E4 AH=0E       ; set drive
+0D00:03D0 AH=3B       ; chdir
+0D00:03D4 AH=4D       ; get return code
+0DBD:643E AH=40       ; "FatalExit code = "
+```
+
+i.e. the message is the *last* thing the kernel does, after it has already
+restored the DOS environment -- so nothing in that sequence is the cause, it is
+the post-mortem.  The cause is in the stack:
+
+```
+SP+0014 885C     (return address inside module 1FF7)
+SP+0016 1FF7     (module segment)
+SP+0018 FFFF     (the code passed to FatalExit)
+```
+
+so a module's stack-probe thunk decided there was no stack.  That thunk
+(`1FF7:88A2`) is the 1.01 module entry stub:
+
+```
+88A2: 5B              pop  bx              ; return address
+88A3: 2E 8B 17        mov  dx,cs:[bx]      ; frame size
+88A6: 43 43           inc bx / inc bx
+88A9: 55              push bp
+88AA: 8B EC           mov  bp,sp
+88AC: 1E              push ds
+88AD: 8E D8           mov  ds,ax          ; ax = the module's data segment
+88AF: 33 C0           xor  ax,ax
+88B1: 8A C2           mov  al,dl
+88B3: D1 E0           shl  ax,1           ; ax = frame * 2
+88B5: 2B C4           sub  ax,sp
+88B7: 73 E2           jae  889B
+88B9: F7 D8           neg  ax             ; ax = sp - frame  (0x085A here)
+88BB: 36 39 06 0A 00  cmp  ss:[000A],ax   ; <-- reads the limit from SS
+88C0: 77 ...          ja   884D           ; limit >= new sp  =>  "no stack"
+```
+
+The limit is read from **SS**, not from DS, because a Windows module runs with
+SS == its own segment.  In the dying run SS was `0D00` -- **WIN.COM's PSP** -- so
+`ss:[000A]` was the PSP's saved INT 22h vector, `F000:FFE0` = 0xFFE0, and every
+stack pointer looks like an overflow (`0xFFE0 >= 0x085A`).
+
+The `SS` ring (also printed by the fatal trace) shows what the segment normally
+looks like, and that the module's own entry thunk switches it correctly:
+
+```
+SS 3137->1FF7 at 1FF7:5BE3 SP=1A8A     ; module entry: switch to its own stack
+SS 1FF7->3137 at 1FF7:5CF8 SP=5BBC     ; ... and restore the caller's
+SS 0D00->1FF7 at 1FF7:5BE3 SP=0858     ; same entry, but called from WIN.COM's PSP stack
+```
+
+so the remaining defect is *why a module is entered from WIN.COM's stack* at all
+(and why the probe then reads the limit through SS).  Both `UEFIDOS_TRACE_*` and
+the two rings are shipped so the next report can be decoded the same way; the
+open question is which guest path enters module 1FF7 from the parent's stack.

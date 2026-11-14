@@ -12,7 +12,7 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.1.16** —— 35 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.1.17** —— 35 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
 1.1.1 修的是 DOS 的 EXEC 命令行约定：调用方 `PSP:0080h..00FFh` 那 **128 字节
@@ -42,7 +42,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.16.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.15.zip)
+[**下载 `UEFI-DOS-1.1.17.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.17.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -469,6 +469,7 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_MOUSE_SCALE=n` | host counts per count the emulated bus mouse reports (`n` or `nx,ny`; default 1 = about two CGA pixels per count) |
 | `UEFIDOS_TICK_STEPS=<n>` | 每个 BIOS 定时器 tick 对应的模拟指令数（默认 16384，即原装机 18.2 Hz）—— tick 按模拟步数计，不按宿主毫秒，所以宿主测试器与 UEFI 下的中断节奏一致；调小可给客人更多定时中断做压力测试 |
 | `UEFIDOS_TRACE_FIND=1` | 客户机每一次 `INT 21h AH=4Eh/AH=4Fh` 打印一行，含从 DTA 里恢复的搜索状态与结果（`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`）——区分"程序在死循环是因为搜索永远不结束"和"因为搜索根本没开始"最快的手段 |
+| `UEFIDOS_IRQ_OLDGUARD=1` | 恢复旧规则「任何 IRET 都结束硬件中断」，用于对比按帧判定的守卫（旧规则会让计时中断嵌套在「链到旧向量」的客户处理程序内部） |
 | `UEFIDOS_TRACE_IVT=1` | 打印客户机每一次 `INT 21h AH=25h`（`[ivt] set 08 = 15B7:0244 by CS:IP`）——看程序装了哪个中断处理程序、以及到底有没有装，这是最快的手段 |
 | `UEFIDOS_TRACE_PSP=1`、`UEFIDOS_TRACE_EXEC=1` | 打印每个新 PSP 的命令行尾部（及其后 16 字节）、每次 `INT 21h AH=4Bh`（路径、环境段、命令行远指针、调用者 PSP/DS），以及失败的 `AH=48h` 请求 |
 | `UEFIDOS_TRACE_MEM=1` | 在 `INT 21h AH=4Ah` 之后、以及每次 `AH=48h` 失败时打印 DOS 内存 arena（MCB 链：段址、`M`/`Z`、owner PSP、大小、数据范围）——查看程序“先缩小再探测”的内存测算是否算对，这是最快的手段 |
