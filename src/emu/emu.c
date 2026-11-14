@@ -132,28 +132,71 @@ static int bus_scale(int axis)
     return axis ? sy : sx;
 }
 
-/* Emulated instructions per BIOS timer tick.  An original PC runs 18.2 timer
- * interrupts per second while executing roughly 300k instructions/s, so one
- * tick is ~16384 instructions of emulated time.  Counting steps rather than
- * host milliseconds keeps the interrupt rate identical no matter how fast the
- * emulator runs, which matters because a guest like Windows 1.x is sensitive to
- * how many timer interrupts land inside its critical sections. */
-static u64 timer_period_steps(void)
+/* Emulated instructions per BIOS timer tick.  Real hardware ticks 18.2 times a
+ * second whatever the CPU speed, so the step period is continuously adjusted to
+ * keep that rate against the wall clock (see timer_pace()).  The trigger stays
+ * step-based -- an interrupt must land between two instructions -- but the
+ * period is no longer a fixed 16384 steps, because a fixed period makes guest
+ * time run at whatever speed the emulator happens to execute: the UEFI build
+ * runs the guest roughly four times faster than an original PC, so Windows' 500
+ * ms double-click window elapsed between two presses a human made 200 ms apart
+ * and double-clicking an icon did nothing.  UEFIDOS_TICK_STEPS=n (host only)
+ * still forces a fixed period for reproducible debugging runs. */
+static u64 g_tick_period = 0x4000u;
+static u64 g_pace_steps;
+static u32 g_pace_ms;
+static int g_tick_fixed = -1;
+
+static int timer_fixed(void)
 {
-    static u64 period = 0;
-    if (period == 0) {
-        period = 0x4000u;
+    if (g_tick_fixed < 0) {
+        g_tick_fixed = 0;
 #ifdef UEFIDOS_HOST
         {
             const char *s = getenv("UEFIDOS_TICK_STEPS");
             if (s && *s) {
                 long v = atol(s);
-                if (v >= 64) period = (u64)v;
+                if (v >= 64) {
+                    g_tick_period = (u64)v;
+                    g_tick_fixed = 1;
+                }
             }
         }
 #endif
     }
-    return period;
+    return g_tick_fixed;
+}
+
+static u64 timer_period_steps(void)
+{
+    return g_tick_period;
+}
+
+/* Keep the tick close to 18.2 Hz of wall-clock time by measuring how many steps
+ * the emulator really gets through and resizing the period accordingly.  Called
+ * from the same 1-in-1024-step sample that already asks the platform for the
+ * time, so it costs nothing extra. */
+static void timer_pace(u64 total, u32 now_ms)
+{
+    u32 elapsed;
+    u64 dsteps, per;
+    if (timer_fixed()) return;
+    if (g_pace_ms == 0) {
+        g_pace_ms = now_ms;
+        g_pace_steps = total;
+        return;
+    }
+    elapsed = (u32)(now_ms - g_pace_ms);
+    if (elapsed < 125) return;
+    dsteps = total - g_pace_steps;
+    g_pace_ms = now_ms;
+    g_pace_steps = total;
+    if (!dsteps) return;
+    per = (dsteps * 55u) / (u64)elapsed;         /* a tick is 1000/18.2 ms */
+    if (per < 512u) per = 512u;
+    if (per > 0x400000u) per = 0x400000u;
+    g_tick_period = (g_tick_period + 3u * per) / 4u;
+    if (g_tick_period < 512u) g_tick_period = 512u;
 }
 
 u16 emu_in_port(Emu *e, u16 port)
@@ -3316,6 +3359,7 @@ int emu_init(Emu *e)
     e->mouse_show_count = 0;
     e->mouse_mask = 0;
     e->irq_last_tick_ms = 0;    /* step count of the last timer tick */
+    e->bios_ticks = 0;
     e->cr0 = 0;
     e->a20_on = 0;              /* gate masked: real-mode addresses wrap at 1 MB */
     seg_cache_sync(e);          /* real-mode caches: base = sel<<4, limit 64K */
@@ -3991,6 +4035,7 @@ int emu_run(Emu *e)
                     g_fw_pump_ms = now;
                     plat_pump_events();
                 }
+                timer_pace(total, now);
             }
         }
         /* IRQ0 (timer, 18.2 Hz) and IRQ1 (keyboard) go to the guest's own
@@ -4000,7 +4045,7 @@ int emu_run(Emu *e)
             /* BIOS tick counter (40:6C): real hardware bumps it from the timer
              * interrupt, so programs that poll the variable directly (Windows'
              * idle loop does) see time move even without INT 1Ah */
-            emu_wd(e, 0x40, 0x6C, (u32)(total / (u64)timer_period_steps()));
+            emu_wd(e, 0x40, 0x6C, e->bios_ticks);
             if (e->irq_depth && e->cs == e->irq_cs && (u16)e->eip == e->irq_ip &&
                 e->ss == e->irq_ss && (u16)e->esp == e->irq_sp)
                 e->irq_depth = 0;
@@ -4030,19 +4075,15 @@ int emu_run(Emu *e)
             }
 #endif
             if ((e->eflags & F_IF) && e->irq_depth == 0 && !e->wrote_ss) {
-                /* The BIOS timer is 18.2 Hz on an original PC, which is one
-                 * tick every ~16384 instructions of emulated time.  Timing it
-                 * off the host clock made the interrupt rate depend on how fast
-                 * the emulator happened to run (a UEFI session is far slower
-                 * than the host harness), so the guest saw a different number of
-                 * timer interrupts per instruction in each environment -- which
-                 * is exactly the kind of difference that turns a working guest
-                 * into an intermittent one.  Counting emulated steps instead
-                 * makes both environments behave identically. */
+                /* The tick rate is real time (18.2 Hz, see timer_pace()); the
+                 * step period it works out is what triggers the interrupt here,
+                 * so the tick still lands between two instructions. */
                 u32 period = (u32)timer_period_steps();
                 int delivered = 0;
                 if ((u32)(total - e->irq_last_tick_ms) >= period) {
                     e->irq_last_tick_ms = (u32)total;
+                    e->bios_ticks++;          /* 0040:006C counts them even when
+                                               * nobody hooked INT 8 */
                     /* the BIOS-style stub is a real handler, so "ours" must not
                      * suppress delivery: it bumps 0040:006C, chains INT 1Ch and
                      * EOIs, which is what a hooking program is waiting for */
@@ -4063,14 +4104,32 @@ int emu_run(Emu *e)
                  * packet now waits for the next sample, exactly like hardware
                  * waiting for the handler to finish (it is still pending, so
                  * nothing is lost). */
-                if (!delivered && e->kbd_irq_pending) {
-                    e->kbd_irq_pending = 0;
-                    if (!vector_is_ours(e, 9)) { inject_irq(e, 9); delivered = 1; }
+                /* A pending packet is only consumed once it is actually
+                 * delivered.  The old code cleared the flag first and then
+                 * skipped the injection when this sample had already delivered
+                 * the timer tick, so a mouse packet could be lost outright --
+                 * and a lost packet is not just a lost movement: the button
+                 * state is read out of the card when the driver acknowledges
+                 * the packet, so a dropped press/release packet means Windows
+                 * never sees the click at all (double-click did nothing). */
+                if (e->kbd_irq_pending) {
+                    if (vector_is_ours(e, 9)) {
+                        e->kbd_irq_pending = 0;     /* no guest handler hooked */
+                    } else if (!delivered) {
+                        e->kbd_irq_pending = 0;
+                        inject_irq(e, 9);
+                        delivered = 1;
+                    }
                 }
-                if (!delivered && e->bus_irq_pending) {
-                    e->bus_irq_pending = 0;
-                    bus_trace(e, "irq", 0x23D, vector_is_ours(e, 0x0D) ? 0x00 : 0x0D);
-                    if (!vector_is_ours(e, 0x0D)) inject_irq(e, 0x0D);
+                if (e->bus_irq_pending) {
+                    if (vector_is_ours(e, 0x0D)) {
+                        e->bus_irq_pending = 0;     /* driver has not hooked IRQ5 yet */
+                    } else if (!delivered) {
+                        e->bus_irq_pending = 0;
+                        bus_trace(e, "irq", 0x23D, 0x0D);
+                        inject_irq(e, 0x0D);
+                        delivered = 1;
+                    }
                 }
             }
         }

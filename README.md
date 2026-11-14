@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.1.17** — 35 of 35 automated checks pass on the Windows host harness
+Version **1.1.18** — 35 of 35 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
 
 1.1.1 fixes the EXEC command-tail contract DOS has and UEFI-DOS did not:
@@ -35,14 +35,16 @@ timer handlers and never touches the BIOS buffer. `HLT` became an idle step, so
 One DOS-level feature made that possible: **`SETVER`**, a per-program DOS
 version. UEFI-DOS reports MS-DOS 4.00, and Windows 1.x refuses to start on
 anything newer than 3.x, so `SETVER WIN.COM 3.30` (shell or `CONFIG.SYS`) is the
-escape hatch instead of lowering the version for everybody. With it, **Windows
-1.01's `SETUP` installs the whole release** — see
-[`docs/windows1x.md`](docs/windows1x.md) for how far the runtime gets and what is
-still missing.
+escape hatch instead of lowering the version for everybody. With it, **the whole
+Windows 1.01 release installs and the MS-DOS Executive desktop comes up** —
+[`docs/windows1x-guide.md`](docs/windows1x-guide.md) is the **usage guide** for
+working with it (mouse, double-click, menus, the bundled apps, quitting), and
+[`docs/windows1x.md`](docs/windows1x.md) has the traces and what is still
+missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.1.17.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.17.zip)
+[**Download `UEFI-DOS-1.1.18.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.18.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -503,7 +505,7 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_TRACE_PORT=1` | every access to the emulated Microsoft bus-mouse card (`[port] out 23F = 91 at CS:IP ax=...` in `build/port_trace.txt`) - shows whether the guest actually loaded an InPort driver, and which registers it uses |
 | `UEFIDOS_MOUSE_WAIT=<ms>` | delay the first scripted mouse event (a 24 M-step run finishes in ~4 s, so a script that has to land after the desktop needs `UEFIDOS_MOUSE_WAIT=1000`) |
 | `UEFIDOS_MOUSE_SCALE=n` | host counts per count the emulated bus mouse reports (`n` or `nx,ny`; default 1 = about two CGA pixels per count) |
-| `UEFIDOS_TICK_STEPS=<n>` | emulated instructions per BIOS timer tick (default 16384, the 18.2 Hz of an original PC) -- the tick is counted in emulated steps, not host milliseconds, so the host harness and a UEFI session deliver the same interrupt pattern; lower it to stress a guest with more timer interrupts |
+| `UEFIDOS_TICK_STEPS=<n>` | force a fixed number of emulated instructions per BIOS timer tick. By default the period is adjusted continuously so the tick follows **wall-clock time** at 18.2 Hz (real hardware behaviour); the step trigger still decides *where* the interrupt lands. Lower it to stress a guest with more timer interrupts |
 | `UEFIDOS_TRACE_FIND=1` | one line per `INT 21h AH=4Eh/AH=4Fh` with the search state recovered from the DTA and the result (`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`) — the fastest way to tell "a program loops because the search never ends" from "because the search never started" |
 | `UEFIDOS_IRQ_OLDGUARD=1` | put back the old "any IRET ends the hardware interrupt" rule, so the frame-accurate guard can be compared with it (the old rule let a timer tick nest inside a guest handler that chains to the previous vector) |
 | `UEFIDOS_TRACE_IVT=1` | log every `INT 21h AH=25h` the guest performs (`[ivt] set 08 = 15B7:0244 by CS:IP`) — the fastest way to see which handler a program installs, and whether it installs one at all |

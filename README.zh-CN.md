@@ -12,7 +12,7 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.1.17** —— 35 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.1.18** —— 35 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
 
 1.1.1 修的是 DOS 的 EXEC 命令行约定：调用方 `PSP:0080h..00FFh` 那 **128 字节
@@ -30,19 +30,15 @@ FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以
 为此还加了一个 DOS 层特性：**`SETVER`**（按程序设置 DOS 版本）。UEFI-DOS 报告的是
 MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 `SETVER WIN.COM 3.30`（命令行或 `CONFIG.SYS`）是逃生口，而不是把所有人的版本降下去。
-有了它，**Windows 1.01 的 `SETUP` 能装完整个发行版**；`WIN100.BIN` 现在能走完它对 DOS
-内部结构的整套校验（SFT 链、SDA、InDOS 标志、PSP、作业文件表），随后在加载驱动之前以退出码 1
-结束，所以桌面还没画出来——校验链的逐条反汇编、它需要的 DOS 表面，以及卡住的那个
-实例/句柄遍历（`CS:0E71h`）都记在
-[`docs/windows1x.md`](docs/windows1x.md)。最新一轮把这堵墙量到了字节：内核第一次
-`GlobalAlloc` 要 **28 段（435 字节）** 建模块数据库，而它自己的内存场只给了
-**27 段（可用 428 字节）**，差两个字节；在临时镜像里把这个请求改小 4 字节，
-分配就成功（`CS:212Eh` 返回真实段而不是 `ES=0001h`），说明卡的是尺寸不是代码路径，
-而下一道门 `CS:0E71h` 仍然返回「0 个模块」。
+有了它，**Windows 1.01 整个发行版能装完，MS-DOS Executive 桌面能画出来**。
+桌面起来之后怎么用（鼠标、双击、菜单、自带程序、退出）见
+[`docs/windows1x-guide.md`](docs/windows1x-guide.md)；
+内核这一路的反汇编、参考机对照和仍未解决的部分见
+[`docs/windows1x.md`](docs/windows1x.md)。
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.1.17.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.17.zip)
+[**下载 `UEFI-DOS-1.1.18.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.18.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -467,7 +463,7 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_TRACE_PORT=1` | every access to the emulated Microsoft bus-mouse card (`[port] out 23F = 91 at CS:IP ax=...` in `build/port_trace.txt`) - shows whether the guest actually loaded an InPort driver, and which registers it uses |
 | `UEFIDOS_MOUSE_WAIT=<ms>` | delay the first scripted mouse event (a 24 M-step run finishes in ~4 s, so a script that has to land after the desktop needs `UEFIDOS_MOUSE_WAIT=1000`) |
 | `UEFIDOS_MOUSE_SCALE=n` | host counts per count the emulated bus mouse reports (`n` or `nx,ny`; default 1 = about two CGA pixels per count) |
-| `UEFIDOS_TICK_STEPS=<n>` | 每个 BIOS 定时器 tick 对应的模拟指令数（默认 16384，即原装机 18.2 Hz）—— tick 按模拟步数计，不按宿主毫秒，所以宿主测试器与 UEFI 下的中断节奏一致；调小可给客人更多定时中断做压力测试 |
+| `UEFIDOS_TICK_STEPS=<n>` | 强制固定每个 BIOS 定时器 tick 的模拟指令数。默认改为**跟随真实时间**：tick 速率持续校准到 18.2 Hz（与真实硬件一致），步数只决定中断落在哪条指令边界上；调小可给客人更多定时中断做压力测试 |
 | `UEFIDOS_TRACE_FIND=1` | 客户机每一次 `INT 21h AH=4Eh/AH=4Fh` 打印一行，含从 DTA 里恢复的搜索状态与结果（`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`）——区分"程序在死循环是因为搜索永远不结束"和"因为搜索根本没开始"最快的手段 |
 | `UEFIDOS_IRQ_OLDGUARD=1` | 恢复旧规则「任何 IRET 都结束硬件中断」，用于对比按帧判定的守卫（旧规则会让计时中断嵌套在「链到旧向量」的客户处理程序内部） |
 | `UEFIDOS_TRACE_IVT=1` | 打印客户机每一次 `INT 21h AH=25h`（`[ivt] set 08 = 15B7:0244 by CS:IP`）——看程序装了哪个中断处理程序、以及到底有没有装，这是最快的手段 |

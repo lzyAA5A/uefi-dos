@@ -3542,3 +3542,56 @@ so the remaining defect is *why a module is entered from WIN.COM's stack* at all
 (and why the probe then reads the limit through SS).  Both `UEFIDOS_TRACE_*` and
 the two rings are shipped so the next report can be decoded the same way; the
 open question is which guest path enters module 1FF7 from the parent's stack.
+
+## Round 26 -- double-click did nothing: guest time was not real time
+
+Symptom: the desktop was up and a click selected a row, but double-clicking a program or a
+directory never opened it -- neither in QEMU nor in the host harness, and `Enter` on the selected
+row did nothing either (Windows 1.01's Executive has no keyboard "open", so that was a red
+herring).
+
+Two independent causes, both in the emulator:
+
+1. **The timer tick ran on emulated steps, so guest time ran at the emulator's speed.**  One tick
+   was a fixed `0x4000` (16384) steps, which is 18.2 Hz only for a machine executing ~300k
+   instructions/s.  The UEFI build gets through the guest about four times faster, so Windows'
+   time (which it takes from the timer interrupt) advanced ~4x faster than the wall clock:
+   `DoubleClickSpeed=500` was over between two presses a human makes 160 ms apart, so the second
+   click was a fresh single click and nothing opened.
+2. **A pending keyboard/mouse packet could be dropped.**  `emu_run()` consumes the pending flags
+   inside one 1-in-64-step sample and only delivers *one* interrupt per sample (a second one would
+   land inside the first handler's prologue).  The old code cleared `kbd_irq_pending` /
+   `bus_irq_pending` first and then skipped the injection when that sample had already delivered
+   the timer -- and a lost mouse packet is not just a lost movement: the button state is read out
+   of the card when the driver acknowledges the packet, so a dropped press/release packet means
+   Windows never sees the click at all.
+
+Fixes:
+
+- `timer_pace(u64 total, u32 now_ms)` in `src/emu/emu.c` (called from the same 1-in-1024-step
+  sample that already asks the platform for the time) measures the real steps/ms and resizes
+  `g_tick_period` with `per = (dsteps * 55) / elapsed` so that 18.2 ticks fit into one wall second;
+  the trigger stays step-based, so the interrupt still lands between two instructions.
+  `UEFIDOS_TICK_STEPS=n` (host only) still forces a fixed period for reproducible runs.
+- `Emu.bios_ticks` (`src/emu/emu.h`) counts the ticks and is what gets written into `0040:006C`;
+  the previous `total / period` expression would drift now that the period moves.
+- Pending `kbd_irq_pending` / `bus_irq_pending` are only consumed when the injection really
+  happens (a flag stays pending for the next sample instead of being thrown away); the "no guest
+  handler hooked" case still drops it, because nobody could ever read it.
+
+Verification:
+
+- Host harness (`UEFIDOS_MOUSE` press/release pairs 150 ms apart, tree `F:\1231\_tmp\win\w101mouse`):
+  `build\hm1.png` -- the CALENDAR window opens with `WIN.INI` untouched (`DoubleClickSpeed=500`).
+- QEMU/OVMF, QMP injection (`_tmp\win\qmp_mouse2.py m2e --gap=0.08 --preclick=0`): the 160 ms
+  double-click now raises Windows' own `MS-DOS / Cannot run SCRIPT.FON / [Ok]` dialog
+  (`build\m2_m2e_3.png`); before the fix the same run only repainted the selection.
+- `run_tests.ps1`: 35 passed, 0 failed; itest 66/66.
+
+Menus: Windows 1.0 opens a menu bar title only **while the button is held** (press on `File`,
+drag to the command, release) -- a click-and-release just flashes the title.  Evidence:
+`build\hmenu.png` (click) versus `build\hmenu2.png` (press held: the `View` menu is open).  This
+is documented in the new usage guide `docs/windows1x-guide.md`.
+
+Still open: the soak run (`_tmp\win\qmp_soak.py`) still ends with `FatalExit code = stack overflow`
+after ~182 s of mouse activity; the module-1FF7 stack-probe/SS evidence in Round 25 applies.

@@ -104,6 +104,7 @@ typedef struct Emu {
 u32  irq_steps;              /* steps spent inside that handler (watchdog) */
     int  wrote_ss;               /* this instruction loaded SS: no IRQ yet (8086 rule) */
     u32  irq_last_tick_ms;       /* last INT 8h injection */
+    u32  bios_ticks;             /* timer ticks counted into 0040:006C */
     int  kbd_irq_pending;        /* a key is waiting for IRQ1 delivery */
     u8   kbd_irq_scan;           /* scan code latched for port 60h */
     int  kbd_out_valid;          /* port 60h holds an unread scan code */
