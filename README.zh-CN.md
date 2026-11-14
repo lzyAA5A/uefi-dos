@@ -12,8 +12,26 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.2.1** —— 35 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.2.2** —— 36 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
+
+1.2.2 是一次**性能**发行，针对 Windows 1.x 发卡的三处原因：
+
+* 视频通路每帧都把整个 640x200 画面重画进 GOP 帧缓冲——鼠标动一个像素就要写
+  4 MB。现在记录每一次 VRAM 写入落在哪一行、哪一段列，只重画那一段
+  （`plat_video_gfx_show_dirty`）；`UEFIDOS_GFX_VERIFY=1` 会把每个增量帧与整帧
+  展开逐像素比对，证明这条捷径没有留下残影；
+* 原来按指令条数决定出帧（每 256K 步一帧），而客户机每秒跑 190 万步，等于
+  140 ms 才刷新一次。现在按真实时间出帧（约 33 fps，画面没变就跳过），指针
+  跟手而不是拖在后面；
+* 中断向量还指着模拟器自己的 `IRET` 桩时，这条中断等于什么都没做，现在直接
+  返回，不再一条条执行压栈、跳转、IRET。Windows 1.x 的空闲循环每秒要调几十万次
+  `INT 28h`。
+
+同一镜像在 QEMU + OVMF 上实测：**客户机指令速度 1.88M → 2.29M 条/秒**（+22%），
+鼠标移动时**出帧 19 帧/秒**（旧版每 262144 条指令才刷一帧，在 188 万条/秒下
+等于 7.2 帧/秒的上限，也就是 140 ms 一帧）。此外实模式地址翻译每次访存少一次函数调用，
+固件事件泵的间隔由 8 ms 放宽到 16 ms。
 
 1.2.1 修的是 8086 核心里 **`LAHF` 与 `SAHF` 写反了** —— `LAHF` 把 AH 写进标志位，
 而不是把标志位读进 AH（`SAHF` 反过来），于是任何「`LAHF` 之后测标志」的程序看到的
@@ -45,11 +63,12 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 桌面起来之后怎么用（鼠标、双击、菜单、自带程序、退出）见
 [`docs/windows1x-guide.md`](docs/windows1x-guide.md)；
 内核这一路的反汇编、参考机对照和仍未解决的部分见
-[`docs/windows1x.md`](docs/windows1x.md)。
+[`docs/windows1x.md`](docs/windows1x.md)；它为什么快、为什么慢、怎么测、怎么调，见
+[`docs/performance.md`](docs/performance.md)。
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.2.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.1.zip)
+[**下载 `UEFI-DOS-1.2.2.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.2.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -190,6 +209,8 @@ seek 的 whence 与 INT 21h 相同，`find_first`/`find_next` 回填的字段与
 | 报告版本 | `AH=30h` 返回 `AX=0x0004`（DOS 4.00），`VER` 显示同一级别；想报告别的版本改 `src/uefidos_config.h` 里的 `UEFIDOS_DOSVER_*` |
 | 数据结构 | `AH=32h` 在保留 ROM 窗口里为每个已挂载盘生成一个 DPB；`AH=52h` 返回 list of lists，其 `+2` 指向该 DPB 链 |
 | EXE 映像装载位置 | `CONFIG.SYS` 写 `EXECHIGH=ON` 时，EXE 映像贴着程序块的**顶端**装载（不再是 PSP 之后的默认位置）；`CONFIG` 显示当前模式，宿主测试器用 `UEFIDOS_EXEC_HIGH_IMAGE` |
+| 指令速率日志 | `CONFIG.SYS` 写 `PERFLOG=ON`，每约 200 万条客户机指令往串口打一行 `[perf] steps=.. ms=.. ips=.. frames=..`：把「这个程序慢」拆成模拟器成本（`ips`）和程序自己画图的成本（`frames`） |
+| 致命现场指令环 | `CONFIG.SYS` 写 `RINGLOG=ON` 保留致命退出（FatalExit、除零、死锁）时打印的逐条指令寄存器环（每条指令 13 个寄存器）。UEFI 下默认关闭，宿主测试器始终开启 |
 | 鼠标速度 | `CONFIG.SYS` 写 `MOUSESPEED=n` 设定模拟的 Microsoft 总线鼠标（Windows 1.x 用的那块卡）每上报 1 个计数需要多少个宿主计数：默认 2（两个宿主计数上报一次，即约 1 个 CGA 像素的位移），写 1 快一倍、写 4 更精细 |
 | 错误上报 | `AH=59h` 把上次失败映射成 class / 建议动作 / locus 三元组（`2`→class 8、`5`/`21h`→class 3、`27h`→class 11、`50h`→class 12 …） |
 | 扩展打开 | `AH=6Ch` 支持 DOS 的 action 位：打开已有 / 不存在则创建 / 覆盖已有，`AX` 返回句柄、`CX` 返回 `1`/`2`/`3`；`AH=68h` 提交 |
@@ -473,6 +494,7 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_TRACE_MOUSE=1` | 客户机每一次 `INT 33h` 在 `build/mouse_trace.txt` 打印一行（`INT33 AX=.. BX=.. at CS:IP`）——INT 21h 的 trace 看不到这个向量，所以"客户机从来没碰过鼠标"要有这一行才算证据（没选指点设备的 Windows 1.01 就是零调用） |
 | `UEFIDOS_TRACE_PORT=1` | every access to the emulated Microsoft bus-mouse card (`[port] out 23F = 91 at CS:IP ax=...` in `build/port_trace.txt`) - shows whether the guest actually loaded an InPort driver, and which registers it uses |
 | `UEFIDOS_MOUSE_WAIT=<ms>` | delay the first scripted mouse event (a 24 M-step run finishes in ~4 s, so a script that has to land after the desktop needs `UEFIDOS_MOUSE_WAIT=1000`) |
+| `UEFIDOS_GFX_VERIFY=1` | 每次出帧后把整幅 CGA 位图重新展开一遍，与增量重画得到的画面逐像素比较（正常输出 `[gfx-verify] frames=450 ok (bad frames 0)`；不一致会打印第一个出问题的像素）——「只重画变化的部分」这条捷径的守门员，因为它的 bug 表现为残影而不是崩溃 |
 | `UEFIDOS_MOUSE_SCALE=n` | host counts per count the emulated bus mouse reports (`n` or `nx,ny`; default 2 = about one CGA pixel per count) |
 | `UEFIDOS_TICK_STEPS=<n>` | 强制固定每个 BIOS 定时器 tick 的模拟指令数。默认改为**跟随真实时间**：tick 速率持续校准到 18.2 Hz（与真实硬件一致），步数只决定中断落在哪条指令边界上；调小可给客人更多定时中断做压力测试 |
 | `UEFIDOS_TRACE_FIND=1` | 客户机每一次 `INT 21h AH=4Eh/AH=4Fh` 打印一行，含从 DTA 里恢复的搜索状态与结果（`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`）——区分"程序在死循环是因为搜索永远不结束"和"因为搜索根本没开始"最快的手段 |

@@ -723,7 +723,27 @@ int plat_video_gfx_begin(int w, int h)
 /* Frames are written straight into the linear framebuffer: the firmware Blt
  * (EfiBltVideoFill in particular) stalls on some implementations, and a plain
  * pixel loop is both simpler and predictable. */
-void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
+/* One 32-bit store per output pixel: the DAC entry is pre-expanded into the
+ * byte order the panel wants, so the inner loop does no shifts at all.  The
+ * old code recomputed three 8-bit components for every pixel of every frame. */
+static u32 gfx_pal[256];
+
+static void gfx_pal_build(const u8 *dac, int bgr)
+{
+    for (int i = 0; i < 256; i++) {
+        u8 c0 = (u8)((dac[i * 3 + 0] << 2) | (dac[i * 3 + 0] >> 4));
+        u8 c1 = (u8)((dac[i * 3 + 1] << 2) | (dac[i * 3 + 1] >> 4));
+        u8 c2 = (u8)((dac[i * 3 + 2] << 2) | (dac[i * 3 + 2] >> 4));
+        u8 px[4];
+        if (bgr) { px[0] = c2; px[1] = c1; px[2] = c0; }
+        else     { px[0] = c0; px[1] = c1; px[2] = c2; }
+        px[3] = 0;
+        gfx_pal[i] = (u32)px[0] | ((u32)px[1] << 8) | ((u32)px[2] << 16);
+    }
+}
+
+void plat_video_gfx_show_dirty(const u8 *fb, int w, int h, const u8 *dac,
+                               const u8 *rows, const u16 *lo, const u16 *hi, int all)
 {
     if (gop_find() != 0) return;
     if (!g_gfx_on || !g_gop || !g_gop->Mode || !g_gop->Mode->Info) return;
@@ -738,19 +758,29 @@ void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
     if ((g_show_count % 1000u) == 0u)
         plat_serial_hex("[show] n=", (u64)g_show_count);
     u8 *base = (u8 *)(UINTN)g_gop->Mode->FrameBufferBase;
-
-
-    /* TEMP diagnostic: a blit that runs off the end of the linear framebuffer
-     * would write into whatever follows it -- including our own emulated RAM. */
     UINTN fbsize = (UINTN)g_gop->Mode->FrameBufferSize;
-    UINTN need = ((UINTN)w * sc + 1u) * 4u;
+    gfx_pal_build(dac, bgr);        /* the program may have reprogrammed the DAC */
+
     for (int y = 0; y < h; y++) {
+        int x0 = 0, x1 = w;
+        if (!all && rows) {
+            if (!rows[y]) continue;
+            if (lo && hi) {
+                x0 = (int)lo[y];
+                x1 = (int)hi[y];
+                if (x0 < 0) x0 = 0;
+                if (x1 > w) x1 = w;
+                if (x1 <= x0) continue;
+            }
+        }
         const u8 *row = fb + (UINTN)y * (UINTN)w;
         UINTN ry0 = (UINTN)y * g_gfx_vy_num / g_gfx_vy_den;
         UINTN ry1 = (UINTN)(y + 1) * g_gfx_vy_num / g_gfx_vy_den;
         if (ry1 <= ry0) ry1 = ry0 + 1;      /* never drop a source row */
+        UINTN roff_x = (g_gfx_dx + (UINTN)x0 * sc) * 4u;
+        UINTN need = ((UINTN)(x1 - x0) * sc + 1u) * 4u;
         for (UINTN ry = ry0; ry < ry1; ry++) {
-            UINTN roff = ((g_gfx_dy + ry) * stride + g_gfx_dx) * 4;
+            UINTN roff = (g_gfx_dy + ry) * stride * 4u + roff_x;
             if (roff + need > fbsize) {
                 static int told;
                 if (!told) {
@@ -766,20 +796,23 @@ void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
                 continue;
             }
             u8 *dst = base + roff;
-            for (int x = 0; x < w; x++) {
-                u8 idx = row[x];
-                u8 r = (u8)((dac[idx * 3 + 0] << 2) | (dac[idx * 3 + 0] >> 4));
-                u8 g = (u8)((dac[idx * 3 + 1] << 2) | (dac[idx * 3 + 1] >> 4));
-                u8 b = (u8)((dac[idx * 3 + 2] << 2) | (dac[idx * 3 + 2] >> 4));
+            for (int x = x0; x < x1; x++) {
+                u32 px = gfx_pal[row[x]];
                 for (UINTN rx = 0; rx < sc; rx++) {
-                    if (bgr) { dst[0] = b; dst[1] = g; dst[2] = r; }
-                    else { dst[0] = r; dst[1] = g; dst[2] = b; }
-                    dst[3] = 0;
+                    *(u32 *)(void *)dst = px;
                     dst += 4;
                 }
             }
         }
     }
+}
+
+/* Whole frame: the mode-set path and anything that cannot describe its
+ * damage. */
+void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
+{
+    if (gop_find() != 0) return;
+    plat_video_gfx_show_dirty(fb, w, h, dac, NULL, NULL, NULL, 1);
 }
 
 /* Wipe the whole linear framebuffer.  Handing the display back to the text

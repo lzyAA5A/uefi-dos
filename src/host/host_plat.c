@@ -468,6 +468,16 @@ void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac)
     g_gfx_frames++;
 }
 
+/* The host build only writes whole frames to a PPM on request and the
+ * caller keeps the expanded buffer coherent row by row, so the span
+ * information is not needed here. */
+void plat_video_gfx_show_dirty(const u8 *fb, int w, int h, const u8 *dac,
+                               const u8 *rows, const u16 *lo, const u16 *hi, int all)
+{
+    (void)rows; (void)lo; (void)hi; (void)all;
+    plat_video_gfx_show(fb, w, h, dac);
+}
+
 void plat_video_text(void)
 {
     if (!g_gfx_on) return;

@@ -3870,3 +3870,147 @@ interrupt code:
   that one; the open item of Round 31 stands (workaround: leave the app running,
   double click the `MS-DOS` icon at the bottom left, or `Special -> End Session`
   to quit Windows on purpose).
+
+## Round 33 -- performance: repaint only what changed (1.2.2)
+
+The user's report was "跑 win1.01 实在太卡了" (Windows 1.01 is far too sluggish).
+The desktop was up and the mouse worked, so this was purely a speed question,
+and the numbers said the emulator was spending most of its time *not* executing
+guest instructions.
+
+### Measurement first
+
+`CONFIG.SYS PERFLOG=ON` (new) prints to the serial port every ~2M guest
+instructions:
+
+```
+[perf] steps=0000000012a00000
+ ms=00000000000287b9
+ ips=00000000001cc12c
+ frames=0000000000000104
+```
+
+(steps, elapsed milliseconds since `emu_run` started, instructions per second,
+frames presented). One QEMU + OVMF run of the Windows 1.01 tree, idle desktop:
+
+| quantity | 1.2.1 | 1.2.2 |
+| --- | --- | --- |
+| guest instructions/s | 1.88M | 2.29M (+22%) |
+| frames/s while the mouse moves | <= 7.2 (hard cap, see below) | 19 (measured) |
+
+The 7.2 fps is arithmetic, not a measurement: the old gate allowed one frame per
+262144 instructions and the guest ran 1.88M instructions/s, so no input could be
+shown faster than once per 140 ms. The 19 fps is measured over a 5 s mouse phase
+(543 -> 640 frames, `[perf] frames=`), and `[perf]` did not exist before 1.2.2,
+which is exactly why the old build could not be compared frame for frame.
+
+Windows 1.x never halts (its idle loop is `mov ax,cs:[0016] / or ax,ax /
+int 28h`), so "instructions per second" is the whole story for how quickly it
+reacts, and "frames per second" is the whole story for how quickly the user
+sees it.
+
+### 1. One flush repainted the entire screen
+
+`emu_video_flush()` expanded the whole 16 KB CGA bitmap into `g_expand`
+(`cga_expand`, 640x200 pixels) and then `plat_video_gfx_show()` pushed all
+640x200 guest pixels into the GOP framebuffer, `g_gfx_scale` times each, 4 bytes
+per pixel with three DAC lookups per pixel. On a 1280x800 panel that is 4 MB of
+framebuffer writes per frame, for a pointer move that changed 144 pixels.
+
+Now `emu_wb`/`emu_wb32` call `video_mark_addr(e, a)`, which converts the written
+linear address into a guest row plus a pixel span and records it:
+
+* CGA (`gfx_kind != 0`, `B8000h..BBFFFh`): two 8 KB fields of 80 bytes per row,
+  `y = 2 * ((b & 0x1FFF) / 80) + ((b >> 13) & 1)`, `x0 = ((b & 0x1FFF) % 80) * ppb`
+  where `ppb` is 8 pixels per byte in mode 6 and 4 in modes 4/5;
+* linear framebuffer (`A0000h + w*h`): `y = off / w`, `x0 = off % w`, span 1.
+
+`g_row_dirty[800]` + `g_row_lo[]`/`g_row_hi[]` hold the union; `g_dirty_all`
+forces a whole frame (set by `video_flush_force`, i.e. every mode change).
+`emu_video_flush()` then expands only those rows/spans into `g_expand` and calls
+the new `plat_video_gfx_show_dirty(fb, w, h, dac, rows, lo, hi, all)`, which
+blits only those spans. The UEFI blit also pre-expands the DAC into
+`static u32 gfx_pal[256]`, so the inner loop is one 32-bit store per output
+pixel instead of three component lookups.
+
+The software pointer (INT 33h path) is marked on both its old and its new
+rectangle (`pointer_mark`), so the pixels under the old arrow come back from
+VRAM while both rectangles are blitted.
+
+### 2. Frames were paced on an instruction count
+
+`emu_run()` used to call `video_flush(e)` only when `(steps & 0x3FFFF) == 0`,
+i.e. once per 262144 instructions. At 1.9M instructions/s that is one frame
+every 140 ms no matter what the user does; the pointer visibly trailed the hand.
+`video_flush()` already throttles itself (30 ms) and skips clean frames, so the
+gate is now `(steps & 0x3FF) == 0`: ~33 fps ceiling, and a clean screen costs
+nothing. `plat_pump_events()` (firmware input, a 1 ms `gBS->Stall`) also moved
+from every 8 ms to every 16 ms, halving a ~12% wall-clock tax.
+
+### 3. An interrupt into our own IRET stub is a no-op
+
+Every vector we do not service points at `MAGIC_SEG:STUB_OFF` (`F000:0100`,
+`CF 90`). An `INT` there pushed a frame, jumped to the stub and `IRET`ed back:
+twelve byte writes through the memory helpers and two extra interpreter steps for
+nothing. Windows 1.x's idle loop calls `INT 28h` hundreds of thousands of times
+per second, so `do_int` now returns immediately:
+
+```c
+if (!hooked_int(intn) && vec_seg == MAGIC_SEG && vec_off == STUB_OFF)
+    return 0;
+```
+
+(Semantically the same interrupt: the frame is pushed and popped unchanged; the
+only difference is the IF=0 window, which the emulator does not model at
+sub-instruction granularity anyway.)
+
+### 4. Real-mode address translation lost a call
+
+`lin_of()` called `seg_resolve()` (a six-entry descriptor cache and an LDT walk)
+for *every* byte of every fetch and operand access. In real mode the answer is
+always `sel << 4`, so that case is now handled first:
+
+```c
+if (!(e->cr0 & CR0_PE)) {
+    u32 rlin = ((u32)sel << 4) + off;
+    if (!e->a20_on) rlin &= 0xFFFFFu;
+    return rlin & MEM_MASK;
+}
+```
+
+### 5. The instruction ring became opt-in
+
+`ring_note()` records 13 registers per instruction into a 4096-entry ring. It is
+what makes a fatal trace readable, but it is pure overhead while a program runs.
+It is now gated by `g_ring_trace`: on by default in the host harness (every
+forensic script depends on it), off under UEFI unless `CONFIG.SYS RINGLOG=ON`.
+
+### Verification: the incremental frame is compared with a full one
+
+A repaint bug here shows up as stale pixels, not as a crash, so
+`UEFIDOS_GFX_VERIFY=1` (host only) rebuilds the whole CGA frame after every
+flush and compares it with `g_expand`:
+
+```
+[gfx-verify] frames=450 ok (bad frames 0)
+```
+
+450 incremental repaints of a live Windows 1.01 desktop (window redraws, pointer
+moves under `UEFIDOS_MOUSE_AUTO=35`, listing scrolls) produced zero mismatched
+pixels. `run_tests.ps1` gained `graphics: incremental repaint matches a full
+frame` (CGATEST with the verifier on) as a permanent guard; the suite is 36/36.
+
+`-O3` instead of `-O2` was measured on the host harness and made no difference
+(22-24M steps/s both ways), so the build flags are unchanged, and the whole
+optimisation is in the emulator, not in the compiler.
+
+### What is still slow, and what it would take
+
+The desktop is now limited by guest throughput: ~2.3M instructions/s is an AT
+286-class machine, and Windows 1.x on a real AT felt exactly like this. The
+remaining known costs are (a) `rep movs/stos` still walk byte by byte through the
+memory helpers (a bulk `memmove` fast path for real-mode RAM would speed up
+scrolling and full-screen fills), (b) the instruction decoder re-fetches and
+re-decodes every byte (no decode cache), and (c) `emu_ww`/`emu_wd` translate the
+address once per byte instead of once per word. None of them is worth the risk
+before the next real-compatibility bug.

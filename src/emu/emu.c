@@ -663,6 +663,58 @@ int emu_kbd_get_full(Emu *e, int *scan, int *ascii)
 /* mark it dirty so the host console can be refreshed.                 */
 static int g_video_dirty = 0;
 
+/* ---- incremental repaint bookkeeping -------------------------------------
+ * Every VRAM byte written records the guest row and the pixel span it touched.
+ * A flush then expands and blits only those rows and spans, instead of pushing
+ * the whole 640x200 screen (scaled, 4 bytes per pixel) into the firmware
+ * framebuffer.  A window drag or a pointer move changes a few hundred pixels,
+ * so this is the difference between "responsive" and "slideshow". */
+#define GFX_ROWS_MAX 800
+static u8  g_row_dirty[GFX_ROWS_MAX];
+static u16 g_row_lo[GFX_ROWS_MAX];
+static u16 g_row_hi[GFX_ROWS_MAX];
+static int g_dirty_all = 1;      /* the next repaint covers the whole frame */
+static int g_ptr_shown;          /* software arrow baked into the frame */
+static int g_ptr_x, g_ptr_y;
+
+static void video_mark_span(int y, int x0, int x1)
+{
+    g_video_dirty = 1;
+    if (y < 0 || y >= GFX_ROWS_MAX) { g_dirty_all = 1; return; }
+    if (g_dirty_all) return;
+    if (g_row_dirty[y]) {
+        if (x0 < (int)g_row_lo[y]) g_row_lo[y] = (u16)x0;
+        if (x1 > (int)g_row_hi[y]) g_row_hi[y] = (u16)x1;
+    } else {
+        g_row_dirty[y] = 1;
+        g_row_lo[y] = (u16)x0;
+        g_row_hi[y] = (u16)x1;
+    }
+}
+
+/* Record one byte written at linear address a (non-VRAM writes just return). */
+static void video_mark_addr(Emu *e, u32 a)
+{
+    if (e->gfx_kind && a >= 0xB8000u && a < 0xB8000u + 0x4000u) {
+        /* CGA bitmap: two 8 KB fields of 80 bytes per row; even rows in the
+         * first field, odd rows in the second (see cga_expand_rows). */
+        u32 b = a - 0xB8000u;
+        int bank = (int)((b >> 13) & 1u);
+        u32 in_bank = b & 0x1FFFu;
+        int ppb = (int)(e->gfx_w / 80u);          /* 8 pixels/byte at 640, 4 at 320 */
+        if (ppb < 1) ppb = 1;
+        int x0 = (int)(in_bank % 80u) * ppb;
+        video_mark_span((int)(in_bank / 80u) * 2 + bank, x0, x0 + ppb);
+        return;
+    }
+    if (a >= 0xA0000u && a < 0xA0000u + (u32)e->gfx_w * (u32)e->gfx_h) {
+        u32 off = a - 0xA0000u;
+        u32 w = (u32)e->gfx_w;
+        int x = (int)(off % w);
+        video_mark_span((int)(off / w), x, x + 1);
+    }
+}
+
 #ifdef UEFIDOS_HOST
 static void trace_vw(Emu *e, u32 rel, u8 v);
 #else
@@ -737,6 +789,15 @@ static u32 seg_resolve(Emu *e, u16 sel, u32 *limit)
  * garbage and the stub reports "Packed file is corrupt". */
 static u32 lin_of(Emu *e, u16 sel, u32 off, u32 n)
 {
+    /* Real mode is the hot path: the base really is sel*16 with no limit check,
+     * and seg_resolve() is a non-trivial function (descriptor cache + LDT
+     * walk).  Skipping it here speeds up every instruction fetch and every
+     * operand access in real-mode code, which is where DOS programs live. */
+    if (!(e->cr0 & CR0_PE)) {
+        u32 rlin = ((u32)sel << 4) + off;
+        if (!e->a20_on) rlin &= 0xFFFFFu;
+        return rlin & MEM_MASK;
+    }
     u32 limit = 0xFFFFu;
     u32 base = seg_resolve(e, sel, &limit);
     if ((e->cr0 & CR0_PE) && ((u64)off + n - 1u) > (u64)limit) {
@@ -792,15 +853,9 @@ void emu_wb32(Emu *e, u16 seg, u32 off, u8 v)
     if (noram_lin(e, a)) return;             /* ROM / absent RAM: write dropped */
     watch_write(e, a, v);
     e->mem[a] = v;
-    if (e->gfx_w) {
-        if (a >= 0xA0000u && a < 0xA0000u + (u32)e->gfx_w * e->gfx_h) g_video_dirty = 1;
-        /* CGA modes keep the bitmap at B8000 (16 KB, both fields) */
-        else if (e->gfx_kind && a >= 0xB8000u && a < 0xB8000u + 0x4000u) g_video_dirty = 1;
-    }
-    if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) {
-        if (!e->gfx_w) g_video_dirty = 1;
-        trace_vw(e, a - 0xB8000u, v);
-    }
+    if (e->gfx_w) video_mark_addr(e, a);
+    else if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) g_video_dirty = 1;
+    if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) trace_vw(e, a - 0xB8000u, v);
 }
 u16 emu_rw32(Emu *e, u16 seg, u32 off)
 {
@@ -850,15 +905,9 @@ void emu_wb(Emu *e, u16 seg, u16 off, u8 v)
     if (noram_lin(e, a)) return;             /* ROM / absent RAM: write dropped */
     watch_write(e, a, v);
     e->mem[a] = v;
-    if (e->gfx_w) {
-        if (a >= 0xA0000u && a < 0xA0000u + (u32)e->gfx_w * e->gfx_h) g_video_dirty = 1;
-        /* CGA modes keep the bitmap at B8000 (16 KB, both fields) */
-        else if (e->gfx_kind && a >= 0xB8000u && a < 0xB8000u + 0x4000u) g_video_dirty = 1;
-    }
-    if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) {
-        if (!e->gfx_w) g_video_dirty = 1;
-        trace_vw(e, a - 0xB8000u, v);
-    }
+    if (e->gfx_w) video_mark_addr(e, a);
+    else if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) g_video_dirty = 1;
+    if (a >= 0xB8000u && a < 0xB8000u + 80u * 25u * 2u) trace_vw(e, a - 0xB8000u, v);
 }
 u16 emu_rw(Emu *e, u16 seg, u16 off)
 {
@@ -884,6 +933,21 @@ void emu_wd(Emu *e, u16 seg, u16 off, u32 v)
  * it hundreds of times per second, and every flush rewrites 25 rows, so the
  * mirror is throttled; the force flush at the end of emu_run catches up. */
 static u32 g_last_flush_ms = 0;
+/* frames actually presented since reset (CONFIG.SYS PERFLOG=ON reports it) */
+static u64 g_flush_count = 0;
+/* int g_perf_log: print "[perf] steps= ms= ips= frames=" to the serial port
+ * every ~2M guest instructions.  Off by default (CONFIG.SYS PERFLOG=ON); it is
+ * the only way to tell whether a slow program is slow because of the
+ * emulator or because of its own drawing. */
+int g_perf_log = 0;
+/* The step ring is a 13-register record per instruction: invaluable for a
+ * fatal trace, but it is not free.  On by default where it is used (the host
+ * harness), opt-in under UEFI with CONFIG.SYS RINGLOG=ON. */
+#ifdef UEFIDOS_HOST
+int g_ring_trace = 1;
+#else
+int g_ring_trace = 0;
+#endif
 static u32 g_fw_pump_ms = 0;    /* last plat_pump_events() call (firmware input) */
 
 /* CGA modes 4/5/6 keep their pixels at B8000 in the even/odd interleaved
@@ -920,23 +984,100 @@ static void pointer_undo(u8 *fb)
     g_cur_prev_n = 0;
 }
 
-static void cga_expand(Emu *e)
+static void cga_expand_into(Emu *e, u8 *dstbuf, const u8 *rows, const u16 *lo,
+                            const u16 *hi, int all)
 {
     const u8 *src = e->mem + 0xB8000;
     int w = (int)e->gfx_w, h = (int)e->gfx_h;
     for (int y = 0; y < h; y++) {
+        int x0 = 0, x1 = w;
+        if (!all && rows) {
+            if (!rows[y]) continue;
+            if (lo && hi) {
+                x0 = (int)lo[y];
+                x1 = (int)hi[y];
+                if (x0 < 0) x0 = 0;
+                if (x1 > w) x1 = w;
+                if (x1 <= x0) continue;
+            }
+        }
         const u8 *row = src + (y >> 1) * 80 + ((y & 1) ? 0x2000 : 0);
-        u8 *dst = g_expand + (u32)y * (u32)w;
+        u8 *dst = dstbuf + (u32)y * (u32)w;
         if (e->gfx_kind == 2) {
-            for (int x = 0; x < w; x++)
+            for (int x = x0; x < x1; x++)
                 dst[x] = (u8)((row[x >> 3] >> (7 - (x & 7))) & 1);
         } else {
-            for (int x = 0; x < w; x++)
+            for (int x = x0; x < x1; x++)
                 dst[x] = (u8)((row[x >> 2] >> (6 - ((x & 3) << 1))) & 3);
         }
     }
 }
 
+/* Mark the 12x12 software arrow: its old home has to be re-expanded from VRAM
+ * (so the pixels under it come back) and both homes have to be blitted. */
+static void pointer_mark(int on, int x, int y, int w, int h)
+{
+    if (!on) return;
+    for (int r = 0; r < 12; r++) {
+        int py = y + r;
+        if (py < 0 || py >= h) continue;
+        int px0 = x, px1 = x + 12;
+        if (px0 < 0) px0 = 0;
+        if (px1 > w) px1 = w;
+        if (px1 <= px0) continue;
+        video_mark_span(py, px0, px1);
+    }
+}
+
+#ifdef UEFIDOS_HOST
+/* UEFIDOS_GFX_VERIFY=1: the incremental repaint is the one part of the video
+ * path that can silently leave stale pixels behind (a row that was marked but
+ * only partially copied, a span that was never expanded).  After every flush,
+ * expand the whole CGA bitmap a second time into a scratch frame and compare.
+ * A mismatch is reported with the first offending pixel. */
+static int gfx_verify_on(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *v = getenv("UEFIDOS_GFX_VERIFY");
+        on = (v && *v && *v != '0') ? 1 : 0;
+    }
+    return on;
+}
+
+static void draw_pointer(Emu *e, u8 *fb, int w, int h, int record);
+
+static void gfx_verify(Emu *e, int w, int h)
+{
+    static u8 scratch[640 * 200];
+    static u64 frames = 0, bad_frames = 0;
+    if (!gfx_verify_on() || !e->gfx_kind) return;
+    if (w <= 0 || h <= 0 || w > 640 || h > 200) return;
+    cga_expand_into(e, scratch, NULL, NULL, NULL, 1);
+    if (e->mouse_visible && e->mouse_show_count > 0) draw_pointer(e, scratch, w, h, 0);
+    frames++;
+    long bad = 0;
+    int bx = -1, by = -1;
+    for (int y = 0; y < h; y++) {
+        const u8 *a = scratch + (size_t)y * (size_t)w;
+        const u8 *b = g_expand + (size_t)y * (size_t)w;
+        for (int x = 0; x < w; x++) {
+            if (a[x] != b[x]) {
+                if (!bad) { bx = x; by = y; }
+                bad++;
+            }
+        }
+    }
+    if (bad) {
+        bad_frames++;
+        fprintf(stderr, "[gfx-verify] frame %llu: %ld mismatched pixels (first at %d,%d)\n",
+                (unsigned long long)frames, bad, bx, by);
+    } else if (frames <= 3 || (frames % 25) == 0) {
+        fprintf(stderr, "[gfx-verify] frames=%llu ok (bad frames %llu)\n",
+                (unsigned long long)frames, (unsigned long long)bad_frames);
+    }
+}
+#endif
 static void draw_pointer(Emu *e, u8 *fb, int w, int h, int record)
 {
     if (!e->mouse_visible || e->mouse_show_count <= 0) return;
@@ -960,25 +1101,37 @@ static void draw_pointer(Emu *e, u8 *fb, int w, int h, int record)
 
 void emu_video_flush(Emu *e)
 {
+    g_flush_count++;
     if (e->gfx_w) {
         int w = (int)e->gfx_w, h = (int)e->gfx_h;
+        int all = g_dirty_all;
+        int ptr_now = e->mouse_visible && e->mouse_show_count > 0;
         u8 *fb;
+        pointer_mark(g_ptr_shown, g_ptr_x, g_ptr_y, w, h);
+        pointer_mark(ptr_now, e->mouse_x, e->mouse_y, w, h);
         if (e->gfx_kind) {
-            cga_expand(e);
+            cga_expand_into(e, g_expand, g_row_dirty, g_row_lo, g_row_hi, all);
             fb = g_expand;
             g_cur_prev_n = 0;
             draw_pointer(e, fb, w, h, 0);
+#ifdef UEFIDOS_HOST
+            gfx_verify(e, w, h);
+#endif
         } else {
             fb = e->mem + 0xA0000;
             pointer_undo(fb);           /* remove the previous arrow */
             draw_pointer(e, fb, w, h, 1);
         }
-        plat_video_gfx_show(fb, w, h, e->dac);
+        plat_video_gfx_show_dirty(fb, w, h, e->dac, g_row_dirty, g_row_lo, g_row_hi, all);
+        g_ptr_shown = ptr_now;
+        g_ptr_x = e->mouse_x;
+        g_ptr_y = e->mouse_y;
+        memset(g_row_dirty, 0, sizeof(g_row_dirty));
+        g_dirty_all = 0;
         return;
     }
     plat_video_show(e->mem + 0xB8000);
 }
-
 static void video_flush(Emu *e)
 {
     if (!g_video_dirty) return;
@@ -992,6 +1145,7 @@ static void video_flush(Emu *e)
 static void video_flush_force(Emu *e)
 {
     if (!g_video_dirty) return;
+    g_dirty_all = 1;                     /* mode change: whole frame */
     g_last_flush_ms = plat_ticks_ms();
     g_video_dirty = 0;
     emu_video_flush(e);
@@ -3084,6 +3238,14 @@ do_int: {
             g_i21_caller_cs = int_site_cs;
             g_i21_caller_ip = int_site_ip;
         }
+        /* Every vector we do not service points at MAGIC_SEG:STUB_OFF, a lone
+         * IRET.  Interrupting it therefore pushes a frame, jumps to the stub and
+         * IRETs straight back: twelve byte writes through the memory helpers and
+         * two extra interpreter steps for nothing.  Windows 1.x calls INT 28h
+         * from its idle loop hundreds of thousands of times per second, so this
+         * shortcut is a measurable share of the emulator's work. */
+        if (!hooked_int(intn) && vec_seg == MAGIC_SEG && vec_off == STUB_OFF)
+            return 0;
         if ((vec_seg == MAGIC_SEG && vec_off == MAGIC_OFF) ||
             (hooked_int(intn) && vec_seg == TRAMP_SEG && vec_off == TRAMP_SLOT(intn))) {
             video_flush(e);
@@ -4283,7 +4445,7 @@ int emu_run(Emu *e)
     u32 input_seen = g_input_seq;
     while (!e->halted && !g_plat_shutdown_requested) {
         trace_step(e, steps);
-        ring_note(e);
+        if (g_ring_trace) ring_note(e);
         if (!e->mouse_cb_active && e->mouse_pending_events) mouse_inject(e);
         step(e);
         if (e->mouse_cb_active && e->cs == e->mouse_cb_cs && e->eip == (u32)e->mouse_cb_ip &&
@@ -4298,7 +4460,22 @@ int emu_run(Emu *e)
             emu_halt_note(e, "segment trap");
             break;
         }
-        if (g_video_dirty && (steps & 0x3FFFFull) == 0) { video_flush(e); }
+        /* Frame pacing is wall-clock, not step-count.  Windows 1.x never
+         * halts: its idle loop runs ~1.9M instructions per second, so flushing
+         * only every 256K steps updated the screen about every 140 ms -- the
+         * pointer visibly lagged the hand.  video_flush() throttles itself to
+         * ~33 fps and skips frames when nothing changed. */
+        if (g_video_dirty && (steps & 0x3FFull) == 0) { video_flush(e); }
+        if (g_perf_log && (total & 0x1FFFFFull) == 0) {
+            u64 ms = plat_ticks_ms();
+            u64 ips = ms ? (total * 1000u) / ms : 0;
+            plat_serial_puts("[perf] steps=");
+            plat_serial_hex("", total);
+            plat_serial_hex(" ms=", ms);
+            plat_serial_hex(" ips=", ips);
+            plat_serial_hex(" frames=", g_flush_count);
+            plat_serial_puts("\n");
+        }
         if ((total & 0x3FFFFull) == 0) dump_vram(e);   /* steps resets on keys */
         if ((steps & 0x3FFull) == 0) {
             emu_kbd_pump(e);
@@ -4310,7 +4487,10 @@ int emu_run(Emu *e)
              * mouse.  The host build makes this a no-op. */
             {
                 u32 now = plat_ticks_ms();
-                if ((u32)(now - g_fw_pump_ms) >= 8) {
+                /* 8 ms of pumping cost 1 ms of Stall each time, i.e. ~12% of
+                 * the whole machine.  16 ms halves that and is still far below
+                 * what a human notices on the keyboard. */
+                if ((u32)(now - g_fw_pump_ms) >= 16) {
                     g_fw_pump_ms = now;
                     plat_pump_events();
                 }

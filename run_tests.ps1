@@ -245,8 +245,8 @@ Run-Check 'graphics: CGA mode 4 (320x200x4) paints the interleaved bitmap' {
 # #UD inside OVMF), so the built EFI must still contain real function bodies.
 Run-Check 'firmware: GOP graphics code is present in the built EFI (not dead-code)' {
     & $Python (Join-Path $Root 'tools/check_efi_symbols.py') (Join-Path $Build 'BOOTX64.EFI') `
-        'plat_video_gfx_begin=64' 'plat_video_gfx_show=256' 'plat_video_text=16'
-} @('EFI SYMBOLS OK', 'plat_video_gfx_show:')
+        'plat_video_gfx_begin=64' 'plat_video_gfx_show=64' 'plat_video_gfx_show_dirty=200' 'plat_video_text=16'
+} @('EFI SYMBOLS OK', 'plat_video_gfx_show:', 'plat_video_gfx_show_dirty:')
 
 Run-Check 'mouse: INT 33h reset/position/motion counters' {
     $env:UEFIDOS_MOUSE = '40,20,0;0,0,1;0,0,0'
@@ -282,6 +282,24 @@ Run-Check 'graphics: INT 10h text services paint glyphs in CGA mode 4' {
     Write-Host "lit channels in the CGA text frame: $lit"
     if ($lit -gt 200) { Write-Output 'CGA-TEXT-PIXELS-OK' }
 } @('gfx: mode set 320x200x8', 'gfx: 320x200 framebuffer ->', 'CGA-TEXT-PIXELS-OK')
+
+# The video path repaints only the rows/spans that changed, so a bug there shows
+# up as stale pixels rather than as a crash.  UEFIDOS_GFX_VERIFY rebuilds the
+# whole CGA frame after every flush and compares it with what the incremental
+# path produced.
+Run-Check 'graphics: incremental repaint matches a full frame' {
+    $ErrorActionPreference = 'Continue'
+    $env:UEFIDOS_GFX_VERIFY = '1'
+    $env:UEFIDOS_GFX_DUMP = (Join-Path $Build 't_cgaverify.ppm')
+    Remove-Item $env:UEFIDOS_GFX_DUMP -ErrorAction SilentlyContinue
+    $out = & $HostExe --shell (Join-Path $Build 'UEFIDOS.img') 'CGATEST' 2>&1
+    Remove-Item Env:UEFIDOS_GFX_VERIFY -ErrorAction SilentlyContinue
+    $ran = @($out | Where-Object { "$_" -match '\[gfx-verify\] frames=' }).Count
+    $bad = @($out | Where-Object { "$_" -match 'gfx-verify.*mismatched' }).Count
+    $out | Where-Object { "$_" -match 'gfx-verify' } | Select-Object -First 3
+    Write-Host "verify reports: $ran, mismatched frames: $bad"
+    if ($ran -gt 0 -and $bad -eq 0) { Write-Output 'GFX-VERIFY-OK' }
+} @('GFX-VERIFY-OK', 'gfx-verify] frames=')
 
 Run-Check 'graphics: VESA VBE 4F00/4F01/4F02 sets 640x480x256' {
     $env:UEFIDOS_GFX_DUMP = (Join-Path $Build 't_vesa.ppm')

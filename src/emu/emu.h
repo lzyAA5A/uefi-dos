@@ -266,6 +266,12 @@ extern int emu_unsupported_quiet;   /* 1 = do not print them (fuzz mode) */
  * way.  Set with CONFIG.SYS "EXECHIGH=ON" (or the host knob
  * UEFIDOS_EXEC_HIGH_IMAGE). */
 extern int g_exec_image_high;
+/* CONFIG.SYS PERFLOG=ON: print a guest instruction-rate line to the serial
+ * port every ~2M instructions (see emu.c). */
+extern int g_perf_log;
+/* CONFIG.SYS RINGLOG=ON: record the per-instruction ring used by fatal
+ * traces (on by default in the host harness, off under UEFI). */
+extern int g_ring_trace;
 
 /* Host counts per count reported by the emulated Microsoft bus mouse (the card
  * Windows 1.x drives).  0 = built-in default 1 (one reported count per host

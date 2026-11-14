@@ -1446,6 +1446,21 @@ void dos_read_config_sys(void)
             if (v < 1) v = 1;
             if (v > 16) v = 16;
             g_mouse_speed = v;
+        } else if (strcmp(key, "PERFLOG") == 0) {
+            /* PERFLOG=ON  -- every ~2M guest instructions print
+             *   [perf] steps=.. ms=.. ips=.. frames=..
+             * to the serial port, so "this game feels slow" can be split into
+             * emulator cost (ips) versus the program's own drawing (frames). */
+            extern int g_perf_log;
+            char v = cfg_upper((char)*q);
+            g_perf_log = (v == 'O' || v == 'Y' || v == '1') ? 1 : 0;
+        } else if (strcmp(key, "RINGLOG") == 0) {
+            /* RINGLOG=ON  -- keep the per-instruction register ring that a
+             * fatal trace (FatalExit, divide overflow, dead lock) prints.  It
+             * costs a record per instruction, so it is off unless asked for. */
+            extern int g_ring_trace;
+            char v = cfg_upper((char)*q);
+            g_ring_trace = (v == 'O' || v == 'Y' || v == '1') ? 1 : 0;
         } else if (strcmp(key, "SETVER") == 0 || strcmp(key, "DOSVER") == 0) {
             /* SETVER NAME 3.30  -- report another DOS version to that program */
             char nm[16];

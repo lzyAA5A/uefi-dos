@@ -67,6 +67,13 @@ void plat_video_show(const u8 *vram);   /* render emulated 80x25 text screen */
  * plat_video_text switches back to the 80x25 text mirror. */
 int  plat_video_gfx_begin(int w, int h);
 void plat_video_gfx_show(const u8 *fb, int w, int h, const u8 *dac);
+/* Incremental repaint.  rows[y] == 0 means guest row y did not change;
+ * otherwise only the guest pixels lo[y] .. hi[y] (exclusive) have to be
+ * written.  all != 0 forces a whole frame.  A Windows 1.x screen changes a
+ * dozen rows by a dozen columns when the pointer moves, so repainting only
+ * that instead of 640x200 scaled pixels is what keeps the display quick. */
+void plat_video_gfx_show_dirty(const u8 *fb, int w, int h, const u8 *dac,
+                               const u8 *rows, const u16 *lo, const u16 *hi, int all);
 void plat_video_text(void);
 
 /* 8x8 bitmap font (printable ASCII 0x20..0x7E) used by the INT 10h text

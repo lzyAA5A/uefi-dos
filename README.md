@@ -13,10 +13,33 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.2.1** — 35 of 35 automated checks pass on the Windows host harness
+Version **1.2.2** — 36 of 36 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
 
-1.2.1 fixes **`LAHF` and `SAHF` being swapped** in the 8086 core — `LAHF`
+1.2.2 is a **performance** release for Windows 1.x, which felt stiff for
+three separate reasons:
+
+* the video path repainted the whole 640x200 screen into the GOP framebuffer
+  on every frame, so one moved mouse pixel cost 4 MB of framebuffer writes.
+  It now records the guest row and the column span of every VRAM write and
+  repaints only those (`plat_video_gfx_show_dirty`); `UEFIDOS_GFX_VERIFY=1`
+  compares every incremental frame against a full expansion to prove it;
+* frames were paced on an instruction count (one flush per 256K steps), which
+  is about one frame per 140 ms at the speed the guest actually runs. Pacing is
+  now wall-clock (about 33 fps, skipped when nothing changed), so the pointer
+  tracks the hand instead of trailing it;
+* an interrupt whose vector still points at the emulator's own `IRET` stub is a
+  no-op, so it is no longer executed instruction by instruction. Windows 1.x's
+  idle loop calls `INT 28h` hundreds of thousands of times per second.
+
+Measured in QEMU + OVMF on the same image: **1.88M → 2.29M guest
+instructions/s** (+22%) and, while the mouse moves, **19 presented frames/s
+instead of the 7.2 fps ceiling the old step-gated flush imposed**
+(one frame per 262144 instructions at 1.88M instructions/s was one frame
+every 140 ms). Real-mode address translation also lost a function call per memory
+access, and the firmware event pump now runs every 16 ms instead of 8 ms.
+
+1.2.1 fixed **`LAHF` and `SAHF` being swapped** in the 8086 core — `LAHF`
 wrote AH *into* the flags instead of reading the flags into AH (and `SAHF` did
 the opposite), so every program that tested a flag after a `LAHF` saw garbage.
 Turbo Link 3.01 starts its command-line scanner with `call get_char; lahf; je`
@@ -66,11 +89,13 @@ Windows 1.01 release installs and the MS-DOS Executive desktop comes up** —
 [`docs/windows1x-guide.md`](docs/windows1x-guide.md) is the **usage guide** for
 working with it (mouse, double-click, menus, the bundled apps, quitting), and
 [`docs/windows1x.md`](docs/windows1x.md) has the traces and what is still
-missing.
+missing, and [`docs/performance.md`](docs/performance.md) says what makes it
+fast or slow (the `[perf]` line, the knobs, and the rules the video path
+follows).
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.2.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.1.zip)
+[**Download `UEFI-DOS-1.2.2.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.2.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -223,6 +248,8 @@ for existing 16-bit code in [`docs/migration.md`](docs/migration.md).
 | Reported version | `AH=30h` returns `AX=0x0004` (DOS 4.00); `VER` prints the same level. Set `UEFIDOS_DOSVER_*` in `src/uefidos_config.h` to claim another one |
 | Data structures | `AH=32h` synthesises a DPB per mounted drive in the reserved ROM window; `AH=52h` returns a list-of-lists whose `+2` points at that chain |
 | EXE image placement | `CONFIG.SYS` `EXECHIGH=ON` loads an EXE image flush against the top of the program's block instead of right after the PSP (what DOS itself does). `CONFIG` shows the current mode; the host harness has `UEFIDOS_EXEC_HIGH_IMAGE` |
+| Instruction-rate log | `CONFIG.SYS` `PERFLOG=ON` prints `[perf] steps=.. ms=.. ips=.. frames=..` to the serial port every ~2M guest instructions. It splits "this program is slow" into emulator cost (`ips`) and the program's own drawing (`frames`) |
+| Fatal-trace ring | `CONFIG.SYS` `RINGLOG=ON` keeps the per-instruction register ring a fatal trace prints (13 registers per instruction). It is off under UEFI by default and always on in the host harness |
 | Mouse speed | `CONFIG.SYS` `MOUSESPEED=n` sets how many host counts the emulated Microsoft bus mouse (the card Windows 1.x drives) needs per count it reports (default 2 = one reported count per two host counts, i.e. 1 CGA pixel of travel; 1 is twice as fast, 4 gives fine control) |
 | Error reporting | `AH=59h` maps the last failure to a class / suggested action / locus triple (`2`→class 8, `5`/`21h`→class 3, `27h`→class 11, `50h`→class 12, …) |
 | Extended open | `AH=6Ch` with the DOS action bits: open-existing / create-if-missing / replace-existing, returning handle in `AX` and `1`/`2`/`3` in `CX`; `AH=68h` commits |
@@ -529,6 +556,7 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_TRACE_SS=1` | log every instruction that changes `SS`, with the frame it lands on (`[ss] #1234 1409->0D00 sp=0826->0826 after 0D00:0592 next=0D00:0594 ax=...`) — a program that silently ends up on the wrong stack segment (a PSP instead of its own stack, or a stale frame restored by a bad `IRET`) is invisible in DOS call traces; this is how Windows 1.01's FatalExit `stack overflow` was pinned on a stale frame rather than on a real stack exhaustion |
 | `UEFIDOS_TRACE_MOUSE=1` | one line per `INT 33h` call in `build/mouse_trace.txt` (`INT33 AX=.. BX=.. at CS:IP`) — the INT 21h trace cannot see this vector, so this is how "the guest never touches the mouse" becomes provable (Windows 1.01 with no pointing device selected makes zero calls) |
 | `UEFIDOS_TRACE_PORT=1` | every access to the emulated Microsoft bus-mouse card (`[port] out 23F = 91 at CS:IP ax=...` in `build/port_trace.txt`) - shows whether the guest actually loaded an InPort driver, and which registers it uses |
+| `UEFIDOS_GFX_VERIFY=1` | after every flush, expand the whole CGA bitmap again and compare it with the frame the incremental repaint produced (`[gfx-verify] frames=450 ok (bad frames 0)`; a mismatch prints the first offending pixel) — the guard for "repaint only what changed", because a bug there shows up as stale pixels, not as a crash |
 | `UEFIDOS_MOUSE_WAIT=<ms>` | delay the first scripted mouse event (a 24 M-step run finishes in ~4 s, so a script that has to land after the desktop needs `UEFIDOS_MOUSE_WAIT=1000`) |
 | `UEFIDOS_MOUSE_SCALE=n` | host counts per count the emulated bus mouse reports (`n` or `nx,ny`; default 2 = about one CGA pixel per count) |
 | `UEFIDOS_TICK_STEPS=<n>` | force a fixed number of emulated instructions per BIOS timer tick. By default the period is adjusted continuously so the tick follows **wall-clock time** at 18.2 Hz (real hardware behaviour); the step trigger still decides *where* the interrupt lands. Lower it to stress a guest with more timer interrupts |
