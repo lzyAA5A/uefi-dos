@@ -88,12 +88,18 @@ if ($Installed) {
     # directory, and that dialog cannot be answered without a real floppy.  A
     # SETUP run that only copied part of the font set (Set #2/#4 but not the
     # Course/Helv/Tms "Set #5" trio) produces exactly that.  Say so up front.
+    # Windows 1.01/1.04 links the display, keyboard, mouse and comm drivers into
+    # WIN100.OVL at SETUP time, so no *.DRV file is needed at run time; the fonts
+    # are read from disk and a missing one stops Windows with
+    # "Change Disk: Insert <name> disk in drive A:".
+    # A 5.25" install carries the Course/Helv/Tms "Set #1" and "Set #5" fonts plus
+    # MODERN/ROMAN/SCRIPT (nine files) and that is enough for the desktop; the
+    # wider 1.44 MB media add the B/C sets and HIFONTS/LOFONTS.  Any of these
+    # eleven that SETUP was asked for but did not copy is fatal at run time.
     $need = @('WIN.COM', 'WIN100.BIN', 'WIN100.OVL', 'WIN.INI', 'MSDOS.EXE',
-              'CGA.DRV', 'SYSTEM.DRV', 'KEYBUS.DRV', 'COMM.DRV',
               'COURA.FON', 'HELVA.FON', 'TMSRA.FON',
-              'COURC.FON', 'HELVC.FON', 'TMSRC.FON',
               'COURD.FON', 'HELVD.FON', 'TMSRD.FON',
-              'HIFONTS.FON', 'LOFONTS.FON', 'ROMAN.FON', 'SCRIPT.FON', 'MODERN.FON')
+              'ROMAN.FON', 'SCRIPT.FON', 'MODERN.FON')
     $winDir = Join-Path $Installed 'WINDOWS'
     $missing = @($need | Where-Object { -not (Test-Path (Join-Path $winDir $_)) })
     if ($missing.Count -gt 0) {
@@ -101,8 +107,8 @@ if ($Installed) {
         Write-Host "  WARNING: $($missing.Count) file(s) missing from $winDir"
         Write-Host "           $($missing -join ', ')"
         Write-Host '           Windows will stop on "Change Disk: Insert <file> disk in drive A:"'
-        Write-Host '           -- copy those files in from the media directory (all *.FON and'
-        Write-Host '           *.DRV) before booting, the setup you pointed at is incomplete.'
+        Write-Host '           -- copy those files in from the media directory (the *.FON'
+        Write-Host '           files) before booting, the setup you pointed at is incomplete.'
         Write-Host ''
     }
     $auto_path = Join-Path $Installed 'AUTOEXEC.BAT'

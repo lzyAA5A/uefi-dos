@@ -35,8 +35,6 @@ int plat_mouse_present(void)
         g_mouse_tried = 1;
         if (gBS && gBS->LocateProtocol)
             gBS->LocateProtocol(&gEfiSimplePointerProtocolGuid, NULL, (void **)&g_mouse);
-        plat_serial_puts(g_mouse ? "mouse: EFI simple pointer protocol present\n"
-                                 : "mouse: no EFI simple pointer protocol\n");
     }
     return g_mouse != NULL;
 }

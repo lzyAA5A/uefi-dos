@@ -3216,3 +3216,37 @@ that SETUP builds.
   and 0.5 in Y -- correct in direction, still a bit slow;
 * the PIC is still not emulated (`in al,20h` always reads 0), so the Windows
   timer ISR's IRQ-in-service probe never sees its own bit.
+
+## Round 22 -- a ready-to-run tree with a working mouse
+
+Windows 1.x has no runtime mouse driver: SETUP links the chosen pointing device
+into WIN100.OVL, and a tree installed with "No pointing device" can never show a
+pointer. No WIN.INI key changes that -- a bus-mouse install and a no-mouse
+install differ only by the ``device=Epson FX-80,EPSON,LPT1:`` printer line. The
+two cures are (a) re-run SETUP and answer 2 "Microsoft Mouse (Bus/Serial)", or
+(b) use a tree that was installed that way.
+
+``_tmp\win\mk_busmouse_tree.py`` builds (b) from the 5.25" 1.01 SETUP output in
+``_tmp\win101f\c2`` (its install directory came out as ``WINDOWSH`` through a
+duplicated keystroke; it is renamed to ``WINDOWS``), adds the three "Set #5"
+fonts (COURD.FON / HELVD.FON / TMSRD.FON without which the desktop dies asking
+for "Insert COURD.FON disk in drive A:"), drops in the real 41,904-byte
+``MSDOS.EXE`` shell (SETUP only writes a one-byte placeholder), and writes
+CONFIG.SYS (``FILES=40`` / ``LASTDRIVE=D`` / ``EXECHIGH=ON``) plus AUTOEXEC.BAT
+(``SETVER WIN.COM 3.30`` / ``SETVER WIN100.BIN 3.30`` / ``SETVER MSDOS.EXE 3.30``
+/ ``CD \WINDOWS`` / ``WIN``). The tree's ``WIN100.OVL`` (214,080 B) contains the
+``Bus/Serial`` driver, so Windows probes the InPort card at 23Ch-23Fh, installs
+INT 0Dh and draws a pointer.
+
+``_tmp\win\mkmouse_img2.py <tree>`` images such a tree into
+``build\w101m.img`` with the current ``build\BOOT*.EFI``;
+``_tmp\win\qmp_mouse.py --wait=70 <tag>`` boots it under QEMU with ``-qmp``,
+injects relative motion plus clicks and screendumps
+``build\qmp_<tag>_a.ppm`` / ``_b.ppm``. Verified with the 1.1.13 binary: the
+pointer follows the injected motion (frame diff bbox x 10..739 y 176..507).
+
+Also fixed in this round: ``plat_mouse_present()`` in ``src/uefi/efi_plat.c``
+still printed ``mouse: EFI simple pointer protocol present`` to the serial
+console on every boot -- a leftover diagnostic from Round 21 that split the
+console mirror and could make the QEMU smoke test miss its
+``Hello UEFI-DOS!.`` marker. The print is gone.
