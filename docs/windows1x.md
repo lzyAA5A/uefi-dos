@@ -3782,3 +3782,32 @@ every graphics mode we take over, and `[show] n=` ticks every 1000 presented fra
 The lesson is the same one as Round 28's: the machine around the emulator has
 timers of its own.  A DOS session is not a boot option, and an emulator that runs
 for hours needs the platform's limits lifted explicitly -- the watchdog first.
+
+## Round 30 -- the mouse was too fast: half the default speed
+
+**Fixed (default changed).**  The report was "鼠标太快了" (the pointer overshoots
+every menu and button).  The cause is a measurement, not a bug: Windows 1.x's CGA
+driver moves the pointer **two** pixels per count the bus-mouse card reports
+(measured twice: 60 counts -> +122 px, 40 counts -> +80 px), and a PS/2 count is
+about 1/100 inch, so reporting one count per host count crossed the whole 640-pixel
+screen in roughly 320 counts -- 8 cm of hand travel, far faster than the InPort
+card plus Windows 1.x felt on real hardware.
+
+`bus_scale()` in `src/emu/emu.c` therefore now defaults to `sx = sy = 2`: the card
+reports one count per **two** host counts, i.e. about one CGA pixel of pointer
+travel per PS/2 count, with the remainder carried across packets so slow movement
+is not lost.  `CONFIG.SYS MOUSESPEED=n` keeps its meaning (host counts per reported
+count): `1` is the old twice-as-fast behaviour, `4` gives fine control for small
+buttons, and the host-only `UEFIDOS_MOUSE_SCALE=n` overrides it in the harness.
+
+Measured in QEMU with QMP injected motion (`_tmp\win\qmp_flow.py`, one rel unit =
+2 CGA px at the old default): after the change the same hand movement travels half
+as far, and the pointer still tracks 1:1 with the guest's own scaling at
+`MOUSESPEED=1`.
+
+**How to verify which build you run.**  The serial mirror prints
+`UEFI-DOS v1.1.21` at boot, and `VER` at the DOS prompt prints the same number.
+Closing a window crashing (`FatalExit code =  stack overflow`) was the Round 28
+bug -- it is fixed from 1.1.20 on, so a machine still showing that text is running
+1.1.19 or older.
+

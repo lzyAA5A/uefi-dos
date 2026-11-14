@@ -40,7 +40,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\run_win1x.ps1 -Installed F
 4. 指针速度：写进 `C:\CONFIG.SYS`
 
    ```ini
-   MOUSESPEED=2      ; 1 = 最快（约原来的两倍），2 = 默认，4 = 慢一半
+   MOUSESPEED=2      ; 1 = 快一倍，2 = 默认（约 1 个像素/计数），4 = 慢一半、更精细
    ```
 
    改完重新起机生效。老版本请在命令行临时用宿主环境变量 `UEFIDOS_MOUSE_SCALE`。
@@ -130,12 +130,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\run_win1x.ps1 -Installed F
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
+| 鼠标太快，点不准按钮 | 1.1.21 起默认速度已经减半。还想更慢就在 `CONFIG.SYS` 里写 `MOUSESPEED=4`（数字是“每上报 1 个计数需要几个宿主计数”，1 = 快一倍、2 = 默认、4 = 慢一半）；`MOUSESPEED=1` 回到 1.1.20 以前的手感 |
 | 指针完全不动 | 没点进 QEMU 窗口（鼠标没被抓）；或者这棵树是"没有指点设备"装出来的（见第 1 节） |
 | 双击没反应，只是把行选中了 | 1.1.17 及更早版本存在这个问题（模拟器的定时器按"指令数"而不是真实时间走，Windows 的 500ms 双击窗口在两次按键之间就过去了）。1.1.18 起已按真实时间校准，正常速度的双击即可 |
 | 双击很吃力 | 临时办法：`WINDOWS\WIN.INI` 的 `[windows]` 段把 `DoubleClickSpeed=500` 改大（例如 `2000`），或在 Control Panel 里调双击速度 |
 | 弹出 `Change Disk — Insert COURD.FON disk in drive A:` | `WINDOWS\` 缺字体，把 1.01 的 17 个 `.FON` 补齐 |
 | 一会儿自己退出，回到 `C:\WINDOWS>` 并打印 `FatalExit code = stack overflow` | 旧版本的 bug，**1.1.20 起已修复**。根因：模拟器把未提供的中断向量指到了 `F000:FFE0`（ROM 顶端），而这个值会被 DOS 写进 PSP 的 `000A` 处（INT 22h 终止地址），Windows 1.x 写回任务时把 `SS:000A` 当成堆栈上限来比，`0xFFE0` 一定“溢出”，于是关一个窗口就自杀。现在该 stub 位于 `F000:0100`。详情见 `docs/windows1x.md` 的 Round 28 |
 | 时间一长（几分钟）就自己退出，回到 `C:\WINDOWS>`，不打印 FatalExit | 旧版本的模拟器限制，**1.1.20 起已取消**：一个 DOS 程序最多只能执行 2 亿条指令（本来只是为了自动测试能脱离死循环），按实测速度大约 3 分钟就到上限，而 Windows 靠鼠标交互、不会给键盘事件，预算不会被重置。现在 UEFI 版的上限提到 200 亿条（约 5 小时），且鼠标活动也会重置计数。详情见 `docs/windows1x.md` 的 Round 29 |
+| 关掉一个窗口就退回 `C:\WINDOWS>`，还打印 `FatalExit code = stack overflow` | 旧版本的 bug，**1.1.20 起已修复**（细节见下面那条）。1.1.20/1.1.21 上关掉程序窗口（双击窗口左上角的小方框，或用系统菜单里的 `Close`）只会把窗口关掉、回到 Executive；只有关 **MS-DOS Executive 自己**才会弹 `This will end your Windows session.` 确认框，那是 1.0 的正常行为，点 `Cancel` 就留下 |
 | 玩了五分钟左右整个机器突然重启（又回到开机屏幕），也不打印 FatalExit | 固件的引导看门狗（boot watchdog，EDK2 默认 5 分钟）在到期后重置机器，**1.1.20 起已在启动时关掉**（`gBS->SetWatchdogTimer(0,0,0,NULL)`）。旧版本遇到这个现象就是这个原因 |
 | 画面上下有黑边 / 比例被压扁 | 1.1.11 起按 4:3 输出，不会再压缩；若仍有黑边说明 GOP 模式比 4:3 更宽，属正常留边 |
 | 提示 `Not enough memory to display entire directory` | 目录太大（文件太多）。先用 `View → Partial...` 过滤，或把不用的文件移出目录 |

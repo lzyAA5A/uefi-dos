@@ -145,14 +145,16 @@ static int bus_scale(int axis)
     static int sx = -1, sy = -1;
     if (sx < 0) {
         /* Windows 1.x moves the CGA pointer two pixels per reported count in
-         * both axes (measured: 60 counts -> +122 px, 40 counts -> +80 px), and a
-         * PS/2 count is about 1/100 inch of hand movement, so reporting every
-         * host count puts the whole 640-pixel screen about 3 inches (8 cm) of
-         * hand travel away -- a real mouse's feel.  CONFIG.SYS MOUSESPEED=n
-         * overrides it: n is the number of host counts per reported count, so 2
-         * is half as fast and needs finer hand control. */
-        sx = 1;
-        sy = 1;
+         * both axes (measured: 60 counts -> +122 px, 40 counts -> +80 px), so
+         * reporting every host count crosses the 640-pixel screen in ~320
+         * counts, which users report as far too fast (the pointer overshoots
+         * every menu and button).  The default therefore reports one count per
+         * TWO host counts: half speed, ~1 pixel of CGA travel per PS/2 count,
+         * which is close to what a real InPort card plus Windows 1.x felt like.
+         * CONFIG.SYS MOUSESPEED=n overrides it: n is the number of host counts
+         * per reported count (1 = fastest, 2 = default, 4 = fine control). */
+        sx = 2;
+        sy = 2;
         if (g_mouse_speed > 0) {
             sx = g_mouse_speed;
             sy = g_mouse_speed;

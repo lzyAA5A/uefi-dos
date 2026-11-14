@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.1.20** — 35 of 35 automated checks pass on the Windows host harness
+Version **1.1.21** — 35 of 35 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
 
 1.1.1 fixes the EXEC command-tail contract DOS has and UEFI-DOS did not:
@@ -44,7 +44,7 @@ missing.
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.1.20.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.20.zip)
+[**Download `UEFI-DOS-1.1.21.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.1.21.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -197,7 +197,7 @@ for existing 16-bit code in [`docs/migration.md`](docs/migration.md).
 | Reported version | `AH=30h` returns `AX=0x0004` (DOS 4.00); `VER` prints the same level. Set `UEFIDOS_DOSVER_*` in `src/uefidos_config.h` to claim another one |
 | Data structures | `AH=32h` synthesises a DPB per mounted drive in the reserved ROM window; `AH=52h` returns a list-of-lists whose `+2` points at that chain |
 | EXE image placement | `CONFIG.SYS` `EXECHIGH=ON` loads an EXE image flush against the top of the program's block instead of right after the PSP (what DOS itself does). `CONFIG` shows the current mode; the host harness has `UEFIDOS_EXEC_HIGH_IMAGE` |
-| Mouse speed | `CONFIG.SYS` `MOUSESPEED=n` sets how many host counts the emulated Microsoft bus mouse (the card Windows 1.x drives) needs per count it reports (default 1 = one count per host count, i.e. 2 CGA pixels; 2 is half as fast and gives finer control) |
+| Mouse speed | `CONFIG.SYS` `MOUSESPEED=n` sets how many host counts the emulated Microsoft bus mouse (the card Windows 1.x drives) needs per count it reports (default 2 = one reported count per two host counts, i.e. 1 CGA pixel of travel; 1 is twice as fast, 4 gives fine control) |
 | Error reporting | `AH=59h` maps the last failure to a class / suggested action / locus triple (`2`→class 8, `5`/`21h`→class 3, `27h`→class 11, `50h`→class 12, …) |
 | Extended open | `AH=6Ch` with the DOS action bits: open-existing / create-if-missing / replace-existing, returning handle in `AX` and `1`/`2`/`3` in `CX`; `AH=68h` commits |
 | Unique temp files | `AH=5Ah` appends `TMPxxxxx.TMP` to the given directory and retries on collision, so two programs never collide |
@@ -504,7 +504,7 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_TRACE_MOUSE=1` | one line per `INT 33h` call in `build/mouse_trace.txt` (`INT33 AX=.. BX=.. at CS:IP`) — the INT 21h trace cannot see this vector, so this is how "the guest never touches the mouse" becomes provable (Windows 1.01 with no pointing device selected makes zero calls) |
 | `UEFIDOS_TRACE_PORT=1` | every access to the emulated Microsoft bus-mouse card (`[port] out 23F = 91 at CS:IP ax=...` in `build/port_trace.txt`) - shows whether the guest actually loaded an InPort driver, and which registers it uses |
 | `UEFIDOS_MOUSE_WAIT=<ms>` | delay the first scripted mouse event (a 24 M-step run finishes in ~4 s, so a script that has to land after the desktop needs `UEFIDOS_MOUSE_WAIT=1000`) |
-| `UEFIDOS_MOUSE_SCALE=n` | host counts per count the emulated bus mouse reports (`n` or `nx,ny`; default 1 = about two CGA pixels per count) |
+| `UEFIDOS_MOUSE_SCALE=n` | host counts per count the emulated bus mouse reports (`n` or `nx,ny`; default 2 = about one CGA pixel per count) |
 | `UEFIDOS_TICK_STEPS=<n>` | force a fixed number of emulated instructions per BIOS timer tick. By default the period is adjusted continuously so the tick follows **wall-clock time** at 18.2 Hz (real hardware behaviour); the step trigger still decides *where* the interrupt lands. Lower it to stress a guest with more timer interrupts |
 | `UEFIDOS_TRACE_FIND=1` | one line per `INT 21h AH=4Eh/AH=4Fh` with the search state recovered from the DTA and the result (`[find] 4F pat=??????????? attr=30 dir=2 idx=155 rc=1 name=`) — the fastest way to tell "a program loops because the search never ends" from "because the search never started" |
 | `UEFIDOS_IRQ_OLDGUARD=1` | put back the old "any IRET ends the hardware interrupt" rule, so the frame-accurate guard can be compared with it (the old rule let a timer tick nest inside a guest handler that chains to the previous vector) |
