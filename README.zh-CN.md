@@ -12,8 +12,16 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.2.2** —— 36 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.2.3** —— 36 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
+
+1.2.3 增加了一套**性能基准**：同一批八种负载分别在 16 位 DOS 虚拟机、原生 32 位镜像
+和原生 64 位镜像里跑完全相同的字节数与校验和，从而直接比较三种执行方式的代价：
+吃 CPU 的 DOS 代码比原生慢 180–1200 倍，一次 DOS API 调用约 2 微秒而原生约 1 纳秒；
+而字符输出、文件读写、目录检索两边已经一样快，因为瓶颈在平台而不是客户机。
+详见 [docs/benchmark.md](docs/benchmark.md) 与 `bench/`。同时把逐条指令环改为**宿主也默认关闭**
+（`CONFIG.SYS` 写 `RINGLOG=ON`，或用 `UEFIDOS_RINGLOG=1` 环境变量打开），
+并让 `INT 21h AH=2Ch` 返回真实的百分秒（原来恒为 0）。
 
 1.2.2 是一次**性能**发行，针对 Windows 1.x 发卡的三处原因：
 
@@ -68,7 +76,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.2.2.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.2.zip)
+[**下载 `UEFI-DOS-1.2.3.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.3.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -210,7 +218,7 @@ seek 的 whence 与 INT 21h 相同，`find_first`/`find_next` 回填的字段与
 | 数据结构 | `AH=32h` 在保留 ROM 窗口里为每个已挂载盘生成一个 DPB；`AH=52h` 返回 list of lists，其 `+2` 指向该 DPB 链 |
 | EXE 映像装载位置 | `CONFIG.SYS` 写 `EXECHIGH=ON` 时，EXE 映像贴着程序块的**顶端**装载（不再是 PSP 之后的默认位置）；`CONFIG` 显示当前模式，宿主测试器用 `UEFIDOS_EXEC_HIGH_IMAGE` |
 | 指令速率日志 | `CONFIG.SYS` 写 `PERFLOG=ON`，每约 200 万条客户机指令往串口打一行 `[perf] steps=.. ms=.. ips=.. frames=..`：把「这个程序慢」拆成模拟器成本（`ips`）和程序自己画图的成本（`frames`） |
-| 致命现场指令环 | `CONFIG.SYS` 写 `RINGLOG=ON` 保留致命退出（FatalExit、除零、死锁）时打印的逐条指令寄存器环（每条指令 13 个寄存器）。UEFI 下默认关闭，宿主测试器始终开启 |
+| 致命现场指令环 | `CONFIG.SYS` 写 `RINGLOG=ON` 保留致命退出（FatalExit、除零、死锁）时打印的逐条指令寄存器环（每条指令 13 个寄存器）。UEFI 与宿主测试器都默认关闭；宿主上可用环境变量 `UEFIDOS_RINGLOG=1` 临时打开 |
 | 鼠标速度 | `CONFIG.SYS` 写 `MOUSESPEED=n` 设定模拟的 Microsoft 总线鼠标（Windows 1.x 用的那块卡）每上报 1 个计数需要多少个宿主计数：默认 2（两个宿主计数上报一次，即约 1 个 CGA 像素的位移），写 1 快一倍、写 4 更精细 |
 | 错误上报 | `AH=59h` 把上次失败映射成 class / 建议动作 / locus 三元组（`2`→class 8、`5`/`21h`→class 3、`27h`→class 11、`50h`→class 12 …） |
 | 扩展打开 | `AH=6Ch` 支持 DOS 的 action 位：打开已有 / 不存在则创建 / 覆盖已有，`AX` 返回句柄、`CX` 返回 `1`/`2`/`3`；`AH=68h` 提交 |
@@ -507,6 +515,29 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_EXEC_HIGH=1` | 把 `EXEC` 的子进程贴着常规内存顶端装载（而不是紧跟调用者之后），用于试探对装载地址敏感的程序 |
 
 程序撞到指令上限时，最后 64 步会 dump 到 `build/limit_dump.txt`。
+
+## 性能基准：原生 64 位 API vs 原生 32 位 API vs 16 位 DOS 虚拟机
+
+`bench/` 用同一批八种负载（整数运算、填充、拷贝、求和、DOS API 调用、字符输出、
+文件读写、目录检索）在三个执行世界里跑完全相同的字节数与校验和，
+方法和注意事项见 [`docs/benchmark.md`](docs/benchmark.md)。同机三次取中位数：
+
+| 负载 | 16 位 DOS 虚拟机 | 原生 64 位 | 倍数 |
+| --- | ---: | ---: | ---: |
+| `alu`（16 位 LCG） | 1,424.8 纳秒/步 | 4.0 纳秒/步 | **358×** |
+| `fill`（6 MB `STOSB`） | 7.6 MB/s | 5,153 MB/s | **675×** |
+| `copy`（2.3 MB 拷贝） | 3.9 MB/s | 4,653 MB/s | **1,192×** |
+| `scan`（3 MB 求和） | 3.4 MB/s | 3,743 MB/s | **1,111×** |
+| `api`（`INT 21h` vs SDK） | 2,095 纳秒/次 | 1.1 纳秒/次 | **1,837×** |
+| `text`（314 万字符） | 209.5 纳秒/字符 | 21.2 纳秒/字符 | **9.9×** |
+| `file`（132 KB 写+读） | 不足一个 55 ms 时钟滴答 | 110 MB/s | — |
+| `find`（1200 个目录项） | 不足一个 55 ms 时钟滴答 | 4,803 纳秒/项 | — |
+
+在 QEMU + OVMF + WHPX 下（IA32 镜像，PE32 与 DOS 虚拟机同机）：`alu` 178×、
+`fill` 745×、`copy` 581×、`scan` 1,066×、`api` 199×，而 **`text` 1.0×、
+`file` 1.2×、`find` 1.0×** —— 字符输出、磁盘读写和目录检索两边一样慢，
+因为时间花在平台上（串口镜像、EFI 块设备读写），不是花在客户机上。
+一句话：吃 CPU 的 DOS 程序为解释器付 200–1200 倍代价，吃 I/O 的程序几乎不用付。
 
 ## 与真实 DOS 软件的兼容性
 

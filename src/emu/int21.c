@@ -827,10 +827,12 @@ void int21_handler(Emu *e)
     }
     case 0x2B: set_ok(e); return;
     case 0x2C: {
-        int h, mi, s;
-        plat_get_time(&h, &mi, &s);
+        int h, mi, s, ms;
+        plat_get_time_ms(&h, &mi, &s, &ms);
         e->cx = (u16)((h << 8) | mi);
-        e->dx = (u16)((s << 8));
+        /* DH = seconds, DL = hundredths; real DOS reports 0..99 here and
+         * programs that need better than one-second resolution read it. */
+        e->dx = (u16)((s << 8) | (u8)(ms / 10));
         set_ok(e);
         return;
     }

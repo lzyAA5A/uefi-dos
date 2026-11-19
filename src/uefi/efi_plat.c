@@ -478,13 +478,21 @@ void plat_get_date(int *y, int *m, int *d)
         *y = t.Year; *m = t.Month; *d = t.Day;
     }
 }
-void plat_get_time(int *h, int *mi, int *s)
+void plat_get_time_ms(int *h, int *mi, int *s, int *ms)
 {
     EFI_TIME_LOCAL t;
     *h = 0; *mi = 0; *s = 0;
+    if (ms) *ms = 0;
     if (gRT && gRT->GetTime && gRT->GetTime(&t, NULL) == EFI_SUCCESS) {
         *h = t.Hour; *mi = t.Minute; *s = t.Second;
+        if (ms) *ms = (int)(t.Nanosecond / 1000000u);
     }
+}
+
+void plat_get_time(int *h, int *mi, int *s)
+{
+    int ms;
+    plat_get_time_ms(h, mi, s, &ms);
 }
 
 void *plat_alloc(u32 size)

@@ -331,11 +331,18 @@ void plat_get_date(int *y, int *m, int *d)
     GetLocalTime(&st);
     *y = st.wYear; *m = st.wMonth; *d = st.wDay;
 }
-void plat_get_time(int *h, int *mi, int *s)
+void plat_get_time_ms(int *h, int *mi, int *s, int *ms)
 {
     SYSTEMTIME st;
     GetLocalTime(&st);
     *h = st.wHour; *mi = st.wMinute; *s = st.wSecond;
+    if (ms) *ms = (int)st.wMilliseconds;
+}
+
+void plat_get_time(int *h, int *mi, int *s)
+{
+    int ms;
+    plat_get_time_ms(h, mi, s, &ms);
 }
 
 void *plat_alloc(u32 size) { return malloc(size); }

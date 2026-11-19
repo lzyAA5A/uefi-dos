@@ -13,8 +13,19 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.2.2** — 36 of 36 automated checks pass on the Windows host harness
+Version **1.2.3** — 36 of 36 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
+
+1.2.3 adds a **benchmark** that runs the same eight workloads in the 16-bit
+DOS VM, in a native 32-bit image and in a native 64-bit image, with identical
+byte counts and checksums, so the cost of each execution world can be compared
+directly: CPU-bound DOS code is 180x-1,200x slower than native, a DOS API call
+costs about 2 us against 1 ns, while console output, file I/O and directory
+scans are already at native speed because the platform, not the guest, is the
+bottleneck. See [docs/benchmark.md](docs/benchmark.md) and `bench/`. It also
+made the per-instruction step ring opt-in on the host as well (`RINGLOG=ON` in
+`CONFIG.SYS`, or `UEFIDOS_RINGLOG=1`), and `INT 21h AH=2Ch` now reports real
+hundredths instead of zero.
 
 1.2.2 is a **performance** release for Windows 1.x, which felt stiff for
 three separate reasons:
@@ -95,7 +106,7 @@ follows).
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.2.2.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.2.zip)
+[**Download `UEFI-DOS-1.2.3.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.3.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -249,7 +260,7 @@ for existing 16-bit code in [`docs/migration.md`](docs/migration.md).
 | Data structures | `AH=32h` synthesises a DPB per mounted drive in the reserved ROM window; `AH=52h` returns a list-of-lists whose `+2` points at that chain |
 | EXE image placement | `CONFIG.SYS` `EXECHIGH=ON` loads an EXE image flush against the top of the program's block instead of right after the PSP (what DOS itself does). `CONFIG` shows the current mode; the host harness has `UEFIDOS_EXEC_HIGH_IMAGE` |
 | Instruction-rate log | `CONFIG.SYS` `PERFLOG=ON` prints `[perf] steps=.. ms=.. ips=.. frames=..` to the serial port every ~2M guest instructions. It splits "this program is slow" into emulator cost (`ips`) and the program's own drawing (`frames`) |
-| Fatal-trace ring | `CONFIG.SYS` `RINGLOG=ON` keeps the per-instruction register ring a fatal trace prints (13 registers per instruction). It is off under UEFI by default and always on in the host harness |
+| Fatal-trace ring | `CONFIG.SYS` `RINGLOG=ON` keeps the per-instruction register ring a fatal trace prints (13 registers per instruction). Off by default in both the UEFI build and the host harness; on the host, `UEFIDOS_RINGLOG=1` turns it on without touching the image |
 | Mouse speed | `CONFIG.SYS` `MOUSESPEED=n` sets how many host counts the emulated Microsoft bus mouse (the card Windows 1.x drives) needs per count it reports (default 2 = one reported count per two host counts, i.e. 1 CGA pixel of travel; 1 is twice as fast, 4 gives fine control) |
 | Error reporting | `AH=59h` maps the last failure to a class / suggested action / locus triple (`2`→class 8, `5`/`21h`→class 3, `27h`→class 11, `50h`→class 12, …) |
 | Extended open | `AH=6Ch` with the DOS action bits: open-existing / create-if-missing / replace-existing, returning handle in `AX` and `1`/`2`/`3` in `CX`; `AH=68h` commits |
@@ -571,6 +582,32 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 
 The last 64 steps are dumped to `build/limit_dump.txt` when a program hits the
 instruction limit.
+
+## Benchmark: native 64-bit vs native 32-bit vs the 16-bit DOS VM
+
+`bench/` runs the same eight workloads (ALU, fill, copy, scan, DOS-API calls,
+console output, file I/O, directory find) in all three execution worlds, with
+identical byte counts and checksums, and [`docs/benchmark.md`](docs/benchmark.md)
+explains the method and the caveats. Medians of three runs, same machine:
+
+| workload | 16-bit DOS VM | native 64-bit | ratio |
+| --- | ---: | ---: | ---: |
+| `alu` (16-bit LCG) | 1,424.8 ns/step | 4.0 ns/step | **358×** |
+| `fill` (6 MB of `STOSB`) | 7.6 MB/s | 5,153 MB/s | **675×** |
+| `copy` (2.3 MB copied) | 3.9 MB/s | 4,653 MB/s | **1,192×** |
+| `scan` (3 MB summed) | 3.4 MB/s | 3,743 MB/s | **1,111×** |
+| `api` (`INT 21h` vs SDK) | 2,095 ns/call | 1.1 ns/call | **1,837×** |
+| `text` (3.1M chars) | 209.5 ns/char | 21.2 ns/char | **9.9×** |
+| `file` (132 KB write+read) | below one 55 ms tick | 110 MB/s | — |
+| `find` (1200 entries) | below one 55 ms tick | 4,803 ns/entry | — |
+
+Under QEMU + OVMF with WHPX (the IA32 build, so PE32 and the DOS VM share the
+machine): `alu` 178×, `fill` 745×, `copy` 581×, `scan` 1,066×, `api` 199×, and
+then **`text` 1.0×, `file` 1.2×, `find` 1.0×** — console output, disk access and
+directory scans cost the same in both worlds because the time goes into the
+platform (serial mirror, EFI block I/O), not into the guest. In short: a
+CPU-bound DOS program pays 200x-1200x for the interpreter, an I/O-bound one
+pays nothing.
 
 ## Compatibility with real DOS software
 

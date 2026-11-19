@@ -941,12 +941,20 @@ static u64 g_flush_count = 0;
  * emulator or because of its own drawing. */
 int g_perf_log = 0;
 /* The step ring is a 13-register record per instruction: invaluable for a
- * fatal trace, but it is not free.  On by default where it is used (the host
- * harness), opt-in under UEFI with CONFIG.SYS RINGLOG=ON. */
-#ifdef UEFIDOS_HOST
-int g_ring_trace = 1;
-#else
+ * post-mortem trace, but it is not free, so it is off unless asked for:
+ * CONFIG.SYS `RINGLOG=ON`, or -- on the host harness only -- the environment
+ * variable UEFIDOS_RINGLOG=1 (see ring_trace_env() below). */
 int g_ring_trace = 0;
+#ifdef UEFIDOS_HOST
+static int ring_trace_env(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *v = getenv("UEFIDOS_RINGLOG");
+        cached = (v && (v[0] == '1' || v[0] == 'y' || v[0] == 'Y' || v[0] == 'o' || v[0] == 'O')) ? 1 : 0;
+    }
+    return cached;
+}
 #endif
 static u32 g_fw_pump_ms = 0;    /* last plat_pump_events() call (firmware input) */
 
@@ -4443,6 +4451,9 @@ int emu_run(Emu *e)
     }
 #endif
     u32 input_seen = g_input_seq;
+#ifdef UEFIDOS_HOST
+    if (!g_ring_trace && ring_trace_env()) g_ring_trace = 1;
+#endif
     while (!e->halted && !g_plat_shutdown_requested) {
         trace_step(e, steps);
         if (g_ring_trace) ring_note(e);

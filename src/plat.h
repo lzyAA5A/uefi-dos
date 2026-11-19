@@ -46,6 +46,9 @@ void plat_sleep_ms(u32 ms);
 void plat_pump_events(void);
 void plat_get_date(int *y, int *m, int *d);
 void plat_get_time(int *h, int *mi, int *s);
+/* Same clock as plat_get_time, plus the sub-second part in milliseconds, so a
+ * caller can build a monotonic timestamp (INT 21h AH=2Ch needs hundredths). */
+void plat_get_time_ms(int *h, int *mi, int *s, int *ms);
 u64  plat_timer_units_per_ms(void); /* 0 = not calibrated yet */
 int  plat_abi_selftest(u32 *year_out); /* 0 = ABI/services OK */
 int  plat_boot_blockdev(blockdev *bd);  /* block device holding the OS image */
