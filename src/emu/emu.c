@@ -3942,6 +3942,24 @@ static void halt_hex4(u16 v)
 void emu_halt_note(Emu *e, const char *why)
 {
     if (g_halt_noted) return;
+
+#ifdef UEFIDOS_HOST
+    /* UEFIDOS_DUMP_HALT=1: snapshot the first megabyte of guest memory at the
+     * moment the program stops, so the task list, the kernel cells and the SDA
+     * can be read with the analysis scripts exactly as at UEFIDOS_DUMP_AT. */
+    {
+        static int dump_halt = -1;
+        if (dump_halt < 0) dump_halt = getenv("UEFIDOS_DUMP_HALT") ? 1 : 0;
+        if (dump_halt) {
+            FILE *df = fopen("build/mem_halt.bin", "wb");
+            if (df) {
+                size_t n = e->ram_size < 0x100000u ? (size_t)e->ram_size : 0x100000u;
+                fwrite(e->mem, 1, n, df);
+                fclose(df);
+            }
+        }
+    }
+#endif
     g_halt_noted = 1;
     plat_puts("\n[halt] ");
     plat_puts(why);
@@ -4179,7 +4197,9 @@ static void trace_step(Emu *e, u64 steps)
             FILE *df = fopen(q, "wb");
             at_done = 1;
             if (df) {
-                size_t n = e->ram_size < 0xA0000u ? (size_t)e->ram_size : 0xA0000u;
+                /* 1 MB, not 640 KB: the kernel keeps cells at F000:DCxx and the
+                   real-DOS reference dumps cover the whole first megabyte. */
+                size_t n = e->ram_size < 0x100000u ? (size_t)e->ram_size : 0x100000u;
                 fwrite(e->mem, 1, n, df);
                 fclose(df);
                 fprintf(stderr, "[dump-at] %04X:%04X step %llu -> %s  SP=%04X:%04X DS=%04X ES=%04X SS=%04X\n",
@@ -4641,7 +4661,9 @@ int emu_run(Emu *e)
         if (dm && *dm) {
             FILE *f = fopen(dm, "wb");
             if (f) {
-                size_t n = e->ram_size < 0xA0000u ? (size_t)e->ram_size : 0xA0000u;
+                /* 1 MB, not 640 KB: the kernel keeps cells at F000:DCxx and the
+                   real-DOS reference dumps cover the whole first megabyte. */
+                size_t n = e->ram_size < 0x100000u ? (size_t)e->ram_size : 0x100000u;
                 fwrite(e->mem, 1, n, f);
                 fclose(f);
             }

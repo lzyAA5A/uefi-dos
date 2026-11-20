@@ -12,8 +12,17 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.2.3** —— 36 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.3.0** —— 36 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
+
+1.3.0 修掉了 Windows 1.01 会话里的最后一个缺陷：**关闭应用窗口会把整个
+Windows 会话结束掉**（内核不打印任何东西、关掉 DOS 句柄，然后回到 `C:\WINDOWS>`）。
+窗口管理本身没问题——是 DOS 告诉内核“整个进程要终止了”。三处 DOS 应答必须变成真正的
+实现：`INT 21h AH=55h`（创建子 PSP）原来是个空壳，于是每个 Windows 任务记录都是未初始化
+的内存；`AH=50h` 没有同步可交换数据区里的当前 PSP，而 Windows 1.x 正是从那里读取它；
+`AH=4Ch` 直接停机，而不是跳到进程的终止地址继续执行。现在关闭计算器会回到带完整目录
+列表的 MS-DOS Executive。细节见 [docs/windows1x.md](docs/windows1x.md)（第 34 轮），
+新增主机调试开关 `UEFIDOS_TRACE_TERM`、`UEFIDOS_TRACE_PSP55`、`UEFIDOS_DUMP_HALT`。
 
 1.2.3 增加了一套**性能基准**：同一批八种负载分别在 16 位 DOS 虚拟机、原生 32 位镜像
 和原生 64 位镜像里跑完全相同的字节数与校验和，从而直接比较三种执行方式的代价：
@@ -76,7 +85,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.2.3.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.3.zip)
+[**下载 `UEFI-DOS-1.3.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.3.0.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
@@ -512,6 +521,9 @@ build\hosttest.exe --fat16    build\fat16_2g.img big   # 1.9 GB 卷 + 32 MB 文�
 | `UEFIDOS_TRACE_MEM=1` | 在 `INT 21h AH=4Ah` 之后、以及每次 `AH=48h` 失败时打印 DOS 内存 arena（MCB 链：段址、`M`/`Z`、owner PSP、大小、数据范围）——查看程序“先缩小再探测”的内存测算是否算对，这是最快的手段 |
 | `UEFIDOS_EXEC_HIGH_IMAGE=1` | 实验开关（非默认）：把 EXE 镜像装到程序内存块的顶部、PSP 留在底部——这正是参考机 MS-DOS 5.00 跑 Windows 1.01 内核时的布局（默认关闭，因为程序普遍把 `PSP+0x10` 当作自己的段） |
 | `UEFIDOS_TRACE_DIV=1` | `DIV`/`IDIV` 因商溢出陷入时打印 `CS:IP` 和各寄存器 |
+| `UEFIDOS_TRACE_TERM=1` | 仅主机：每次 `INT 21h AH=4Ch` 打印调用它的 PSP、终止地址（`PSP:000Ah`）与父 PSP——用来区分“某个任务结束”和“整个会话结束” |
+| `UEFIDOS_TRACE_PSP55=1` | 仅主机：每次 `INT 21h AH=55h`（创建子 PSP）打印当前 PSP、`DX`（新 PSP 段）与 `SI`（块大小，段落） |
+| `UEFIDOS_DUMP_HALT=1` | 仅主机：程序停机时把前 1 MB 客户机内存写到 `build/mem_halt.bin`，便于事后读取任务表与内核单元 |
 | `UEFIDOS_EXEC_HIGH=1` | 把 `EXEC` 的子进程贴着常规内存顶端装载（而不是紧跟调用者之后），用于试探对装载地址敏感的程序 |
 
 程序撞到指令上限时，最后 64 步会 dump 到 `build/limit_dump.txt`。

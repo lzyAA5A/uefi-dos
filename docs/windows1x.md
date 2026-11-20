@@ -4014,3 +4014,67 @@ scrolling and full-screen fills), (b) the instruction decoder re-fetches and
 re-decodes every byte (no decode cache), and (c) `emu_ww`/`emu_wd` translate the
 address once per byte instead of once per word. None of them is worth the risk
 before the next real-compatibility bug.
+
+## Round 34 -- closing an application no longer ends the Windows session (1.3.0)
+
+Closing a window in Windows 1.01 used to leave the kernel's orderly "end session"
+path: `Close` on the Calculator's control menu printed nothing, closed the DOS
+handles and returned to `C:\WINDOWS>`.  The window manager itself was fine -- the
+kernel was told to end the session, and it had been told by DOS.
+
+Three gaps in our DOS answers combined into that, and each one is now a real
+implementation instead of a stub:
+
+1. **INT 21h AH=55h (create a child PSP) was a no-op.**  Windows 1.x gives every
+   Windows application its own PSP through this call: the segment in `DX`, the
+   block size in `SI`, and the parent is whatever PSP is current.  `[psp55]`
+   tracing showed the kernel asking for PSPs at 0x2999 and 0x2A2F with
+   256-paragraph blocks while the call did nothing, so its task records were
+   uninitialised memory (`PSP:0x00` was 0, not the `CD 20` stub, and the link at
+   `PSP:0x42` pointed into the command tail).  Our AH=55h now lays the block out
+   the way DOS does: `INT 20h` at +0, block top at +2, the parent's
+   terminate/^C/critical-error addresses at +0x0A..+0x14, the parent at +0x16,
+   the parent's 20-byte job-file table at +0x18, the parent's environment at
+   +0x2C and the `CD 21 CB` far-call entry at +0x50.
+
+2. **AH=50h did not update the current PSP in the SDA.**  Windows 1.x does not
+   ask AH=51h: it finds DOS's swappable data area once (AH=5Dh) and reads
+   `SDA+10h` directly -- that cell is how its INT 21h front end decides which
+   task a terminate belongs to.  Our SDA lives at `F000:DC00` and the cell
+   therefore stayed at the session's PSP (`0D8A`).  `[term]` showed it:
+
+       [term] psp=0D8A exit=2F int22=F000:0100 parent=0D00     (before)
+       [term] psp=2A2F exit=2F int22=0DBB:3F1F parent=0D8A     (after)
+
+   The second line is the healthy state: the PSP belongs to the application's
+   task and its terminate address points back into the kernel (`0DBB:3F1F`).
+
+3. **AH=4Ch halted the machine.**  With a task PSP in place the kernel points
+   the task's `PSP:0x0A` terminate address at its own resume stub and lets the
+   application exit with `INT 21h AH=4Ch` -- real DOS closes the process's files,
+   restores the parent PSP and *continues at that address*.  We marked the whole
+   emulator halted, so the kernel never got control back.  AH=4Ch now jumps to
+   the terminate address (exit code in `AX`) unless it is our own ROM stub.
+
+Evidence for the mechanism, using the real MS-DOS 5.00 reference dump
+(`refmm_rsm0.bin`, full 1 MB, desktop up, kernel at CS=0FED):
+
+* the reference task list head is a PSP (`cs:[0012]` -> 0x2BA7, first word
+  `CD 20`, link at +0x42 to 0x0FBB), matching what AH=55h must have created;
+* the kernel stub scans DOS's internals for the signature at kernel offset
+  0x6E61 (`C8 A6 C8 A5 C8 A5 C8 A5 1F`, then 10 more bytes one byte later) and
+  that exact pattern is present in the reference at linear 0x1E74;
+* `UEFIDOS_TRACE_TERM=1`, `UEFIDOS_TRACE_PSP55=1` and `UEFIDOS_DUMP_HALT=1`
+  were added for this round and are documented in both READMEs.
+
+Verification:
+
+* host harness (image built from `F:\1231\_tmp\win\w101calc`, commands
+  `WIN CALC.EXE`, mouse script that opens the Calculator's control menu and
+  picks `Close`): before the fix `[halt] AH=4Ch terminate` ended the run, after
+  it the run continues to the instruction budget with the kernel alive;
+* QEMU/OVMF (`_tmp\win\qmp_close.py fixc1 --wait=95`): double-click CALC.EXE in
+  the Executive's listing, then `Close` from the window's control menu -- the
+  Executive comes back **with its full listing** (`build\fixc1_after.png`,
+  `build\fixc1_final.png`) instead of `C:\WINDOWS>`;
+* `run_tests.ps1` 36 passed / 0 failed.

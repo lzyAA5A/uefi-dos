@@ -690,6 +690,19 @@ int dos_open(const char *path, int mode, int *out)
     return dos_open_ex(path, (mode != 0) ? 2 : 0, DOS_SHARE_COMPAT, out);
 }
 
+#ifdef UEFIDOS_HOST
+#include <stdlib.h>
+/* UEFIDOS_TRACE_OPEN=1 (host only): name every file that opened successfully.
+ * Windows 1.x pulls its shell/kernel modules through this path, so this trace is
+ * how you tell which modules a session actually loaded from disk. */
+static int trace_open(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("UEFIDOS_TRACE_OPEN") ? 1 : 0;
+    return on;
+}
+#endif
+
 int dos_open_ex(const char *path, int open_mode, int share, int *out)
 {
     int drive, rc;
@@ -736,6 +749,13 @@ int dos_open_ex(const char *path, int open_mode, int share, int *out)
     H->psp = g_dos.psp_seg;
     H->lock_count = 0;
     *out = h;
+#ifdef UEFIDOS_HOST
+    if (trace_open()) {
+        plat_puts("[open] ");
+        plat_puts(abs);
+        plat_puts("\n");
+    }
+#endif
     return FAT_OK;
 }
 

@@ -652,6 +652,42 @@ static int fatal_probe(Emu *e, u16 seg, u16 off, u32 left)
     return 1;
 }
 
+/* AH=55h: lay out a child PSP at `np` exactly the way DOS does when it creates
+ * a process, copying the per-process vectors and the job-file table from the
+ * parent.  Windows 1.x uses this to give every Windows application its own PSP,
+ * which is what lets an application's INT 21h AH=4Ch terminate just that task. */
+static void build_child_psp(Emu *e, u16 np, u16 parent, u16 top)
+{
+    /* deterministic block: no leftovers from whatever ran here before */
+    for (int i = 0; i < 0x80; i++) emu_wb(e, np, (u16)i, 0);
+
+    emu_ww(e, np, 0x00, 0x20CD);            /* INT 20h (terminate) */
+    emu_ww(e, np, 0x02, top);               /* top of the memory block */
+    emu_wb(e, np, 0x05, 0x9A);              /* CALL FAR <CP/M entry> */
+    emu_ww(e, np, 0x06, 0xFFD0);           /* MAGIC_SEG:FFD0 = INT 20h stub */
+    emu_ww(e, np, 0x08, MAGIC_SEG);
+    /* terminate / Ctrl-C / critical-error addresses are inherited from the
+     * parent PSP, which is what DOS does at process creation. */
+    for (int i = 0; i < 3; i++)
+        for (int k = 0; k < 4; k++)
+            emu_wb(e, np, (u16)(0x0A + i * 4 + k),
+                   emu_rb(e, parent ? parent : np, (u16)(0x0A + i * 4 + k)));
+    emu_ww(e, np, 0x16, parent);            /* parent PSP */
+    for (int i = 0; i < 20; i++)            /* job-file table, copied from parent */
+        emu_wb(e, np, (u16)(0x18 + i),
+               parent ? emu_rb(e, parent, (u16)(0x18 + i)) : (u8)(i < 5 ? i : 0xFF));
+    emu_ww(e, np, 0x2C, parent ? emu_rw(e, parent, 0x2C) : 0);  /* environment */
+    emu_ww(e, np, 0x32, 20);                /* size of the job-file table */
+    emu_ww(e, np, 0x34, 0x18);              /* -> job-file table */
+    emu_ww(e, np, 0x36, np);
+    emu_ww(e, np, 0x38, parent);            /* previous PSP */
+    emu_wb(e, np, 0x50, 0xCD);              /* DOS 4+ "call DOS" entry */
+    emu_wb(e, np, 0x51, 0x21);
+    emu_wb(e, np, 0x52, 0xCB);
+    emu_wb(e, np, 0x80, 0x00);              /* empty command tail */
+    emu_wb(e, np, 0x81, 0x0D);
+}
+
 void int21_handler(Emu *e)
 {
     trace_call(e, 0x21);
@@ -1316,6 +1352,42 @@ void int21_handler(Emu *e)
         return;
     }
     case 0x4C:
+#ifdef UEFIDOS_HOST
+        /* TERM_DIAG: where would real DOS continue after this terminate? */
+        if (getenv("UEFIDOS_TRACE_TERM")) {
+            u16 tp = e->psp_seg;
+            fprintf(stderr, "[term] psp=%04X exit=%02X int22=%04X:%04X parent=%04X "
+                    "jft=%04X:%04X caller=%04X:%04X\n",
+                    (unsigned)tp, (unsigned)(e->ax & 0xFF),
+                    (unsigned)emu_rw(e, tp, 0x0C), (unsigned)emu_rw(e, tp, 0x0A),
+                    (unsigned)emu_rw(e, tp, 0x16),
+                    (unsigned)emu_rw(e, tp, 0x36), (unsigned)emu_rw(e, tp, 0x34),
+                    (unsigned)g_i21_caller_cs, (unsigned)g_i21_caller_ip);
+        }
+#endif
+        /* The terminate address lives in the PSP at 000Ah.  When a program has
+         * pointed it somewhere other than our own return stub, DOS's job is to
+         * hand control there instead of ending the machine: that is exactly how
+         * Windows 1.x ends one application -- it leaves the address of its own
+         * resume stub in the task's PSP and exits through AH=4Ch, so this call
+         * is a "the window is closing" notification rather than a shutdown. */
+        {
+            u16 t_off = emu_rw(e, e->psp_seg, 0x0A);
+            u16 t_seg = emu_rw(e, e->psp_seg, 0x0C);
+            if (t_seg != MAGIC_SEG && t_seg != 0) {
+                u16 parent = emu_rw(e, e->psp_seg, 0x16);
+                u8 code = (u8)(e->ax & 0xFF);
+                if (parent) {
+                    e->psp_seg = parent;
+                    g_dos.psp_seg = parent;
+                    mag_ww(e, (u16)(DOS_SDA_OFF + 0x10), parent);
+                }
+                e->ax = (u16)((e->ax & 0xFF00) | code);
+                e->cs = t_seg;
+                e->ip = t_off;
+                return;
+            }
+        }
         /* A program that terminates is about to leave the emulator, and a
          * Windows 1.x session that ends without its FatalExit text gives no
          * other clue; print the last steps so such an exit can be read off the
@@ -1373,8 +1445,40 @@ void int21_handler(Emu *e)
          * the emulator and the DOS kernel copies have to move together. */
         e->psp_seg = e->bx;
         g_dos.psp_seg = e->bx;
+        /* DOS keeps its own copy of the current PSP in the swappable data area,
+         * and Windows 1.x reads that cell directly instead of asking AH=51h: it
+         * is how its INT 21h front end decides which task an AH=4Ch terminate
+         * belongs to.  A stale cell here made "Close" on a Windows application
+         * end the whole session instead of just that window. */
+        mag_ww(e, (u16)(DOS_SDA_OFF + 0x10), e->bx);
         set_ok(e);
         return;
+    case 0x55: {
+        /* AH=55h: create a child PSP.  DX = segment for the new PSP, SI = size
+         * of its memory block in paragraphs, parent = the PSP that is current
+         * now.  Windows 1.x builds every Windows task with this call. */
+#ifdef UEFIDOS_HOST
+        if (getenv("UEFIDOS_TRACE_PSP55")) {
+            u16 np0 = e->psp_seg;
+            fprintf(stderr, "[psp55] cur=%04X dx=%04X si=%04X psp22=%04X:%04X psp16=%04X\n",
+                    (unsigned)np0, (unsigned)e->dx, (unsigned)e->si,
+                    (unsigned)emu_rw(e, np0, 0x0C), (unsigned)emu_rw(e, np0, 0x0A),
+                    (unsigned)emu_rw(e, np0, 0x16));
+        }
+#endif
+        {
+            u16 np = e->dx;
+            u16 paras = e->si ? e->si : 0x0100;
+            u16 parent = e->psp_seg ? e->psp_seg : np;
+            if (np < 0x10 || (u32)np + paras > (u32)(g_dos.mem_top ? g_dos.mem_top : 0xA000)) {
+                set_err(e, 8);              /* insufficient memory */
+                return;
+            }
+            build_child_psp(e, np, parent, (u16)(np + paras));
+        }
+        set_ok(e);
+        return;
+    }
     case 0x51: case 0x62: e->bx = e->psp_seg; set_ok(e); return;
     case 0x56: {
         char oldp[DOS_MAX_PATH], newp[DOS_MAX_PATH];

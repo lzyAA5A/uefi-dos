@@ -13,8 +13,21 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.2.3** — 36 of 36 automated checks pass on the Windows host harness
+Version **1.3.0** — 36 of 36 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
+
+1.3.0 fixes the last Windows 1.01 defect of the session: **closing an
+application window used to end the whole Windows session** (the kernel printed
+nothing, closed its DOS handles and you were back at `C:\WINDOWS>`).  The window
+manager was fine -- DOS had told the kernel the whole process was terminating.
+Three DOS answers had to become real implementations: `INT 21h AH=55h` (create a
+child PSP) was a no-op, so every Windows task record was uninitialised memory;
+`AH=50h` did not update the current PSP inside the swappable data area, which is
+exactly where Windows 1.x reads it from; and `AH=4Ch` halted the machine instead
+of continuing at the process's terminate address.  Closing the Calculator now
+returns to the MS-DOS Executive with its full listing.  See
+[docs/windows1x.md](docs/windows1x.md) (Round 34) for the traces, and the new
+host knobs `UEFIDOS_TRACE_TERM`, `UEFIDOS_TRACE_PSP55` and `UEFIDOS_DUMP_HALT`.
 
 1.2.3 adds a **benchmark** that runs the same eight workloads in the 16-bit
 DOS VM, in a native 32-bit image and in a native 64-bit image, with identical
@@ -106,7 +119,7 @@ follows).
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.2.3.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.2.3.zip)
+[**Download `UEFI-DOS-1.3.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.3.0.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):
@@ -578,6 +591,9 @@ Debug knobs (host build only) that make a compatibility run reproducible:
 | `UEFIDOS_TRACE_MEM=1` | dump the DOS memory arena (MCB chain: segment, `M`/`Z`, owner PSP, size, data range) after `INT 21h AH=4Ah` and whenever `AH=48h` fails — the fastest way to see whether a program's shrink-then-probe memory sizing came out right |
 | `UEFIDOS_EXEC_HIGH_IMAGE=1` | an experiment, not the default: load an EXE image flush against the top of the program's block and leave the PSP at the bottom — the geometry a reference MS-DOS 5.00 run shows for Windows 1.01's kernel (default off, because `PSP+0x10` is what programs read as their own segment) |
 | `UEFIDOS_TRACE_DIV=1` | print the `CS:IP` and registers whenever a `DIV`/`IDIV` traps with a quotient overflow |
+| `UEFIDOS_TRACE_TERM=1` | host only: every `INT 21h AH=4Ch` prints the calling PSP, its terminate address (`PSP:000Ah`) and the parent PSP -- this is how "one task is done" is told apart from "the session is over" |
+| `UEFIDOS_TRACE_PSP55=1` | host only: every `INT 21h AH=55h` (create a child PSP) prints the current PSP, `DX` (new PSP segment) and `SI` (block size in paragraphs) |
+| `UEFIDOS_DUMP_HALT=1` | host only: write the first megabyte of guest memory to `build/mem_halt.bin` when the program halts, so the task list and kernel cells at that moment can be read offline |
 | `UEFIDOS_EXEC_HIGH=1` | place an `EXEC`'d child flush against the top of memory instead of right after its caller (for probing programs that are picky about where DOS put them) |
 
 The last 64 steps are dumped to `build/limit_dump.txt` when a program hits the
