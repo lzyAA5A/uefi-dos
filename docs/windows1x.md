@@ -4134,3 +4134,111 @@ Verification:
   Executive comes back **with its full listing** (`build\fixc1_after.png`,
   `build\fixc1_final.png`) instead of `C:\WINDOWS>`;
 * `run_tests.ps1` 36 passed / 0 failed.
+
+## Round 36 -- Windows 1.04 reaches its desktop, Windows 2.03 installs (1.5.0)
+
+### 1.04: the last blocker was the reported DOS version, not a DOS bug
+
+The 1.04 tree `F:\1231\_tmp\win104\tree` (76 files, installed by SETUP with the
+CGA driver and the bus mouse) reaches the full MS-DOS Executive when the DOS
+version it sees is 3.30:
+
+```
+& build\hosttest.exe --shell build\w104q.img `
+    'SETVER WIN.COM 3.30' 'SETVER WIN100.BIN 3.30' 'SETVER MSDOS.EXE 3.30' `
+    'CD \WINDOWS' 'WIN'
+```
+
+Frame history (`UEFIDOS_GFX_DUMP_EVERY=1`, 60 M steps): the logo, then a grey
+dither fill, then 33 frames alternating between two states -- the Executive with
+its insert caret blinking.  `build\w104_desktop.png` is that frame.  Without the
+three SETVER lines the same run prints "Incorrect DOS version" (seen through the
+guest's own `INT 21h AH=09h` writes) and leaves `WIN100.BIN` before it paints
+anything.  QEMU + OVMF confirms it end to end (`build\w104q_1.png`, 1280x800,
+full screen 4:3, drive buttons A B C D with C selected, `C: \ WINDOWS`, five
+listing columns, dither at the bottom).
+
+The tree's own `AUTOEXEC.BAT` already carries those SETVER lines because
+`run_win1x.ps1` writes them; a hand-made tree has to do the same.
+
+### Device names are DOS devices now (`src/kernel/dos.c`)
+
+`dos_open_ex()` and `dos_creat_ex()` used to look for a file called `CON`, so a
+program that opens the console by *name* got DOS error 2.  Windows 2.03 does
+exactly that, five times, while it initialises -- visible in a 25 M-step trace as
+
+```
+INT21 at 6A6E:A39A AH=3D ... "CON"
+[open-fail] CON  (abs WINDOWS\CON)      (x5)
+```
+
+DOS resolves device names **before** the directory and in **every** directory
+(`C:\WINDOWS\CON` is the console, and `CON.TXT` is `CON` too), so the DOS layer
+now does the same for `CON`, `AUX`, `COM1..4` (console class), `PRN`, `LPT1..3`,
+`CLOCK$` (printer class, which the emulator routes to the screen) and `NUL`.  A
+`NUL` handle is a new `dos_handle.null_dev` flag: reads return zero bytes at
+once, writes are swallowed.  After the change the five `[open-fail] CON` lines
+are gone from the 2.03 trace.
+
+### 2.03: SETUP completes with a CGA machine profile
+
+SETUP preselects the display driver from the `[machine]` entry it is given, and
+the stock `IBM PC, XT, AT (or 100% compatible)` profile names `egahires.drv`.  That
+install links an EGA kernel and the resulting `WIN200.BIN` asks for video mode
+10h, which this emulator does not provide -- Windows then quits.  The profile can
+be pointed at CGA instead (`F:\1231\_tmp\win\patch203inf.py`):
+
+```
+("IBM PC, XT, AT (or 100% compatible)",
+        system.drv, usa.drv, "Microsoft Mouse (Bus or Serial)",
+        cga.drv,           ; was egahires.drv
+        ... fonthi.fon -> fontlo.fon, fonthius.fon -> fontlous.fon ...)
+```
+
+With that tree (`F:\1231\_tmp\win203c`, imaged as `build\w203c.img`) SETUP runs
+its whole dialogue under UEFI-DOS -- continue, hard disk, `C:\WINDOWS`, machine,
+CGA, US keyboard, Microsoft Mouse (Bus or Serial), confirm -- copies every app,
+writes `WIN200.BIN` (220,160 bytes), `WIN.COM` (6,990) and `WIN200.OVL` (267,856)
+and reaches its printer menu.  The sums differ from the EGA install
+(226,048 / 272,528), which is how the linked driver can be told apart.
+
+### 2.03 at runtime: the kernel's DOS-structure scan fails
+
+With the CGA install reconstructed as a tree (`F:\1231\_tmp\win203i2`, plus
+`WIN.INI` and the fonts, since SETUP writes those in the stages after the printer
+menu) the run reaches the "Microsoft Windows / Version 2.03" logo and then exits
+with code 1.  What the kernel prints is "Incorrect DOS version: 3.30" -- and the
+3.30 is exactly what DOS answered to `INT 21h AH=30h` (`[ver] C:\WINDOWS\WIN200.BIN ->
+3.30`), so the message is not about the version number.  The instruction trace of
+the kernel's decision (`UEFIDOS_TRACE_WINDOW=9F00-A3B0`) shows the shape:
+
+```
+6A6E:A3A5  call A428              ; memory scan, ES walks 2FF7, 3FF4, 4FF1, 5FEE, 6FEB, 84A3
+6A6E:A3A8  cmp ax,-1
+6A6E:A3AB  je   ...
+6A6E:A286  mov bx,ax              ; bx = FFFF  (the scan failed)
+6A6E:A288  pop ax                 ; ax = 1E03  (DOS 3.30, the value it prints)
+6A6E:A289  cmp bx,-1
+6A6E:A28C  jnz  A2xx              ; not taken -> falls into the error path
+6A6E:A34A  push ax / mov ax,A32E  ; "Incorrect DOS version: "
+6A6E:A368  ... AH=09h print, then AH=09h again with the version string
+```
+
+so `A428` is a scan over memory segments that returns -1 on our machine.  1.01 has
+the same class of probe (the byte signature at `KERNELSTUB` offset 0x6E61) and our
+DOS satisfies it; 2.03 is looking for something else -- the next two leads are
+(a) what `A428` compares (disassemble from `WIN200.BIN` with the 6A20 load base) and
+(b) whether the same probe also looks at the BIOS data area / EBDA, where our
+emulator still advertises "EGA present, VGA" at `0040:0087`.
+
+### Known limitation: no pointer in 1.04
+
+1.04's mouse driver probes the InPort card correctly (`UEFIDOS_TRACE_PORT=1`:
+`out 23F = 91`, `out 23D = A5`, `in 23D = A5`, then 10,000 `in 23E` samples) but
+after that it never reads a packet (`in 23C` = 0 for the whole run) and Windows
+installs no IRQ handler for either vector (`UEFIDOS_TRACE_IVT=1` lists 08/09/1B/00
+only; no `set 0A`, no `set 0D`), so the pointer never appears.  Windows 1.01 links
+a driver that does install IRQ 5 and its pointer works, so this is 1.04's variant
+of the probe deciding that the card is not usable -- most likely because our data
+port 0x23E never changes.  Mouse-driven use of 1.04 needs a keyboard/investigation,
+not a DOS change.

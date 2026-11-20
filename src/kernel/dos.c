@@ -709,12 +709,64 @@ static int trace_open(void)
 }
 #endif
 
+/* DOS resolves device names BEFORE the directory, and a device name matches in
+ * every directory ("C:\ANY\CON" is the console, and "CON.TXT" is CON too).  This
+ * is load-bearing for real-mode Windows: 2.03 opens CON five times while it
+ * initialises (stdin/stdout/stderr plus the AUX and PRN aliases) and, if those
+ * opens fail, gives up with "Incorrect DOS version" and exit code 1. */
+static const char *leaf_name(const char *abs)
+{
+    const char *start = abs;
+    for (const char *p = abs; *p; p++)
+        if (*p == '\\' || *p == '/') start = p + 1;
+    return start;
+}
+
+/* 0 = not a device, 1 = console class, 2 = printer class, 3 = NUL */
+static int device_kind(const char *abs)
+{
+    char n[12];
+    int i = 0;
+    const char *p = leaf_name(abs);
+    for (; p[i] && p[i] != '.' && i < 11; i++) {
+        char c = p[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        n[i] = c;
+    }
+    n[i] = 0;
+    if (!strcmp(n, "CON") || !strcmp(n, "AUX") || !strcmp(n, "COM1") ||
+        !strcmp(n, "COM2") || !strcmp(n, "COM3") || !strcmp(n, "COM4"))
+        return 1;
+    if (!strcmp(n, "PRN") || !strcmp(n, "LPT1") || !strcmp(n, "LPT2") ||
+        !strcmp(n, "LPT3") || !strcmp(n, "CLOCK$"))
+        return 2;
+    if (!strcmp(n, "NUL")) return 3;
+    return 0;
+}
+
+static int device_alloc(int kind, int open_mode, int *out)
+{
+    int h, rc = alloc_handle(&h);
+    if (rc != FAT_OK) return rc;
+    dos_handle *H = &g_dos.handles[h];
+    H->console = (u8)(kind == 2 ? 2 : 1);
+    H->null_dev = (kind == 3);
+    H->open_mode = (u8)open_mode;
+    H->psp = g_dos.psp_seg;
+    *out = h;
+    return FAT_OK;
+}
+
 int dos_open_ex(const char *path, int open_mode, int share, int *out)
 {
     int drive, rc;
     char abs[DOS_MAX_PATH];
     rc = dos_parse_path(path, &drive, abs, sizeof(abs));
     if (rc != FAT_OK) return rc;
+    {
+        int kind = device_kind(abs);
+        if (kind) return device_alloc(kind, open_mode, out);
+    }
     fat_dirent d;
     u32 parent;
     u8 nm[11];
@@ -828,6 +880,10 @@ int dos_creat_ex(const char *path, int attr, int share, int open_mode, int *out)
     char abs[DOS_MAX_PATH];
     rc = dos_parse_path(path, &drive, abs, sizeof(abs));
     if (rc != FAT_OK) return rc;
+    {
+        int kind = device_kind(abs);
+        if (kind) return device_alloc(kind, open_mode, out);
+    }
     if (vol_of(drive)->read_only) return FAT_EROFS;
     fat_dirent d;
     u32 parent = 0;
@@ -939,6 +995,7 @@ int dos_read(int h, void *buf, u32 len, u32 *got)
     if (h < 0 || h >= DOS_HANDLE_MAX) return FAT_EINVAL;
     dos_handle *H = &g_dos.handles[h];
     if (!H->used) return FAT_EINVAL;
+    if (H->null_dev) return FAT_OK;         /* NUL: zero bytes, no error */
     if (H->console) {
         /* read a line from the console (echoed) */
         char *p = (char *)buf;
@@ -978,6 +1035,7 @@ int dos_write(int h, const void *buf, u32 len, u32 *put)
     if (h < 0 || h >= DOS_HANDLE_MAX) return FAT_EINVAL;
     dos_handle *H = &g_dos.handles[h];
     if (!H->used) return FAT_EINVAL;
+    if (H->null_dev) { *put = len; return FAT_OK; }
     if (H->console) {
         const char *p = (const char *)buf;
         for (u32 i = 0; i < len; i++) plat_putc(p[i]);

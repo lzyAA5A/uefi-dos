@@ -59,6 +59,7 @@ typedef struct dos_lock {
 typedef struct dos_handle {
     int used;
     int console;          /* 0 = file, 1 = CON, 2 = PRN/AUX */
+    int null_dev;         /* NUL: reads return EOF, writes are discarded */
     int drive;
     u32 parent_cluster;
     u8  name11[11];

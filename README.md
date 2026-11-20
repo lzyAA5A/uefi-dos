@@ -13,10 +13,28 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.4.0** — 36 of 36 automated checks pass on the Windows host harness
+Version **1.5.0** — 36 of 36 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
 
-1.4.0 is the Windows 1.04 round.  **Windows 1.04 now reaches its desktop**: the
+1.5.0 is the Windows 1.04 / 2.03 round.  **Windows 1.04 now runs its desktop**,
+full screen, with the complete file listing (QEMU + OVMF screenshot in
+`docs/windows1x.md`, Round 36).  The last missing piece was not a DOS defect but
+the DOS version: 1.04 refuses to start under a DOS that reports 4.00, and the
+tree has to carry `SETVER WIN.COM 3.30` / `SETVER WIN100.BIN 3.30` /
+`SETVER MSDOS.EXE 3.30` in `AUTOEXEC.BAT` -- exactly what `run_win1x.ps1` writes
+for Windows 1.x.  **Device names are now DOS devices**: `CON`, `NUL`, `PRN`,
+`AUX`, `COM1..4`, `LPT1..3` and `CLOCK$` are resolved before the directory and in
+every directory, which is what Windows 2.03 needs while it initialises (it opens
+`CON` five times and gives up when those opens fail).  **Windows 2.03 installs**:
+with its `SETUP.INF` machine profile pointed at `cga.drv` instead of
+`egahires.drv`, SETUP links a CGA kernel (`WIN200.BIN` 220,160 bytes,
+`WIN200.OVL` 267,856 bytes), copies every file and writes `WIN.COM`.  Running it
+still stops right after the logo: the kernel's DOS-structure scan returns failure
+and it prints "Incorrect DOS version: 3.30" and exits (the 3.30 is what DOS
+answered, so the probe is a memory scan, not the version query).  The trace and
+the two remaining leads are in `docs/windows1x.md`, Round 36.
+
+1.4.0 was the Windows 1.04 round.  **Windows 1.04 now reaches its desktop**: the
 divide overflow that killed it after the title bar was DOS telling it that `CON`
 is a block device (`INT 21h AH=44h AL=08h`), so its console setup produced a
 zero-width window and the text renderer divided by zero.  With `AH=44h` answering
@@ -129,7 +147,7 @@ follows).
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.4.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.4.0.zip)
+[**Download `UEFI-DOS-1.5.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.5.0.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):

@@ -12,8 +12,22 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.4.0** —— 36 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.5.0** —— 36 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
+
+1.5.0 是 Windows 1.04 / 2.03 的一轮。**Windows 1.04 现在能完整跑出桌面**：满屏
+4:3、带完整文件列表（QEMU + OVMF 截图见 `docs/windows1x.md` 第 36 轮）。最后缺的那一块
+并不是 DOS 的缺陷，而是 DOS 版本号：DOS 报 4.00 时 1.04 拒绝启动，所以树里必须带上
+`SETVER WIN.COM 3.30` / `SETVER WIN100.BIN 3.30` / `SETVER MSDOS.EXE 3.30`
+（`run_win1x.ps1` 为 Windows 1.x 写 `AUTOEXEC.BAT` 时就是这么写的）。**设备名现在是真正的
+DOS 设备**：`CON`、`NUL`、`PRN`、`AUX`、`COM1..4`、`LPT1..3`、`CLOCK$` 在查目录之前、
+并且在任何目录里都能解析——Windows 2.03 初始化时要连开五次 `CON`，开不出来就放弃。
+**Windows 2.03 能装完**：把 `SETUP.INF` 里 IBM PC/XT/AT 的显示驱动从 `egahires.drv`
+改成 `cga.drv` 后，SETUP 会链出 CGA 内核（`WIN200.BIN` 220,160 字节、
+`WIN200.OVL` 267,856 字节），拷完全部文件并写出 `WIN.COM`。但运行它仍停在 logo 之后：
+内核的 DOS 结构扫描返回失败，于是打印 "Incorrect DOS version: 3.30" 并以退出码 1 结束
+（那个 3.30 正是 DOS 的应答，说明探针扫的是内存结构而不是版本号）。完整走查与剩下两条
+线索见 `docs/windows1x.md` 第 36 轮。
 
 1.4.0 是 Windows 1.04 的一轮。**Windows 1.04 现在能到桌面**：先前它在标题栏之后
 以除零崩溃，根源是 DOS 把 `CON` 报成了块设备（`INT 21h AH=44h AL=08h`），于是它的
@@ -93,7 +107,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.4.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.4.0.zip)
+[**下载 `UEFI-DOS-1.5.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.5.0.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：
