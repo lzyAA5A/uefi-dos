@@ -4015,6 +4015,62 @@ re-decodes every byte (no decode cache), and (c) `emu_ww`/`emu_wd` translate the
 address once per byte instead of once per word. None of them is worth the risk
 before the next real-compatibility bug.
 
+
+## Round 35 -- Windows 1.04 runs, Windows 2.03 gets through its copy stage (1.4.0)
+
+### 1.04: DOS told it that CON is a block device
+
+Windows 1.04 asks `INT 21h AH=44h` with `AL=08h` ("is this handle a character
+device?") for handles 0..4 and with `AL=0Eh` (logical drive map) right after --
+1.01 never touches `AH=44h` at all, which is why only 1.04 broke.  Our handler
+answered `AX=0` ("block device") for every handle, including CON and PRN, so the
+kernel classified its console handles as files.  Its console/window setup then
+produced a zero-width window, and the text renderer divided by zero:
+
+```
+[halt] divide overflow at 9197:1D8A ss:sp=1433:0F28 ax=0046
+```
+
+Two watches pinned that down.  `UEFIDOS_WATCH=2A700-2A7FF` (the module's data
+segment) showed `[0560]` (the client width) being set to 4 by `9197:0208` and then
+to 0 by `9197:26F8`; the metric routine at `9197:0Bxx` takes the "the window is
+too narrow" branch and stores `[0560]` into `[05A6]` (characters per row), and
+`9197:1D88 idiv %cx` with `cx=[05A6]=0` faults.
+
+`AH=44h` now answers properly (`AL=08h`: `AX=1` for a character device, `0` plus
+the drive in `DX` for a file; `AL=0Eh`: last drive in `AL`; `AL=0/1` returns the
+real device-info word, `0x80D3` for CON).  After that fix 1.04's DOS surface grows
+from 584 calls with no find and no reads to 80x `AH=1Ah` + 76x `AH=4Fh` + 24x
+`AH=3Fh` + 8x `AH=3Dh`, i.e. it enumerates the directory and reads its files, and
+the screen shows the MS-DOS Executive menu bar (`File  View  Special`) and the
+path `C:\WINDOWS` instead of dying after the title bar.
+
+### 2.03: why SETUP could not create WIN.COM
+
+The trace of the copy stage was unambiguous:
+
+```
+5961 AH=3D AX=3D00 ... "WIN.CNF"            -> ok
+5964 AH=3D AX=3D02 ... "C:\WINDOWS\WIN.COM"   -> DOS error 2   (expected: does not exist yet)
+5965 AH=3C AX=3C80 ... "C:\WINDOWS\WIN.COM"   -> DOS error 39  <- the failure
+```
+
+Error 39 is "insufficient space / directory full", so SETUP printed its own guess
+(`Can't open WIN.CNF (FILES= may be too small or disk full)`) and exited with code
+2.  The real cause is our `resolve_entry()`: when a *directory* component is
+missing it used to pass the inner `fat_find()` result (`FAT_ENOENT`, "file not
+found") straight out, and `dos_creat_ex()` reads `ENOENT` as "only the last name
+is missing" -- so it tried to create `WIN.COM` in the *root* of the drive, where
+the create then failed as "disk full".  DOS reports error 3 ("path not found")
+there; `resolve_entry()` now does too.
+
+With `C:\WINDOWS` present SETUP walks past the copy probe and into its
+question-and-answer flow; the run above stops on the "choose your computer" screen
+only because the keyboard script ran out of answers.  Driving that flow to
+completion (and then loading 2.03's KERNEL/GDI/USER) is the next step, but the
+blocker that looked like a DOS file-system bug is understood and the error code
+now matches DOS.
+
 ## Round 34 -- closing an application no longer ends the Windows session (1.3.0)
 
 Closing a window in Windows 1.01 used to leave the kernel's orderly "end session"

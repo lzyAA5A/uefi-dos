@@ -13,8 +13,18 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.3.0** — 36 of 36 automated checks pass on the Windows host harness
+Version **1.4.0** — 36 of 36 automated checks pass on the Windows host harness
 and on QEMU + OVMF (x86_64 and IA32).
+
+1.4.0 is the Windows 1.04 round.  **Windows 1.04 now reaches its desktop**: the
+divide overflow that killed it after the title bar was DOS telling it that `CON`
+is a block device (`INT 21h AH=44h AL=08h`), so its console setup produced a
+zero-width window and the text renderer divided by zero.  With `AH=44h` answering
+like DOS, 1.04 enumerates its directory, reads its files and paints the MS-DOS
+Executive.  **Windows 2.03's SETUP** gets through its copy stage as well now: a
+missing directory component reported "file not found" instead of DOS error 3, so
+SETUP's attempt to create `WIN.COM` landed in the root of the drive and failed as
+"disk full".  Details in [docs/windows1x.md](docs/windows1x.md) (Round 35).
 
 1.3.0 fixes the last Windows 1.01 defect of the session: **closing an
 application window used to end the whole Windows session** (the kernel printed
@@ -119,7 +129,7 @@ follows).
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.3.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.3.0.zip)
+[**Download `UEFI-DOS-1.4.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.4.0.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):

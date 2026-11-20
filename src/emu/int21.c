@@ -1191,11 +1191,31 @@ void int21_handler(Emu *e)
         if (sub == 0 || sub == 1) {
             int h = e->bx;
             int is_con = h < 5;
-            e->dx = is_con ? 0x0080 : 0x0000;
+            /* device info word: bits 0/1 = stdin/stdout, bit 4 = special,
+             * bit 6 = EOF on input, bit 7 = character device, bit 15 = device */
+            e->dx = is_con ? 0x80D3 : 0x0000;
             set_ok(e);
         } else if (sub == 8) {
-            /* media check: return "changed"=1? return AX=0, DX=0 */
-            e->ax = 0;
+            /* AL=08h: is the handle a character device?  Windows 1.04 asks this
+             * for every standard handle while it builds its device table; the
+             * old "always block device" answer made it treat CON as a file, and
+             * its console/window setup then produced a zero-width window (the
+             * display code divided by zero: [05A6] = chars-per-row = 0). */
+            int h = e->bx;
+            int is_con = (h >= 0 && h < DOS_HANDLE_MAX && g_dos.handles[h].used &&
+                          g_dos.handles[h].console);
+            e->ax = is_con ? 1 : 0;
+            if (!is_con) {
+                int drv = (h >= 0 && h < DOS_HANDLE_MAX) ? g_dos.handles[h].drive : 0;
+                e->dx = (u16)(drv + 1);          /* 0 = default, 1 = A: ... */
+            } else {
+                e->dx = 0;
+            }
+            set_ok(e);
+        } else if (sub == 0x0E) {
+            /* AL=0Eh: get logical drive map -> AL = last drive used,
+             * AH = next drive to map (0 when the single drive maps itself). */
+            e->ax = (u16)(0x00 | (u8)(dos_current_drive() + 1));
             set_ok(e);
         } else {
             set_ok(e);

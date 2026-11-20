@@ -12,8 +12,16 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.3.0** —— 36 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+当前版本 **1.4.0** —— 36 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）。
+
+1.4.0 是 Windows 1.04 的一轮。**Windows 1.04 现在能到桌面**：先前它在标题栏之后
+以除零崩溃，根源是 DOS 把 `CON` 报成了块设备（`INT 21h AH=44h AL=08h`），于是它的
+控制台初始化得到一个宽度为零的窗口，文本渲染器随即除以零。`AH=44h` 按 DOS 正确应答
+之后，1.04 能枚举目录、读取文件并画出 MS-DOS Executive。**Windows 2.03 的 SETUP**
+也通过了复制阶段：路径里缺少目录时我们报的是“文件不存在”而不是 DOS 的 3 号错误
+（路径不存在），于是 SETUP 创建 `WIN.COM` 时落到驱动器根目录并报“磁盘已满”。细节见
+[docs/windows1x.md](docs/windows1x.md)（第 35 轮）。
 
 1.3.0 修掉了 Windows 1.01 会话里的最后一个缺陷：**关闭应用窗口会把整个
 Windows 会话结束掉**（内核不打印任何东西、关掉 DOS 句柄，然后回到 `C:\WINDOWS>`）。
@@ -85,7 +93,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.3.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.3.0.zip)
+[**下载 `UEFI-DOS-1.4.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.4.0.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：

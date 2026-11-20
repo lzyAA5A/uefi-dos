@@ -464,6 +464,12 @@ static int resolve_entry(int drive, const char *abs, fat_dirent *out, u32 *paren
         int rc = FAT_ENOENT;
         if (ok) rc = fat_find(vol_of(drive), cur, nm, &d, &cl2, NULL, NULL);
         if (rc != FAT_OK) rc = fat_find_long(vol_of(drive), cur, comps[i], &d, &cl2, NULL, NULL);
+        /* A missing *directory* component is DOS error 3 ("path not found"),
+         * not 2: returning ENOENT here made dos_creat_ex() believe only the
+         * last name was missing and try to create the file in the root of the
+         * drive, which failed as "disk full" (error 39) and sent Windows 2.03's
+         * SETUP down its "FILES= may be too small" path. */
+        if (rc == FAT_ENOENT) return FAT_ENOPATH;
         if (rc != FAT_OK) return rc;
         if (!(d.raw[11] & 0x10)) return FAT_ENOTDIR;
         cur = cl2;
