@@ -102,21 +102,48 @@ static void ss_note(u16 old_ss, u16 new_ss, u16 cs, u16 ip, u16 sp, u16 ret_ip, 
 /* keyboard-controller state for the A20 gate (port 64h command D1h) */
 static int g_kbc_pending_out = 0;
 
-/* ---- Microsoft bus mouse (InPort card, base 23Ch) ------------------ *
+/* ---- Microsoft/Logitech bus mouse (base 23Ch) ---------------------- *
  * Windows 1.x cannot use INT 33h: its mouse driver talks to the card it
- * was linked against.  MOUSE.DRV probes the InPort interface with
+ * was linked against.  This models the Logitech/Microsoft "standard bus
+ * mouse" register map -- the 8255-style card both drivers support -- and
+ * follows real hardware (86Box src/device/mouse_bus.c, lt_read/lt_write):
+ *
+ *   23Ch  DATA       read: position nibble selected by the control
+ *                    register (X/Y low/high), low nibble cleared by read
+ *   23Dh  SIGNATURE  write latches a byte, read returns it
+ *   23Eh  CONTROL    write: 90h/0B0h/0D0h/0F0h select the nibble, bit 7
+ *                    holds the counters, bit 4 disables the IRQ, 00h
+ *                    closes a packet;  read: the register itself, whose
+ *                    low four bits the card sets as it answers
+ *   23Fh  CONFIG     write: 8255 mode set, 91h = "device active"
+ *
+ * Windows 1.01's MOUSE.DRV only tests the signature:
  *
  *     mov dx,23Ch / mov al,91h / out 23Fh,al / mov al,5Ah / out 23Dh,al
  *     in  al,23Dh / cmp al,5Ah / je found
  *
- * and then reads the position nibble by nibble through a command register:
- * out 23Eh,90h / in 23Ch = X low, 0B0h = X high, 0D0h = Y low,
- * 0F0h = Y high, 00h = buttons.  When the signature is right it arms IRQ5
- * (INT 0Dh) and expects an interrupt per packet, so this device keeps the
- * registers plus a position counter fed from the host pointer. */
+ * Windows 1.04's MOUSE.DRV (file offset 70Bh, loaded at cs:010Bh) tests
+ * more: after latching 0A5h into the signature port it reads the CONTROL
+ * port 10000 times and rejects the card when no two reads differ --
+ *
+ *     out 23Fh,91h / out 23Dh,0A5h / in 23Dh == 0A5h
+ *     mov cx,2710h / xor bh,bh
+ *   again: in al,23Eh / xor al,ah / or ah,bh / mov ah,al / loop again
+ *     or bh,bh / jz reject
+ *
+ * so the control port must read back through its own latch: the real
+ * card returns the register and then sets its low four bits, which makes
+ * the first read 0Eh and every later one 0Fh.  Echoing the last written
+ * selector -- what this port used to do -- gave 1.04 the same byte every
+ * time, so it dropped the mouse: no pointer and no clicks.
+ *
+ * Once accepted the driver arms IRQ5 (INT 0Dh) and expects an interrupt
+ * per packet, so the card keeps the registers plus a position counter fed
+ * from the host pointer. */
 static u8 g_bus_latch;      /* 23Dh: signature/latch (5Ah after a reset) */
-static u8 g_bus_cmd;        /* 23Eh: nibble selector written by the driver */
-static u8 g_bus_ctrl;       /* 23Fh: control/reset */
+static u8 g_bus_cmd;        /* 23Eh: control register as written, | 0Fh */
+static u8 g_bus_read;       /* 23Eh: value the next read of it returns */
+static u8 g_bus_ctrl;       /* 23Fh: config register (nonzero = enabled) */
 static int g_bus_dx, g_bus_dy;  /* motion counters the card reports (signed 8 bit) */
 static int g_bus_acc_x, g_bus_acc_y;    /* host-delta remainders (< 16 / < 10) */
 
@@ -335,7 +362,18 @@ u16 emu_in_port(Emu *e, u16 port)
         return v;
     }
     case 0x23D: bus_trace(e, "in ", 0x23D, g_bus_latch); return g_bus_latch;
-    case 0x23E: bus_trace(e, "in ", 0x23E, g_bus_cmd); return g_bus_cmd;
+    case 0x23E: {               /* control register read-back */
+        /* The card answers with the register it holds and then forces its
+         * low four bits to 1: bit 0 is the interrupt latch, so the first
+         * read after the enable returns 0Eh (no interrupt pending) and
+         * every read after that 0Fh (interrupt latched, which is what the
+         * card reports once it has been touched).  Windows 1.04's driver
+         * needs exactly this change of value -- see the block above. */
+        u8 v = g_bus_read;
+        g_bus_read = (u8)(g_bus_read | 0x0F);
+        bus_trace(e, "in ", 0x23E, v);
+        return v;
+    }
     case 0x23F: bus_trace(e, "in ", 0x23F, g_bus_ctrl); return g_bus_ctrl;
     default: return 0;
     }
@@ -397,8 +435,16 @@ void emu_out_port(Emu *e, u16 port, u16 val)
         g_bus_latch = (u8)val;
         bus_trace(e, "out", 0x23D, val);
         break;
-    case 0x23E:     /* nibble selector: 90h/0B0h X, 0D0h/0F0h Y, 00h buttons */
-        g_bus_cmd = (u8)val;
+    case 0x23E:     /* control: 90h/0B0h = X low/high, 0D0h/0F0h = Y low/high */
+        /* The register keeps the written selector in bits 6-7 (and the hold
+         * counter in bit 7) and reads back with its low four bits set, so
+         * the driver sees 0Fh -- except for the very first read after the
+         * card was enabled, which the config write below seeds with 0Eh.
+         * Bit 4 is DISABLE_IRQ on the real card; a cleared bit 4 is what
+         * makes the low interrupt bit flaky there, but a stable 0Fh is
+         * what both our drivers cope with. */
+        g_bus_cmd = (u8)(val | 0x0F);
+        g_bus_read = (u8)(val | 0x0F);
         /* Selecting 00h is how MOUSE.DRV closes a packet (it writes 00h and
          * never reads), so this -- not a read -- is where the movement
          * counters restart.  Clearing them on a read that never happens made
@@ -410,9 +456,14 @@ void emu_out_port(Emu *e, u16 port, u16 val)
         }
         bus_trace(e, "out", 0x23E, val);
         break;
-    case 0x23F:     /* control: 91h = reset, which re-loads the signature */
+    case 0x23F:     /* config: 91h = 8255 mode set, which enables the card */
         g_bus_ctrl = (u8)val;
-        if (val & 0x91) g_bus_latch = 0x5A;
+        if (val & 0x91) {
+            /* "Device active" also clears the interrupt latch: the first
+             * control read now reports 0Eh, the ones after it 0Fh. */
+            g_bus_read = (u8)0x0E;
+            g_bus_latch = 0x5A;
+        }
         bus_trace(e, "out", 0x23F, val);
         break;
     case 0x60:      /* keyboard controller data port (output-port byte) */

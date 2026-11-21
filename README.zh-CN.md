@@ -12,8 +12,19 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.5.0** —— 36 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
-的 x86_64 与 IA32 实机启动）。
+当前版本 **1.5.1** —— 32 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
+的 x86_64 与 IA32 实机启动）；另有 2 项只有在提供真实 MS-DOS 2.11 / MS-DOS 5 软盘镜像时
+才运行（`UEFIDOS_DOS211`、`UEFIDOS_DOS5`），默认跳过。
+
+1.5.1 补上了 Windows 1.04 唯一还缺的那一件：**鼠标能动**。1.04 的 `MOUSE.DRV` 不只
+核对总线鼠标的签名，接下来还会把卡上的控制寄存器（端口 `23Eh`）连读一万次，只要两次
+读数没差异就判定“卡不在”。我们原先让该端口回显驱动刚写进去的字节，读数因此永不变，
+1.04 便不装中断处理程序：桌面出来了，却没有指针。现在这个端口按真实卡的方式应答
+（返回寄存器本身，低四位由卡在应答时置位，bit0 是中断锁存），读数序列变成
+`0Eh, 0Fh, 0Fh, ...`，探测通过，1.04 挂上 IRQ 5 并从半字节寄存器里取出位移包——
+**1.04 桌面上出现了会动的指针**，用脚本双击 `CALENDAR.EXE` 那一行还能把程序真正启动起来
+（Calendar 带着自己的菜单栏和整点列表出现）。Windows 1.01 跑同样的探测、同样通过，指针照旧工作。
+帧图、端口跟踪与探测的汇编都在 `docs/windows1x.md` 第 37 轮。
 
 1.5.0 是 Windows 1.04 / 2.03 的一轮。**Windows 1.04 现在能完整跑出桌面**：满屏
 4:3、带完整文件列表（QEMU + OVMF 截图见 `docs/windows1x.md` 第 36 轮）。最后缺的那一块
@@ -107,7 +118,7 @@ MS-DOS 4.00，而 Windows 1.x 遇到高于 3.x 的版本就拒绝启动，所以
 
 ## 立刻跑起来（不需要编译器）
 
-[**下载 `UEFI-DOS-1.5.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.5.0.zip)
+[**下载 `UEFI-DOS-1.5.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.5.1.zip)
 （240 KB）——里面是可直接启动的 64 MB 镜像加一个启动器：
 
 1. 先装 Windows 版 QEMU（它自带 OVMF 固件）：

@@ -13,10 +13,27 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.5.0** — 36 of 36 automated checks pass on the Windows host harness
-and on QEMU + OVMF (x86_64 and IA32).
+Version **1.5.1** — 32 of 32 automated checks pass on the Windows host harness
+and on QEMU + OVMF (x86_64 and IA32); two further checks skip unless real
+MS-DOS 2.11 / MS-DOS 5 floppy images are supplied (`UEFIDOS_DOS211`,
+`UEFIDOS_DOS5`).
 
-1.5.0 is the Windows 1.04 / 2.03 round.  **Windows 1.04 now runs its desktop**,
+1.5.1 fixes the one thing Windows 1.04 still lacked: **its mouse works**.
+1.04's `MOUSE.DRV` does not stop at checking the bus-mouse signature -- it then
+reads the card's control register (port `23Eh`) 10,000 times and drops the card
+when no two reads differ.  Our control port echoed the byte the driver had just
+written, so it never changed and 1.04 loaded no IRQ handler: the desktop came up
+without a pointer.  The port now answers like the real card (the register itself,
+whose low four bits the card sets as it answers, bit 0 being the interrupt
+latch), so reads run `0Eh, 0Fh, 0Fh, ...`, the probe passes, 1.04 hooks IRQ 5 and
+pulls position packets out of the nibble registers -- **the pointer appears and
+moves on the 1.04 desktop**, and a scripted double-click on the `CALENDAR.EXE`
+entry starts the application (Calendar comes up with its menu bar and hour
+list).  Windows 1.01 runs the same probe and is unchanged (it passes it too and
+its pointer keeps working).  Frame dumps, port trace and the disassembly of the
+probe are in `docs/windows1x.md`, Round 37.
+
+1.5.0 was the Windows 1.04 / 2.03 round.  **Windows 1.04 now runs its desktop**,
 full screen, with the complete file listing (QEMU + OVMF screenshot in
 `docs/windows1x.md`, Round 36).  The last missing piece was not a DOS defect but
 the DOS version: 1.04 refuses to start under a DOS that reports 4.00, and the
@@ -147,7 +164,7 @@ follows).
 
 ## Run it now (no compiler needed)
 
-[**Download `UEFI-DOS-1.5.0.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.5.0.zip)
+[**Download `UEFI-DOS-1.5.1.zip`**](https://github.com/lzyAA5A/uefi-dos/releases/latest/download/UEFI-DOS-1.5.1.zip)
 (240 KB) — it contains a ready-to-boot 64 MB image plus a launcher:
 
 1. install QEMU for Windows (it also brings the OVMF firmware):

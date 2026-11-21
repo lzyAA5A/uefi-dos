@@ -2,8 +2,19 @@
 
 ## Status at a glance (hand-over summary)
 
+**Where this line of work stands (1.5.1).** Windows **1.01** runs its MS-DOS
+Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
+its desktop, and since 1.5.1 its **mouse works**: the pointer appears, follows
+the host and a double-click on a CALENDAR.EXE entry starts the application
+(Round 36 for the desktop, Round 37 for the mouse).  Windows **2.03** installs
+completely and then stops right after its logo, in the kernel's DOS-structure
+scan (Round 36; two leads left, both in that section).  Everything below is the
+lab log in the order the problems were solved -- the paragraphs immediately
+following are from the very first 1.01 rounds, when the kernel still died before
+its first window; they are kept as history.
+
 **Goal of this line of work:** make a real, unmodified Windows 1.01 reach its desktop
-under UEFI-DOS. **State: not achieved.** UEFI-DOS starts `WIN.COM`, the kernel runs,
+under UEFI-DOS. **State of that first attempt: not achieved.** UEFI-DOS starts `WIN.COM`, the kernel runs,
 paints the MICROSOFT splash in CGA graphics (mode 6 / 640x200), and then exits with
 `AH=4C AL=1` before it sets any graphics mode of its own or reaches its first window.
 
@@ -3150,7 +3161,10 @@ InPort driver (`WIN100.OVL` then holds `Microsoft Mouse` and `Bus/Serial`, and
 
 * `23Fh` control -- writing `0x91` (or `Ctrl+0`, `0xA5` in 1.04) latches `5Ah`
   into `23Dh`, which is what the driver's presence probe reads back;
-* `23Eh` command -- the nibble selector the driver writes before each read;
+* `23Eh` command -- the nibble selector the driver writes before each read; a
+  read returns the register with its low four bits set (Round 37 -- Windows 1.04
+  needs those reads to differ, and echoing the written byte made it reject the
+  card);
 * `23Dh` latch -- `5Ah` after a reset;
 * `23Ch` data -- `90h` X low, `B0h` X high, `D0h` Y low, `F0h` Y high, `00h`
   ends the packet and restarts the counters.
@@ -4231,7 +4245,7 @@ DOS satisfies it; 2.03 is looking for something else -- the next two leads are
 (b) whether the same probe also looks at the BIOS data area / EBDA, where our
 emulator still advertises "EGA present, VGA" at `0040:0087`.
 
-### Known limitation: no pointer in 1.04
+### Known limitation: no pointer in 1.04  (fixed in 1.5.1, see Round 37)
 
 1.04's mouse driver probes the InPort card correctly (`UEFIDOS_TRACE_PORT=1`:
 `out 23F = 91`, `out 23D = A5`, `in 23D = A5`, then 10,000 `in 23E` samples) but
@@ -4242,3 +4256,90 @@ a driver that does install IRQ 5 and its pointer works, so this is 1.04's varian
 of the probe deciding that the card is not usable -- most likely because our data
 port 0x23E never changes.  Mouse-driven use of 1.04 needs a keyboard/investigation,
 not a DOS change.
+
+## Round 37 -- The control port reads back, Windows 1.04 gets its pointer (1.5.1)
+
+Round 36 left one thing open: 1.04 accepted the card's signature, then gave up.
+The instruction trace of the driver's probe (MOUSE.DRV, loaded at cs 9ED7 with
+`ip = file offset - 600h`) says why -- the 10,000-sample loop is a *stability*
+test, not a signature test:
+
+```
+9ED7:0122  mov [ ],0A5h / out 23Dh,al     ; latch the signature
+9ED7:0125  in  al,23Dh / cmp al,ah        ; == 0A5h?  (we passed this in 1.5.0)
+9ED7:0137  in  al,23Eh / mov ah,al        ; prime
+9ED7:013E  in  al,23Eh / xor al,ah        ; loop 2710h (10,000) times:
+9ED7:0141  or  ah,bh                        bh != 0 as soon as two reads differ
+9ED7:0143  mov ah,al
+9ED7:0145  loop 013Eh
+           or  bh,bh / jz reject          ; bh == 0 -> "card not there"
+```
+
+So the driver needs the control port (23Eh) to return **two different values**
+across consecutive reads.  Our emulation echoed the last byte the driver had
+written there -- constant by definition -- so 1.04 rejected the card, loaded no
+IRQ handler and painted the desktop without a pointer.  Real hardware does not
+behave that way: on the Logitech/Microsoft bus-mouse card 23Eh is a control
+register whose low four bits the card itself sets as it answers (bit 0 is the
+interrupt latch), which is visible in 86Box's `src/device/mouse_bus.c`
+(`lt_read`, the `BUSM_PORT_CONTROL` case: `value = dev->control_val;
+dev->control_val |= 0x0F;`, plus a deliberately flaky IRQ bit when interrupts
+are enabled).
+
+`src/emu/emu.c` now models that: the config write (`out 23Fh,91h`, "device
+active") seeds the read-back with `0Eh` (interrupt latch clear, IRQ 5), every
+read of 23Eh returns the register and then sets its low four bits, and a control
+write stores it with `| 0Fh`.  Reads therefore run `0Eh, 0Fh, 0Fh, ...` -- two
+different values, which is all the probe wants.  The nibble selector keeps its
+own copy, so the data-port protocol (`out 23Eh,90h/0B0h/0D0h/0F0h` then
+`in 23Ch`) is untouched, and so is the signature latch on 23Dh.
+
+Verification, all from host-harness runs (`build\run104.ps1`, which is
+`build\hosttest.exe --shell build\w104q.img` with the three SETVER lines):
+
+**1. The probe passes and the driver arms IRQ 5** (`UEFIDOS_TRACE_PORT=1`):
+
+```
+[port] in  23E = 0E at 9ED7:0137        ; the primed read
+[port] in  23E = 0F at 9ED7:013F        ; ... and 10,000 more, all 0F
+[port] irq 23D = 0D at 2017:24AE        ; IRQ 5 is hooked and delivered
+[port] out 23E = 90 at 16BD:005C        ; X low
+[port] in  23C = 04 at 16BD:0061
+[port] out 23E = B0 at 16BD:006A        ; X high
+[port] out 23E = D0 at 16BD:007D        ; Y low
+[port] out 23E = F0 at 16BD:008B        ; Y high + buttons
+[port] in  23C = E0 at 16BD:0090        ; both buttons released
+[port] out 23E = 00 at 16BD:009F        ; packet closed
+```
+
+**2. The pointer appears and follows the host.**  `build\w104q_now.png` (the frame
+dump of one run) is the Executive with the arrow drawn over the listing;
+`build\w104_ptr4x.png` is that arrow at 4x, taken from a frame in which a
+scripted `UEFIDOS_MOUSE` run had just driven it from its default centre position
+down to `(24,55)`.  (The pointer is XOR-drawn, so it blinks with the caret timer:
+one frame shows the arrow, the next shows the text underneath.)
+
+**3. Clicks reach Windows, applications start.**  A script that slams the pointer
+into the top-left corner, moves it `+25/+55` onto the CALENDAR.EXE entry and
+double-clicks it 150 ms apart (inside the `DoubleClickSpeed=500` window) launches
+the program: `build\w104x_00089.png` is **Calendar (untitled)** with its title
+bar, the File/Edit/View/Show/Alarm/Options menu, the
+`10:53 PM <-> Saturday, November 21, 2026` header, the hour list and the
+scrollbar.  The launch also leaves `[open-fail] C:\~CAL0901.TMP` in the log --
+Windows probes that temp name on the way in, does not need it, and the
+application starts regardless.
+
+Windows 1.01 is unchanged by this: its driver (cs 16A9) runs the same 10,000-read
+probe and now sees the same `0Eh/0Fh` sequence, hooks IRQ 5 (`irq 23D = 0D`) and
+reads its packets from 167D:0054 -- `build\w101_now.png` is its desktop with the
+pointer.  A 1.01 run under the old echo behaviour produced the same packets, so
+the change is behaviour-preserving for it; what it fixes is 1.04.
+
+Note on the two card personalities 1.04 probes for: before this test it reads
+23Eh *once* and compares against `0DEh` (the InPort signature port, which
+alternates `0DEh`/`012h` on the real InPort card).  Our card is the
+Logitech/Microsoft "standard bus mouse", so that first probe must fail (`0Eh` !=
+`0DEh`) and the driver falls through to the bus-mouse path above -- which is
+exactly the path its packet reader implements (`90h/0B0h/0D0h/0F0h` into 23Eh,
+data out of 23Ch).
+
