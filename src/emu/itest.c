@@ -141,6 +141,49 @@ static const u8 c_bts_imm[]    = { 0x0F, 0xBA, 0xE8, 0x03 };  /* bts ax,3 */
 static const u8 c_btr_imm[]    = { 0x0F, 0xBA, 0xF0, 0x01 };  /* btr ax,1 */
 static const u8 c_btc_imm[]    = { 0x0F, 0xBA, 0xF8, 0x00 };  /* btc ax,0 */
 
+/* ---- 186 / 286 sweep ----
+ * Every stream below exists because the decoder used to get that instruction
+ * wrong (PUSH SP pushed the pre-decrement SP, so `cmp ax,sp` said "8086"),
+ * silently ignored it (BOUND), or answered a stub (SMSW wrote CR0, VERR
+ * overwrote its operand with the task register). */
+static const u8 c_push_sp[]     = { 0x54, 0x58 };                    /* push sp; pop ax */
+static const u8 c_pusha[]       = { 0x60 };                          /* pusha */
+static const u8 c_enter0[]      = { 0xC8, 0x08, 0x00, 0x00 };        /* enter 8,0 */
+static const u8 c_enter2[]      = { 0xC8, 0x04, 0x00, 0x02 };        /* enter 4,2 */
+static const u8 c_shl_cl[]      = { 0xD3, 0xE0 };                    /* shl ax,cl */
+static const u8 c_shl_imm4[]    = { 0xC1, 0xE0, 0x04 };              /* shl ax,4 (186 imm8) */
+static const u8 c_lmsw_smsw[]   = { 0xB9, 0x0C, 0x00,              /* mov cx,0Ch */
+                                    0x0F, 0x01, 0xF1,              /* lmsw cx   */
+                                    0x0F, 0x01, 0xE0,              /* smsw ax   */
+                                    0x33, 0xDB,                    /* xor bx,bx */
+                                    0x0F, 0x01, 0xF3 };            /* lmsw bx (restore) */
+static const u8 c_verr[]        = { 0xB8, 0x88, 0x00,              /* mov ax,88h */
+                                    0x0F, 0x00, 0xD0,              /* ltr ax    */
+                                    0x33, 0xC0,                    /* xor ax,ax */
+                                    0x0F, 0x00, 0xE0 };            /* verr ax   */
+static const u8 c_verw[]        = { 0xB8, 0x88, 0x00,              /* mov ax,88h */
+                                    0x0F, 0x00, 0xD0,              /* ltr ax    */
+                                    0x33, 0xC0,                    /* xor ax,ax */
+                                    0x0F, 0x00, 0xE8 };            /* verw ax   */
+static const u8 c_lar_null[]    = { 0xB8, 0x88, 0x00,              /* mov ax,88h */
+                                    0x0F, 0x00, 0xD0,              /* ltr ax    */
+                                    0x33, 0xC0,                    /* xor ax,ax */
+                                    0x0F, 0x02, 0xD0 };            /* lar dx,ax */
+static const u8 c_lsl_null[]    = { 0x33, 0xC0,                    /* xor ax,ax */
+                                    0x0F, 0x03, 0xD0 };            /* lsl dx,ax */
+static const u8 c_bsf_hit[]     = { 0x0F, 0xBC, 0xC3 };              /* bsf ax,bx */
+static const u8 c_bsf_zero[]    = { 0x0F, 0xBC, 0xC3 };              /* bsf ax,bx (bx=0) */
+static const u8 c_bsr_hit[]     = { 0x0F, 0xBD, 0xC3 };              /* bsr ax,bx */
+static const u8 c_cmpxchg_eq[]  = { 0x0F, 0xB1, 0xD3 };              /* cmpxchg bx,dx */
+static const u8 c_cmpxchg_ne[]  = { 0x0F, 0xB1, 0xD3 };              /* cmpxchg bx,dx */
+static const u8 c_xadd[]        = { 0x0F, 0xC1, 0xD3 };              /* xadd bx,dx */
+static const u8 c_bswap[]       = { 0x66, 0xB9, 0x78, 0x56, 0x34, 0x12,
+                                    0x0F, 0xC9,                    /* bswap ecx */
+                                    0x89, 0xC8 };                  /* mov ax,cx */
+static const u8 c_lgs[]         = { 0x0F, 0xB5, 0x07 };              /* lgs ax,[bx] */
+static const u8 c_insw[]        = { 0x6D };                          /* insw */
+static const u8 c_outsw[]       = { 0x6F };                          /* outsw */
+
 /* ---- memory fixtures (8 bytes each) ---- */
 static const u8 m_ff_tail[]      = { 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00 };
 static const u8 m_ff_b0[]        = { 0xFF, 0xFF, 0xFF, 0xB0, 0x00, 0x00, 0x00, 0x00 };
@@ -155,6 +198,11 @@ static const u8 m_stos_expect[]   = { 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0x00, 
 static const u8 m_movsw_expect[]  = { 0x78, 0x56, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12 };
 static const u8 m_lods_src[]      = { 0xCD, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 static const u8 m_bound_lim[]     = { 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00 };
+static const u8 m_zeros16[]       = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+/* PUSHA's stack image, lowest address first.  The pushes go AX CX DX BX SP BP
+ * SI DI, so the LAST one pushed (DI) sits lowest: DI SI BP SP BX DX CX AX. */
+static const u8 m_pusha_stack[]   = { 0x66, 0x66, 0x55, 0x55, 0x77, 0x77, 0x00, 0xFF,
+                                      0x22, 0x22, 0x44, 0x44, 0x33, 0x33, 0x11, 0x11 };
 
 static const it_case g_cases[] = {
     /* --- ALU with the register as destination.  Real bug: the result was
@@ -267,6 +315,93 @@ static const it_case g_cases[] = {
     CASE("bts ax,3", c_bts_imm, ((it_regs){.ax = 0x0000, .flags = 0x0002}), ((it_regs){.ax = 0x0008, .flags = 0x0002}), IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
     CASE("btr ax,1", c_btr_imm, ((it_regs){.ax = 0x0002, .flags = 0x0002}), ((it_regs){.ax = 0x0000, .flags = 0x0001}), IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
     CASE("btc ax,0", c_btc_imm, ((it_regs){.ax = 0x0001, .flags = 0x0002}), ((it_regs){.ax = 0x0000, .flags = 0x0001}), IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
+
+    /* ================= 186 sweep ===================================== */
+    /* PUSH SP is how every DOS-era program asks "is this an 8086 or a 186?",
+     * and the answer has to be "186 and later" (the new, decremented SP). */
+    CASE("push sp pushes the decremented value (186)", c_push_sp,
+         ((it_regs){.sp = 0xFF00}), ((it_regs){.ax = 0xFEFE, .sp = 0xFF00}),
+         IT_C_AX | IT_C_SP, 2, 0, 0, 0, 0, 0),
+    CASE("pusha stores 8 words in Intel order", c_pusha,
+         ((it_regs){.ax = 0x1111, .bx = 0x2222, .cx = 0x3333, .dx = 0x4444,
+                    .si = 0x5555, .di = 0x6666, .bp = 0x7777, .sp = 0xFF00}),
+         ((it_regs){.sp = 0xFEF0}), IT_C_SP | IT_C_MEM, 1,
+         m_zeros16, m_pusha_stack, IT_SEG, 0xFEF0, 16),
+    CASE("enter 8,0 leaves bp at the frame", c_enter0,
+         ((it_regs){.bp = 0x0777, .sp = 0xFF00}), ((it_regs){.bp = 0xFEFE, .sp = 0xFEF6}),
+         IT_C_BP | IT_C_SP, 1, 0, 0, 0, 0, 0),
+    /* level 2: the display copy must be frame-based, so BP ends up at the
+     * frame pointer (0FFFEh) and not at the top of the pushed display. */
+    CASE("enter 4,2 builds the display chain", c_enter2,
+         ((it_regs){.bp = 0x0777, .sp = 0xFF00}), ((it_regs){.bp = 0xFEFE, .sp = 0xFEF6}),
+         IT_C_BP | IT_C_SP, 1, 0, 0, 0, 0, 0),
+    CASE("shl ax,cl with cl=21h shifts by 1", c_shl_cl,
+         ((it_regs){.ax = 0x0001, .cx = 0x0021}), ((it_regs){.ax = 0x0002}),
+         IT_C_AX, 1, 0, 0, 0, 0, 0),
+    CASE("shl ax,cl with cl=0 keeps every flag", c_shl_cl,
+         ((it_regs){.ax = 0x1234, .cx = 0x0000, .flags = 0x0246}),
+         ((it_regs){.ax = 0x1234, .flags = 0x0246}),
+         IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
+    CASE("shl ax,4 (C1 imm8)", c_shl_imm4,
+         ((it_regs){.ax = 0x0001}), ((it_regs){.ax = 0x0010}),
+         IT_C_AX, 1, 0, 0, 0, 0, 0),
+
+    /* ================= 286 sweep ===================================== */
+    /* LMSW loads CR0's low nibble and SMSW must *read* it back.  The old
+     * decoder had the two swapped, so a 286 program that saved CR0 and
+     * restored it really loaded the saved value as CR0 twice. */
+    CASE("lmsW sets CR0 bits 0-3, smsw reads them", c_lmsw_smsw,
+         ((it_regs){}), ((it_regs){.ax = 0x000C}), IT_C_AX, 5, 0, 0, 0, 0, 0),
+    /* VERR/VERW on a null selector must report "no" (ZF=0) and must not touch
+     * the operand.  The old decoder treated /4 and /5 as STR and wrote the
+     * task register over the operand register. */
+    CASE("verr null selector: ZF=0, ax untouched", c_verr,
+         ((it_regs){.flags = 0x0246}), ((it_regs){.ax = 0x0000, .flags = 0x0004}),
+         IT_C_AX | IT_C_FLAGS, 4, 0, 0, 0, 0, 0),
+    CASE("verw null selector: ZF=0, ax untouched", c_verw,
+         ((it_regs){.flags = 0x0246}), ((it_regs){.ax = 0x0000, .flags = 0x0004}),
+         IT_C_AX | IT_C_FLAGS, 4, 0, 0, 0, 0, 0),
+    CASE("lar null selector: ZF=0, dx untouched", c_lar_null,
+         ((it_regs){.dx = 0x1234, .flags = 0x0246}),
+         ((it_regs){.dx = 0x1234, .flags = 0x0004}),
+         IT_C_DX | IT_C_FLAGS, 4, 0, 0, 0, 0, 0),
+    CASE("lsl null selector: ZF=0, dx untouched", c_lsl_null,
+         ((it_regs){.dx = 0x1234, .flags = 0x0246}),
+         ((it_regs){.dx = 0x1234, .flags = 0x0004}),
+         IT_C_DX | IT_C_FLAGS, 2, 0, 0, 0, 0, 0),
+
+    /* ================= 386 / 486 sweep =============================== */
+    CASE("bsf ax,bx finds bit 4", c_bsf_hit,
+         ((it_regs){.bx = 0x0010, .flags = 0x0246}), ((it_regs){.ax = 0x0004, .flags = 0x0004}),
+         IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
+    CASE("bsf ax,bx with bx=0 leaves ax and sets ZF", c_bsf_zero,
+         ((it_regs){.ax = 0x1234, .bx = 0x0000, .flags = 0x0202}),
+         ((it_regs){.ax = 0x1234, .flags = 0x0040}),
+         IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
+    CASE("bsr ax,bx finds bit 15", c_bsr_hit,
+         ((it_regs){.bx = 0x8000, .flags = 0x0246}), ((it_regs){.ax = 0x000F, .flags = 0x0004}),
+         IT_C_AX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
+    CASE("cmpxchg bx,dx equal stores dx", c_cmpxchg_eq,
+         ((it_regs){.ax = 0x0005, .bx = 0x0005, .dx = 0x0007, .flags = 0x0202}),
+         ((it_regs){.bx = 0x0007, .flags = 0x0040}), IT_C_BX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
+    CASE("cmpxchg bx,dx differ loads ax", c_cmpxchg_ne,
+         ((it_regs){.ax = 0x0005, .bx = 0x0003, .dx = 0x0007, .flags = 0x0246}),
+         ((it_regs){.ax = 0x0003, .bx = 0x0003, .flags = 0x0004}),
+         IT_C_AX | IT_C_BX | IT_C_FLAGS, 1, 0, 0, 0, 0, 0),
+    CASE("xadd bx,dx", c_xadd,
+         ((it_regs){.bx = 0x0002, .dx = 0x0003}), ((it_regs){.bx = 0x0005, .dx = 0x0002}),
+         IT_C_BX | IT_C_DX, 1, 0, 0, 0, 0, 0),
+    CASE("bswap ecx (1234 5678h -> 7856 3412h)", c_bswap,
+         ((it_regs){}), ((it_regs){.ax = 0x3412, .cx = 0x3412}), IT_C_AX | IT_C_CX, 3, 0, 0, 0, 0, 0),
+    CASE("lgs ax,[bx]", c_lgs,
+         ((it_regs){.bx = IT_DATA_OFF}), ((it_regs){.ax = 0x5678}), IT_C_AX, 1,
+         m_words, 0, IT_SEG, IT_DATA_OFF, 4),
+    CASE("insw from port 61h", c_insw,
+         ((it_regs){.di = IT_DATA_OFF}), ((it_regs){.di = IT_DATA_OFF + 2}), IT_C_DI, 1,
+         0, 0, 0, 0, 0),
+    CASE("outsw to port 61h", c_outsw,
+         ((it_regs){.si = IT_DATA_OFF}), ((it_regs){.si = IT_DATA_OFF + 2}), IT_C_SI, 1,
+         m_words, 0, IT_SEG, IT_DATA_OFF, 2),
 };
 
 #define IT_NCASES ((int)(sizeof(g_cases) / sizeof(g_cases[0])))

@@ -123,3 +123,68 @@ surfacing as "game X renders garbage".
 The `0F` list is deliberately *not* asserted: it is dominated by MMX/SSE and
 486-only system instructions that a DOS-era program cannot use, and it shrinks
 as those get implemented. Use `-v` to see which ones a new program needs.
+
+## 1.7.0 -- the 186 / 286 sweep
+
+The interpreter was already carrying most of the 186 and 286 additions, but
+several of them *decoded and then did the wrong thing*, which is worse than a
+missing opcode: a missing opcode stops the program with a message, a wrong one
+produces a plausible-looking bug report weeks later.  1.7.0 fixed these and
+added the rest, with a regression case for every one of them (`--itest` went
+from 68 to 90 checks, all passing):
+
+| Instruction | What was wrong | What it does now |
+| --- | --- | --- |
+| `PUSH SP` (54h) | pushed the value SP had **before** the decrement, i.e. it answered "I am an 8086" to the canonical `push sp / pop ax / cmp ax,sp` probe | pushes the decremented SP (186 and later) |
+| `SHL/SHR/SAR/ROL/ROR/RCL/RCR` with an imm8 or CL count | count was not taken modulo 32, and SZP flags were rewritten even when the count was zero | count `& 31`, count 0 leaves every flag alone |
+| `ENTER` (C8h) | `BP` was loaded with the pushed caller's BP instead of the frame pointer, and the display copy pushed the wrong value: a nested `ENTER` (static links, Pascal/Modula-2 runtimes) built a broken frame chain | Intel order: `push BP`, `frame = SP`, `(level-1) x { BP -= opsize; push [SS:BP] }`, `push frame`, `BP = frame`, `SP -= alloc` |
+| `BOUND` (62h) | decoded and ignored -- no trap at all | compares the signed index with the pair in memory and raises **INT 5** when it is outside |
+| `SMSW` (0F 01 /4) | **wrote** the operand into CR0 (that is `LMSW`) | reads CR0's low 16 bits into the operand (a register destination zero-extends) |
+| `LMSW` (0F 01 /6) | was a no-op (`/5` was decoded as it) | loads CR0 bits 0-3 and re-syncs the segment cache; it cannot clear PE, as on real silicon |
+| `VERR` / `VERW` (0F 00 /4, /5) | fell into the `STR` arm, so they wrote the task register over the operand | checks the descriptor's type and DPL against CPL/RPL and sets ZF |
+| `LAR` / `LSL` (0F 02, 0F 03) | always "ZF=0", dest zeroed | returns the access-rights word / the effective (granularity-adjusted) limit with ZF=1 |
+| `LSS` / `LFS` / `LGS` (0F B2/B4/B5) | unsupported opcode: the machine halted | load the far pointer into the segment register and the GPR, like `LES`/`LDS` |
+| `BSF` / `BSR` (0F BC/BD) | unsupported opcode: the machine halted | bit scan; ZF=1 (and the destination untouched) when the source is zero |
+| `CMPXCHG` (0F B0/B1), `XADD` (0F C0/C1), `CMPXCHG8B` (0F C7 /1), `BSWAP` (0F C8-CF) | unsupported: halted | implemented with the flags the SDM specifies |
+| `MOV r32, DRn` (0F 21), `MOV r32, TRn` (0F 25), `MOV TRn, r32` (0F 24/26) | unsupported: halted | accepted, debug/task registers read as zero |
+| `0F 18-1F` (multi-byte NOP hints), `0F 0D` (PREFETCHW) | unsupported: halted | decoded and ignored |
+
+`--ifuzz` after the sweep (the opcode audit, unchanged methodology):
+
+```
+ifuzz: 12800 streams, 1432 rejects      (was 1786 before 1.7.0)
+ifuzz: 8086 opcodes missing: 0F (1 total)
+ifuzz: 0F opcodes missing: 04 0A 0C 0E 0F 10 11 12 13 14 15 16 17 27 28 29 2A ... (138 total)
+```
+
+Every remaining `0F` hole is now either an SSE/MMX opcode or a reserved/undocumented
+encoding -- exactly the set a 386/486-class CPU *should* reject.  The 8086 row is
+still just the `0F` escape itself.
+
+New `--itest` cases (one per row above, plus `PUSHA` stack order, `INSW`/`OUTSW`,
+and `bswap ecx`):
+
+```
+push sp pushes the decremented value (186)
+pusha stores 8 words in Intel order
+enter 8,0 leaves bp at the frame
+enter 4,2 builds the display chain
+shl ax,cl with cl=21h shifts by 1
+shl ax,cl with cl=0 keeps every flag
+shl ax,4 (C1 imm8)
+lmsW sets CR0 bits 0-3, smsw reads them
+verr null selector: ZF=0, ax untouched
+verw null selector: ZF=0, ax untouched
+lar null selector: ZF=0, dx untouched
+lsl null selector: ZF=0, dx untouched
+bsf ax,bx finds bit 4
+bsf ax,bx with bx=0 leaves ax and sets ZF
+bsr ax,bx finds bit 15
+cmpxchg bx,dx equal stores dx
+cmpxchg bx,dx differ loads ax
+xadd bx,dx
+bswap ecx (1234 5678h -> 7856 3412h)
+lgs ax,[bx]
+insw from port 61h
+outsw to port 61h
+```

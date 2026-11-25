@@ -6,6 +6,10 @@
  * Windows host test harness.
  */
 #include "uefidos.h"
+#ifdef UEFIDOS_HOST
+#include <stdio.h>
+#include <stdlib.h>
+#endif
 #include "fs/fat.h"
 
 #define CLUSTER_BYTES(v) ((u32)(v)->spc * FAT_SEC)
@@ -474,6 +478,18 @@ static int set_fat_entry(fat_vol *v, u32 cl, u32 val)
     u32 byte = (v->fs_type == 32) ? cl * 4u : (v->fs_type == 16) ? cl * 2u : (cl * 3u) >> 1;
     u32 lba = v->fat_lba + byte / FAT_SEC;
     u32 off = byte % FAT_SEC;
+#ifdef UEFIDOS_HOST
+    if (getenv("UEFIDOS_TRACE_FATW")) {
+        static FILE *lf;
+        static int on = -1;
+        if (on < 0) on = getenv("UEFIDOS_TRACE_FATW") ? 1 : 0;
+        if (on) {
+            if (!lf) lf = fopen("build/fatw.txt", "w");
+            if (lf) { fprintf(lf, "set cl=%u val=0x%X lba=%u off=%u\n", (unsigned)cl, (unsigned)val,
+                              (unsigned)lba, (unsigned)off); fflush(lf); }
+        }
+    }
+#endif
     u8 *p;
     if (v->read_only) return FAT_EROFS;
     if (v->fs_type == 32) {
@@ -910,6 +926,16 @@ int fat_read_chain_byte(fat_vol *v, u32 start, u32 size, u32 offset, void *buf, 
         cl = nxt; pos += cbytes;
     }
     *io_bytes = done;
+#ifdef UEFIDOS_HOST
+    if (done == 0 && len > 0) {
+        static int on = -1;
+        if (on < 0) on = getenv("UEFIDOS_TRACE_CHAIN") ? 1 : 0;
+        if (on)
+            fprintf(stderr, "[chain] start=%u size=%u off=%u len=%u cbytes=%u exit_cl=%u pos=%u guard=%u\n",
+                    (unsigned)start, (unsigned)size, (unsigned)offset, (unsigned)len,
+                    (unsigned)cbytes, (unsigned)cl, (unsigned)pos, (unsigned)guard);
+    }
+#endif
     return FAT_OK;
 }
 

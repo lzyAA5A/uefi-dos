@@ -13,14 +13,42 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.6.0**.  Verified here by: the 8086 instruction suite (68 of 68), the
-host harness shell, FAT16/32 and dual-case checks, the QEMU + OVMF boot smoke
-tests for x86_64 and IA32, the release image booting to a live `C:\>` prompt,
-Windows 1.01 and 1.04 reaching their desktops, and Windows 1.01 booting from a
-**USB stick** under QEMU + OVMF with a working pointer
+Version **1.7.0**.  Verified here by: the 8086 + 186/286 instruction suite (90 of
+90), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB single-file
+write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU + OVMF boot
+smoke tests for x86_64 and IA32, the release image booting to a live `C:\>`
+prompt, Windows 1.01 and 1.04 reaching their desktops, and Windows 1.01 booting
+from a **USB stick** under QEMU + OVMF with a working pointer
 ([`docs/windows1x.md`](docs/windows1x.md), Round 38).  Two checks still skip
 unless real MS-DOS 2.11 / MS-DOS 5 floppy images are supplied (`UEFIDOS_DOS211`,
 `UEFIDOS_DOS5`).
+
+1.7.0 is the large-file and instruction-completeness round.  **The 32 MB "DOS 4.0
+file limit" was a testing boundary, not a limit in the code**: a single file can
+be written up to the FAT32 directory-entry ceiling of 4 GB - 1 through the
+ordinary DOS calls, verified here with a 1.5 GB file on a 1.9 GB FAT16 volume.
+For 16-bit programs that need to address past 2 GB, or streams bigger than one
+file can hold, there is a second, documented surface: **`INT E0h`** ("UEFI-DOS
+extended services") with 64-bit offsets, plus the split-file convention
+(`NAME.001`, `NAME.002`, ...) that the same API joins into one stream -- a
+single part is still capped at 4 GB - 1 by the filesystem, so N parts span
+N x (4 GB - 1).  `SPLIT` and `JOIN` in the shell make and unmake those parts;
+`SPLIT` defaults to 32 MB a part, the historical boundary, so every part stays
+readable by any DOS.  Building it surfaced a real filesystem bug: `dos_unlink`
+and `dos_rename` re-derived an 8.3 name from the caller's spelling, so deleting
+a **long-named** file (exactly what `NAME.001` is) silently failed and leaked
+its whole cluster chain -- eighty clusters per run on the test volume.  They now
+delete by the 8.3 name the directory entry actually carries.  On the instruction
+side, **the 186 and 286 sets are complete and correct**: `PUSH SP` now answers
+"186 or later" to the classic CPU probe, shift counts are taken modulo 32 and
+leave flags alone at zero, `ENTER`'s display chain is the one the SDM specifies,
+`BOUND` actually raises INT 5, `SMSW`/`LMSW` are no longer swapped, `VERR`/
+`VERW`/`LAR`/`LSL` consult the descriptor tables instead of answering stubs, and
+`LSS`/`LFS`/`LGS`, `BSF`/`BSR`, `CMPXCHG`, `XADD`, `CMPXCHG8B`, `BSWAP` and the
+`0F 18-1F` NOP hints no longer halt the machine.  `--itest` went from 68 to 90
+checks; `--ifuzz` reports every remaining `0F` hole as an SSE/MMX or reserved
+encoding ([`docs/itest.md`](docs/itest.md),
+[`docs/largefiles.md`](docs/largefiles.md)).
 
 1.6.0 is the real-hardware round.  **UEFI-DOS and Windows 1.01 fit on a plain
 FAT32 USB stick** -- no install, no BIOS, no bootloader: the firmware runs
@@ -337,7 +365,7 @@ for existing 16-bit code in [`docs/migration.md`](docs/migration.md).
 | FCB call family | stateless FCB layer (8.3 name re-resolved per call), 14 AH entry points, DTA is the record buffer |
 | Byte locks | `AH=5Ch AL=0/1`, overlap detection inside the handle table, conflicts report error 5 |
 | FAT16 large volumes | allocation cursor + free-cluster counter; `tools/mkfat16.py` builds 32 MB / 1.9 GB sparse test volumes |
-| File size | kept `u32`, practical 32 MB ceiling per DOS 4.0 semantics (verified on a 1.9 GB FAT16 volume) |
+| File size | `u32` size/offset in the DOS calls (FAT32 format ceiling 4 GB-1, verified with a 1.5 GB file); `INT E0h` gives 64-bit offsets, split files (`NAME.001`...) past that |
 | Reported version | `AH=30h` returns `AX=0x0004` (DOS 4.00); `VER` prints the same level. Set `UEFIDOS_DOSVER_*` in `src/uefidos_config.h` to claim another one |
 | Data structures | `AH=32h` synthesises a DPB per mounted drive in the reserved ROM window; `AH=52h` returns a list-of-lists whose `+2` points at that chain |
 | EXE image placement | `CONFIG.SYS` `EXECHIGH=ON` loads an EXE image flush against the top of the program's block instead of right after the PSP (what DOS itself does). `CONFIG` shows the current mode; the host harness has `UEFIDOS_EXEC_HIGH_IMAGE` |

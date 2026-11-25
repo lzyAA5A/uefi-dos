@@ -2407,3 +2407,198 @@ void int13_handler(Emu *e)
         return;
     }
 }
+
+/* ==================================================================== */
+/* INT E0h -- UEFI-DOS extended services                                */
+/*                                                                      */
+/* The DOS surface (INT 21h) stays byte-for-byte what DOS 3.30/4.0 does  */
+/* so that real DOS programs keep working.  Everything the DOS calls      */
+/* cannot express lives here, behind one vector and a request block:      */
+/*                                                                      */
+/*   AX=FD00h  detect: returns AX=5941h ("Y" "A"), BX='UD', CX=caps,      */
+/*             DX=version (0x0107 = 1.7)                                 */
+/*   AH=FDh, AL = function, ES:DI = BFR (big file request block)         */
+/*                                                                      */
+/* BFR layout (40 bytes, words little-endian):                          */
+/*   +0  qword  offset   in: READ/WRITE/SEEK, out: SEEK/SIZE            */
+/*   +8  dword  count    in: bytes wanted, out: bytes moved             */
+/*   +12 word   handle   out: OPEN, in: everything else                 */
+/*   +14 word   status   out: 0 = ok, else DOS error code (also in AX)  */
+/*   +16 dword  buf_off  in: far pointer to the data buffer             */
+/*   +20 word   buf_seg                                                 */
+/*   +22 word   flags    in (OPEN): bit 0 = do not join NAME.001 parts  */
+/*   +24 word   whence   in (SEEK): 0 absolute, 1 current, 2 end        */
+/*   +28 dword  size_lo  out: total size                                */
+/*   +32 dword  size_hi  out                                               */
+/*   +36 dword  parts    out: how many files the stream spans           */
+/*                                                                      */
+/* Functions: FD01 OPEN, FD02 READ, FD03 WRITE, FD04 SEEK, FD05 CLOSE,   */
+/*            FD06 SIZE.  Success clears CF, failure sets CF and puts the */
+/* DOS error code in AX (and in BFR.status).                             */
+/*                                                                      */
+/* Why a second API instead of "just make INT 21h 64-bit": every DOS     */
+/* program that walks a file does 32-bit arithmetic on the size and the  */
+/* position (EXEPACK compares them, Windows 1.x stores them in 16-bit    */
+/* fields, the turbo linkers seek with a signed 16:16 offset).  Keeping   */
+/* AH=3Fh/40h/42h at u32/2 GB is what makes those programs work; the      */
+/* 32 MB figure in docs/dos4-semantics.md 4.6 was a testing boundary,    */
+/* not a limit in the code -- a single file can be written up to the     */
+/* FAT32 directory-entry ceiling of 4 GB-1 through INT 21h alone.        */
+#define BFR_OFFSET   0u
+#define BFR_COUNT    8u
+#define BFR_HANDLE  12u
+#define BFR_STATUS  14u
+#define BFR_BUF_OFF 16u
+#define BFR_BUF_SEG 20u
+#define BFR_FLAGS   22u
+#define BFR_WHENCE  24u
+#define BFR_SIZE_LO 28u
+#define BFR_SIZE_HI 32u
+#define BFR_PARTS   36u
+#define BFR_LEN     40u
+
+static u64 bfr_get64(Emu *e, u16 seg, u16 off)
+{
+    u64 lo = emu_rd(e, seg, off);
+    u64 hi = emu_rd(e, seg, (u16)(off + 4));
+    return (hi << 32) | lo;
+}
+
+static void bfr_put64(Emu *e, u16 seg, u16 off, u64 v)
+{
+    emu_wd(e, seg, off, (u32)(v & 0xFFFFFFFFu));
+    emu_wd(e, seg, (u16)(off + 4), (u32)(v >> 32));
+}
+
+/* copy an ASCIIZ path out of DS:DX */
+static int bfr_path(Emu *e, char *out, int max)
+{
+    int n = 0;
+    for (;;) {
+        u8 ch = emu_rb(e, e->ds, (u16)(e->dx + n));
+        if (!ch) break;
+        if (n >= max - 1) return FAT_ENOPATH;
+        out[n++] = (char)ch;
+    }
+    out[n] = 0;
+    return n ? FAT_OK : FAT_ENOPATH;
+}
+
+void int_e0_handler(Emu *e)
+{
+    u16 seg = e->es, off = e->di;
+    u8 fn = (u8)(e->ax & 0xFF);
+    int rc = FAT_OK;
+    u64 size = 0;
+    int bh = -1;
+
+    if (e->ax == 0xFD00) {                      /* detect / capability */
+        set_ok(e);
+        e->ax = 0x5941;                         /* presence signature */
+        e->bx = 0x4455;                         /* 'U' 'D' */
+        e->cx = 0x0003;                         /* bit0 64-bit, bit1 parts */
+        e->dx = 0x0107;                         /* version 1.7 */
+        return;
+    }
+    if ((e->ax >> 8) != 0xFD) {
+        set_err(e, 1);
+        return;
+    }
+
+    switch (fn) {
+    case 0x01: {                                /* OPEN */
+        char path[DOS_MAX_PATH];
+        int flags = (int)emu_rw(e, seg, (u16)(off + BFR_FLAGS));
+        rc = bfr_path(e, path, sizeof(path));
+        if (rc == FAT_OK) rc = dos_big_open(path, flags, &bh, &size);
+        if (rc == FAT_OK) {
+            emu_ww(e, seg, (u16)(off + BFR_HANDLE), (u16)bh);
+            emu_wd(e, seg, (u16)(off + BFR_SIZE_LO), (u32)(size & 0xFFFFFFFFu));
+            emu_wd(e, seg, (u16)(off + BFR_SIZE_HI), (u32)(size >> 32));
+            emu_wd(e, seg, (u16)(off + BFR_PARTS), (u32)dos_big_parts(bh));
+            bfr_put64(e, seg, (u16)(off + BFR_OFFSET), size);
+        }
+        break;
+    }
+    case 0x02: {                                /* READ */
+        u16 h = emu_rw(e, seg, (u16)(off + BFR_HANDLE));
+        u64 at = bfr_get64(e, seg, (u16)(off + BFR_OFFSET));
+        u32 want = emu_rd(e, seg, (u16)(off + BFR_COUNT));
+        u16 bseg = emu_rw(e, seg, (u16)(off + BFR_BUF_SEG));
+        u16 boff = emu_rw(e, seg, (u16)(off + BFR_BUF_OFF));
+        u32 done = 0;
+        while (done < want) {
+            u8 tmp[1024];
+            u32 n = want - done, k = 0, i;
+            if (n > (u32)sizeof(tmp)) n = (u32)sizeof(tmp);
+            rc = dos_big_read((int)h, at + done, tmp, n, &k);
+            if (rc != FAT_OK) break;
+            for (i = 0; i < k; i++)
+                emu_wb(e, bseg, (u16)(boff + done + i), tmp[i]);   /* far pointer wraps */
+            done += k;
+            if (k < n) break;
+        }
+        emu_wd(e, seg, (u16)(off + BFR_COUNT), done);
+        emu_wd(e, seg, (u16)(off + BFR_STATUS), rc == FAT_OK ? 0 : 1);
+        break;
+    }
+    case 0x03: {                                /* WRITE */
+        u16 h = emu_rw(e, seg, (u16)(off + BFR_HANDLE));
+        u64 at = bfr_get64(e, seg, (u16)(off + BFR_OFFSET));
+        u32 want = emu_rd(e, seg, (u16)(off + BFR_COUNT));
+        u16 bseg = emu_rw(e, seg, (u16)(off + BFR_BUF_SEG));
+        u16 boff = emu_rw(e, seg, (u16)(off + BFR_BUF_OFF));
+        u32 done = 0;
+        while (done < want) {
+            u8 tmp[1024];
+            u32 n = want - done, k = 0, i;
+            if (n > (u32)sizeof(tmp)) n = (u32)sizeof(tmp);
+            for (i = 0; i < n; i++) tmp[i] = emu_rb(e, bseg, (u16)(boff + done + i));
+            rc = dos_big_write((int)h, at + done, tmp, n, &k);
+            if (rc != FAT_OK) break;
+            done += k;
+            if (k < n) break;
+        }
+        emu_wd(e, seg, (u16)(off + BFR_COUNT), done);
+        if (rc == FAT_OK) bfr_put64(e, seg, (u16)(off + BFR_OFFSET), at + done);
+        break;
+    }
+    case 0x04: {                                /* SEEK / TELL */
+        u16 h = emu_rw(e, seg, (u16)(off + BFR_HANDLE));
+        u64 at = bfr_get64(e, seg, (u16)(off + BFR_OFFSET));
+        u16 whence = emu_rw(e, seg, (u16)(off + BFR_WHENCE));
+        u64 pos = 0;
+        rc = dos_big_seek((int)h, at, (int)whence, &pos);
+        if (rc == FAT_OK) bfr_put64(e, seg, (u16)(off + BFR_OFFSET), pos);
+        break;
+    }
+    case 0x05: {                                /* CLOSE */
+        u16 h = emu_rw(e, seg, (u16)(off + BFR_HANDLE));
+        rc = dos_big_close((int)h);
+        break;
+    }
+    case 0x06: {                                /* SIZE */
+        u16 h = emu_rw(e, seg, (u16)(off + BFR_HANDLE));
+        rc = dos_big_size((int)h, &size);
+        if (rc == FAT_OK) {
+            bfr_put64(e, seg, (u16)(off + BFR_OFFSET), size);
+            emu_wd(e, seg, (u16)(off + BFR_SIZE_LO), (u32)(size & 0xFFFFFFFFu));
+            emu_wd(e, seg, (u16)(off + BFR_SIZE_HI), (u32)(size >> 32));
+            emu_wd(e, seg, (u16)(off + BFR_PARTS), (u32)dos_big_parts((int)h));
+        }
+        break;
+    }
+    default:
+        rc = FAT_EINVAL;
+        break;
+    }
+
+    if (rc != FAT_OK) {
+        u8 code = (u8)dos_error_code(rc);
+        emu_ww(e, seg, (u16)(off + BFR_STATUS), (u16)code);
+        set_err(e, code);
+    } else {
+        emu_ww(e, seg, (u16)(off + BFR_STATUS), 0);
+        set_ok(e);
+    }
+}

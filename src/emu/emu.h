@@ -250,6 +250,7 @@ void dos_jft_sync(Emu *e);    /* publish PSP:18h job file table (emu/int21.c) */
 int  fcb_int21(Emu *e, u8 ah);
 void int31_handler(Emu *e);   /* DPMI (emu/dpmi.c) */
 void int60_handler(Emu *e);   /* DPMI real-mode host entry */
+void int_e0_handler(Emu *e);  /* INT E0h: UEFI-DOS extended services (large files) */
 int  dpmi_install_check(Emu *e);
 void pm_patch_idt(Emu *e);    /* install service gates after LIDT */
 int  step_public(Emu *e);     /* execute one instruction (DPMI reflection) */

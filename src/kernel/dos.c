@@ -583,7 +583,16 @@ int dos_unlink(const char *path)
     }
     if (root) return FAT_EACCES;
     if (d.raw[11] & 0x01) return FAT_EACCES;   /* read-only attribute */
-    return fat_delete_file(vol_of(drive), parent, nm);
+    /* Delete by the 8.3 name the entry actually carries, not by one derived from
+     * the caller's spelling: a long-named file (SPLIT.DAT.001) lives under a
+     * generated alias (SPLIT~1.DAT), and re-deriving the name always produced a
+     * name that does not exist -- so the unlink failed silently and the whole
+     * cluster chain stayed allocated. */
+    {
+        u8 del11[11];
+        memcpy(del11, d.raw, 11);
+        return fat_delete_file(vol_of(drive), parent, del11);
+    }
 }
 
 int dos_rename(const char *oldp, const char *newp)
@@ -632,7 +641,13 @@ int dos_rename(const char *oldp, const char *newp)
     fat_dirent chk;
     if (fat_find(vol_of(d1), parent, nnm, &chk, NULL, NULL, NULL) == FAT_OK)
         return FAT_EEXIST;
-    return fat_rename_entry(vol_of(d1), parent, onm, nnm);
+    {
+        /* rename the entry by the 8.3 name it actually carries (a long-named
+         * file lives under a generated alias, see dos_unlink) */
+        u8 old11[11];
+        memcpy(old11, od.raw, 11);
+        return fat_rename_entry(vol_of(d1), parent, old11, nnm);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -698,6 +713,7 @@ int dos_open(const char *path, int mode, int *out)
 
 #ifdef UEFIDOS_HOST
 #include <stdlib.h>
+#include <stdio.h>
 /* UEFIDOS_TRACE_OPEN=1 (host only): name every file that opened successfully.
  * Windows 1.x pulls its shell/kernel modules through this path, so this trace is
  * how you tell which modules a session actually loaded from disk. */
@@ -707,6 +723,18 @@ static int trace_open(void)
     if (on < 0) on = getenv("UEFIDOS_TRACE_OPEN") ? 1 : 0;
     return on;
 }
+/* UEFIDOS_TRACE_BIG=1 (host only): one line per failing big-file step.  A
+ * part-boundary read is the only place where two handles are involved in one
+ * request, so a failure there has to name the part and the DOS error. */
+static int trace_big(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("UEFIDOS_TRACE_BIG") ? 1 : 0;
+    return on;
+}
+#define big_note(fmt, ...) do { if (trace_big()) fprintf(stderr, fmt, __VA_ARGS__); } while (0)
+#else
+#define big_note(fmt, ...) ((void)0)
 #endif
 
 /* DOS resolves device names BEFORE the directory, and a device name matches in
@@ -1059,6 +1087,273 @@ int dos_lseek(int h, u32 pos)
     dos_handle *H = &g_dos.handles[h];
     if (!H->used || H->console) return FAT_EINVAL;
     H->pos = pos;
+    return FAT_OK;
+}
+
+int dos_filesize(int h, u32 *size)
+{
+    if (h < 0 || h >= DOS_HANDLE_MAX) return FAT_EINVAL;
+    dos_handle *H = &g_dos.handles[h];
+    if (!H->used || H->console) return FAT_EINVAL;
+    if (size) *size = H->size;
+    return FAT_OK;
+}
+
+/* ==================================================================== */
+/* Large files: 64-bit offsets, and split ("cut") files joined as one    */
+/*                                                                      */
+/* The INT 21h surface is left exactly as DOS has it: a handle carries a */
+/* u32 position, so a program addresses 4 GB-1 bytes with AH=3Fh/40h and */
+/* 2 GB with AH=42h (its CX:DX offset is signed).  Both limits are kept  */
+/* because every DOS program expects that arithmetic -- EXEPACK, Windows */
+/* 1.x and the turbo linkers all compare 32-bit sizes.  What goes past    */
+/* them is this second, documented layer:                                */
+/*                                                                      */
+/*   dos_big_open("C:\\BIG.ISO")  joins BIG.ISO.001, BIG.ISO.002, ...    */
+/*   dos_big_read(bh, off64, buf, len, &got)                            */
+/*                                                                      */
+/* A single part is still capped at 4 GB-1 by the 32-bit size in the FAT */
+/* directory entry.  That is the filesystem's limit, not a decision, and */
+/* it is exactly why the parts convention exists: N parts span N*(4 GB-1) */
+/* bytes.  A joined file is read-only (its bytes live in several files);  */
+/* a plain, single-file big handle can be written.                       */
+#define DOS_BIG_MAX       2
+#define DOS_BIG_MAX_PARTS 100
+
+typedef struct {
+    int used;
+    int nparts;
+    int h;              /* handle of the part that is open right now */
+    int idx;
+    u32 part_size;      /* size of every part but the last */
+    u32 last_size;
+    u64 size;           /* total across every part */
+    u64 pos;            /* cursor kept for SEEK/TELL (READ/WRITE take an offset) */
+    int writable;
+    char path[DOS_MAX_PATH];
+} dos_big;
+
+static dos_big g_big[DOS_BIG_MAX];
+
+static dos_big *big_of(int bh)
+{
+    if (bh < 0 || bh >= DOS_BIG_MAX) return 0;
+    if (!g_big[bh].used) return 0;
+    return &g_big[bh];
+}
+
+/* "C:\BIG.ISO" + index 0 -> "C:\BIG.ISO.001" */
+static void big_part_name(const char *base, int idx, char *out, int max)
+{
+    int i = 0;
+    unsigned n = (unsigned)(idx + 1);
+    while (base[i] && i < max - 5) { out[i] = base[i]; i++; }
+    out[i++] = '.';
+    out[i++] = (char)('0' + (n / 100u) % 10u);
+    out[i++] = (char)('0' + (n / 10u) % 10u);
+    out[i++] = (char)('0' + n % 10u);
+    out[i] = 0;
+}
+
+static int big_size_of(const char *path, u32 *size)
+{
+    /* An ordinary open, not a directory scan: split parts carry names like
+     * NAME.ISO.001, which is a VFAT long name, and the 8.3 pattern matcher
+     * behind find-first would only see SPLIT~1.DAT. */
+    int h = -1;
+    u32 sz = 0;
+    if (dos_open(path, 2, &h) != FAT_OK) return FAT_ENOENT;
+    dos_filesize(h, &sz);
+    dos_close(h);
+    if (size) *size = sz;
+    return FAT_OK;
+}
+
+/* Make part `idx` the one that is open.  mode 2 = read only, 0 = read/write. */
+static int big_activate(dos_big *b, int idx, int mode)
+{
+    char nm[DOS_MAX_PATH + 8];
+    int h = -1, rc, i;
+    if (b->h >= 0 && b->idx == idx) return FAT_OK;
+    if (b->h >= 0) { dos_close(b->h); b->h = -1; b->idx = -1; }
+    if (b->nparts > 1) big_part_name(b->path, idx, nm, sizeof(nm));
+    else {
+        for (i = 0; b->path[i] && i < (int)sizeof(nm) - 1; i++) nm[i] = b->path[i];
+        nm[i] = 0;
+    }
+    rc = dos_open(nm, mode, &h);
+    if (rc != FAT_OK) return rc;
+    b->h = h;
+    b->idx = idx;
+    return FAT_OK;
+}
+
+int dos_big_open(const char *path, int flags, int *bh_out, u64 *size_out)
+{
+    char abs[DOS_MAX_PATH], nm[DOS_MAX_PATH + 8];
+    int drive, rc, i, slot = -1, nparts = 0, tail = 0;
+    u32 part = 0, last = 0, sz = 0;
+
+    if (bh_out) *bh_out = -1;
+    if (size_out) *size_out = 0;
+    rc = dos_parse_path(path, &drive, abs, sizeof(abs));
+    if (rc != FAT_OK) return rc;
+    for (i = 0; i < DOS_BIG_MAX; i++) if (!g_big[i].used) { slot = i; break; }
+    if (slot < 0) return FAT_EMFILE;
+
+    if (!(flags & 1)) {
+        /* Does NAME.001 exist?  If so this is a split file. */
+        big_part_name(abs, 0, nm, sizeof(nm));
+        if (big_size_of(nm, &sz) == FAT_OK) {
+            part = sz;
+            last = sz;
+            nparts = 1;
+            for (i = 1; i < DOS_BIG_MAX_PARTS; i++) {
+                big_part_name(abs, i, nm, sizeof(nm));
+                if (big_size_of(nm, &sz) != FAT_OK) break;
+                if (tail) { tail = -1; break; }       /* data after a short part */
+                if (sz != part) tail = 1;             /* short part: must be the last */
+                last = sz;
+                nparts++;
+            }
+            if (tail < 0) return FAT_ECORRUPT;
+        }
+    }
+    if (nparts == 0) {
+        /* a plain (unsplit) file */
+        if (big_size_of(abs, &sz) != FAT_OK) return FAT_ENOENT;
+        if (!(flags & 2)) {
+            /* the size is only useful to a reader; keep reject-if-missing */
+        }
+        part = sz;
+        last = sz;
+        nparts = 1;
+    }
+    {
+        dos_big *b = &g_big[slot];
+        int j;
+        for (j = 0; abs[j] && j < DOS_MAX_PATH - 1; j++) b->path[j] = abs[j];
+        b->path[j] = 0;
+        b->used = 1;
+        b->nparts = nparts;
+        b->h = -1;
+        b->idx = -1;
+        b->part_size = part;
+        b->last_size = last;
+        b->size = (u64)part * (u64)(nparts - 1) + (u64)last;
+        b->pos = 0;
+        b->writable = (nparts == 1);
+        if (bh_out) *bh_out = slot;
+        if (size_out) *size_out = b->size;
+    }
+    return FAT_OK;
+}
+
+int dos_big_read(int bh, u64 off, void *buf, u32 len, u32 *got)
+{
+    dos_big *b;
+    u32 done = 0;
+    if (got) *got = 0;
+    if ((b = big_of(bh)) == 0) return FAT_EINVAL;
+    if (off >= b->size || b->part_size == 0) return FAT_OK;
+    if ((u64)len > b->size - off) len = (u32)(b->size - off);
+    while (done < len) {
+        u64 cur = off + (u64)done;
+        int idx = (int)(cur / (u64)b->part_size);
+        u32 within = (u32)(cur % (u64)b->part_size);
+        u32 avail = b->part_size, n = len - done, part_got = 0;
+        int rc;
+        if (idx >= b->nparts) break;
+        if (idx == b->nparts - 1) avail = b->last_size;
+        if (within >= avail) break;
+        if (n > avail - within) n = avail - within;
+        rc = big_activate(b, idx, 2);
+        if (rc != FAT_OK) { big_note("[big] activate part %d failed rc=%d\n", idx, rc); return rc; }
+        rc = dos_lseek(b->h, within);
+        if (rc != FAT_OK) { big_note("[big] seek part %d to %u failed rc=%d\n", idx, (unsigned)within, rc); return rc; }
+        rc = dos_read(b->h, (u8 *)buf + done, n, &part_got);
+        if (rc != FAT_OK) { big_note("[big] read part %d at %u len %u failed rc=%d\n", idx, (unsigned)within, (unsigned)n, rc); return rc; }
+        if (part_got == 0) big_note("[big] part %d at %u len %u returned 0 (size %u pos %u)\n",
+                                   idx, (unsigned)within, (unsigned)n,
+                                   (unsigned)g_dos.handles[b->h].size, (unsigned)g_dos.handles[b->h].pos);
+        done += part_got;
+        if (part_got < n) break;                       /* short part: stop cleanly */
+    }
+    if (got) *got = done;
+    b->pos = off + (u64)done;
+    return FAT_OK;
+}
+
+int dos_big_write(int bh, u64 off, const void *buf, u32 len, u32 *put)
+{
+    dos_big *b = big_of(bh);
+    u32 putn = 0;
+    int rc;
+    if (put) *put = 0;
+    if (!b) return FAT_EINVAL;
+    if (!b->writable) return FAT_EACCES;               /* joined parts are read-only */
+    if (off > 0xFFFFFFFFu || (u64)len > 0xFFFFFFFFu - off) return FAT_EINVAL;
+    rc = big_activate(b, 0, 0);
+    if (rc != FAT_OK) return rc;
+    rc = dos_lseek(b->h, (u32)off);
+    if (rc != FAT_OK) return rc;
+    rc = dos_write(b->h, buf, len, &putn);
+    if (rc != FAT_OK) return rc;
+    if (off + (u64)putn > b->size) {
+        b->size = off + (u64)putn;
+        b->part_size = (u32)b->size;
+        b->last_size = (u32)b->size;
+    }
+    if (put) *put = putn;
+    b->pos = off + (u64)putn;
+    return FAT_OK;
+}
+
+int dos_big_seek(int bh, u64 off, int whence, u64 *newpos)
+{
+    dos_big *b = big_of(bh);
+    u64 p;
+    if (!b) return FAT_EINVAL;
+    if (whence == 0) p = off;
+    else if (whence == 1) p = b->pos + off;          /* off is a two's complement delta */
+    else if (whence == 2) p = b->size + off;
+    else return FAT_EINVAL;
+    if (p > b->size) p = b->size;
+    b->pos = p;
+    if (newpos) *newpos = p;
+    return FAT_OK;
+}
+
+int dos_big_tell(int bh, u64 *pos)
+{
+    dos_big *b = big_of(bh);
+    if (!b || !pos) return FAT_EINVAL;
+    *pos = b->pos;
+    return FAT_OK;
+}
+
+int dos_big_size(int bh, u64 *size)
+{
+    dos_big *b = big_of(bh);
+    if (!b || !size) return FAT_EINVAL;
+    *size = b->size;
+    return FAT_OK;
+}
+
+int dos_big_parts(int bh)
+{
+    dos_big *b = big_of(bh);
+    return b ? b->nparts : 0;
+}
+
+int dos_big_close(int bh)
+{
+    dos_big *b = big_of(bh);
+    if (!b) return FAT_EINVAL;
+    if (b->h >= 0) dos_close(b->h);
+    b->used = 0;
+    b->h = -1;
+    b->idx = -1;
     return FAT_OK;
 }
 

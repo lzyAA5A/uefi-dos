@@ -340,6 +340,146 @@ static int cmd_copy(const char *rest)
     return rc;
 }
 
+/* ---- SPLIT / JOIN: the split-file ("cut") convention ------------------
+ *
+ * A single FAT32 file stops at 4 GB-1 because the directory entry stores a
+ * 32-bit size.  The way past that is to cut the stream into parts and read
+ * them as one file: NAME.001, NAME.002, ...  The INT E0h big-file service and
+ * dos_big_open() already join those automatically; SPLIT is how you make
+ * them and JOIN is how you put one back together. */
+static void part_name_of(const char *base, int idx, char *out, int max)
+{
+    int i = 0;
+    unsigned n = (unsigned)(idx + 1);
+    while (base[i] && i < max - 5) { out[i] = base[i]; i++; }
+    out[i++] = '.';
+    out[i++] = (char)('0' + (n / 100u) % 10u);
+    out[i++] = (char)('0' + (n / 10u) % 10u);
+    out[i++] = (char)('0' + n % 10u);
+    out[i] = 0;
+}
+
+static void say_u32(u32 v, const char *tail)
+{
+    char b[12];
+    int n = 0;
+    if (v == 0) b[n++] = '0';
+    while (v) { b[n++] = (char)('0' + (int)(v % 10u)); v /= 10u; }
+    while (n) plat_putc(b[--n]);
+    if (tail) plat_puts(tail); else plat_putc('\n');
+}
+
+/* SPLIT <file> [part-KB] -- default part size 32 MB, the DOS 4.0 boundary */
+static int cmd_split(const char *rest)
+{
+    char buf[DOS_MAX_PATH];
+    u8 chunk[2048];
+    char *p, *s, *k;
+    int hs = -1, hd = -1, rc;
+    int idx = 0, parts = 0;
+    u32 part_kb = 32u * 1024u, part_bytes, in_part = 0;
+
+    strncpy(buf, rest, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    p = buf;
+    s = next_token(&p);
+    k = next_token(&p);
+    if (!*s) { say("Required parameter missing"); return FAT_EINVAL; }
+    if (*k) {
+        u32 kb = 0;
+        for (const char *q = k; *q >= '0' && *q <= '9'; q++) kb = kb * 10u + (u32)(*q - '0');
+        if (kb) part_kb = kb;
+    }
+    part_bytes = part_kb * 1024u;
+    if (part_bytes == 0) part_bytes = 32u * 1024u * 1024u;
+
+    rc = dos_open(s, 0, &hs);
+    if (rc != FAT_OK) return rc;
+    for (;;) {
+        u32 got = 0, off = 0;
+        rc = dos_read(hs, chunk, sizeof(chunk), &got);
+        if (rc != FAT_OK) break;
+        if (got == 0) break;
+        if (hd < 0) {
+            char nm[DOS_MAX_PATH + 8];
+            part_name_of(s, idx++, nm, sizeof(nm));
+            rc = dos_creat(nm, &hd);
+            if (rc != FAT_OK) { hd = -1; break; }
+            in_part = 0;
+            parts++;
+        }
+        while (off < got) {
+            u32 room = part_bytes - in_part;
+            u32 n = got - off, put = 0;
+            if (n > room) n = room;
+            rc = dos_write(hd, chunk + off, n, &put);
+            if (rc != FAT_OK || put != n) { if (rc == FAT_OK) rc = FAT_EIO; break; }
+            off += put;
+            in_part += put;
+            if (in_part >= part_bytes && off < got) {
+                char nm[DOS_MAX_PATH + 8];
+                dos_close(hd);
+                hd = -1;
+                part_name_of(s, idx++, nm, sizeof(nm));
+                rc = dos_creat(nm, &hd);
+                if (rc != FAT_OK) { hd = -1; break; }
+                in_part = 0;
+                parts++;
+            }
+        }
+        if (rc != FAT_OK) break;
+    }
+    if (hd >= 0) dos_close(hd);
+    dos_close(hs);
+    if (rc == FAT_OK) {
+        plat_puts("Split into ");
+        say_u32((u32)parts, " part(s), ");
+        say_u32(part_kb / 1024u, " MB each\n");
+    }
+    return rc;
+}
+
+/* JOIN <part-base> [output] -- write the joined stream to one file */
+static int cmd_join(const char *rest)
+{
+    char buf[DOS_MAX_PATH];
+    static u8 chunk[4096];
+    char *p, *s, *d;
+    int bh = -1, hd = -1, rc;
+    u64 size = 0, done = 0;
+
+    strncpy(buf, rest, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    p = buf;
+    s = next_token(&p);
+    d = next_token(&p);
+    if (!*s) { say("Required parameter missing"); return FAT_EINVAL; }
+    rc = dos_big_open(s, 0, &bh, &size);
+    if (rc != FAT_OK) return rc;
+    rc = dos_creat(*d ? d : s, &hd);
+    if (rc != FAT_OK) { dos_big_close(bh); return rc; }
+    while (done < size) {
+        u32 want = (size - done > (u64)sizeof(chunk)) ? (u32)sizeof(chunk) : (u32)(size - done);
+        u32 got = 0, put = 0;
+        rc = dos_big_read(bh, done, chunk, want, &got);
+        if (rc != FAT_OK || got == 0) break;
+        rc = dos_write(hd, chunk, got, &put);
+        if (rc != FAT_OK || put != got) { if (rc == FAT_OK) rc = FAT_EIO; break; }
+        done += put;
+    }
+    dos_close(hd);
+    {
+        int np = dos_big_parts(bh);
+        dos_big_close(bh);
+        if (rc == FAT_OK) {
+            plat_puts("Joined ");
+            say_u32((u32)np, " part(s), ");
+            say_u32((u32)(done >> 20), " MB written\n");
+        }
+    }
+    return rc;
+}
+
 static int cmd_del(const char *spec)
 {
     if (wildcard(spec)) {
@@ -673,6 +813,16 @@ static int dispatch(char *line)
     if (ci_equal(cmd, "COPY")) {
         int rc = cmd_copy(arg);
         if (rc != FAT_OK) say_rc(rc, "COPY");
+        return FAT_OK;
+    }
+    if (ci_equal(cmd, "SPLIT")) {
+        int rc = cmd_split(arg);
+        if (rc != FAT_OK) say_rc(rc, "SPLIT");
+        return FAT_OK;
+    }
+    if (ci_equal(cmd, "JOIN")) {
+        int rc = cmd_join(arg);
+        if (rc != FAT_OK) say_rc(rc, "JOIN");
         return FAT_OK;
     }
     if (ci_equal(cmd, "ECHO")) { cmd_echo(arg); return FAT_OK; }

@@ -2169,20 +2169,68 @@ static int step_fpu(Emu *e, u8 op, int seg_ov)
 /* ------------------------------------------------------------------ */
 /* two-byte (0F xx) opcodes: 386 extensions + protected-mode control   */
 /* ------------------------------------------------------------------ */
+/* ---- 286 system instructions: selector validation ------------------ */
+/* VERR/VERW (0F 00 /4 and /5), LAR (0F 02) and LSL (0F 03) are how a 286
+ * program asks the descriptor tables what a selector may do.  A 286
+ * protected-mode runtime (Windows/286 itself, LIM 4.0 drivers, the Borland
+ * and Microsoft 286 extenders) probes a far pointer with VERR before it
+ * touches it and caches a segment limit with LSL, so answering "ZF=0 always"
+ * makes it refuse selectors that are perfectly valid. */
+static int desc_for_sel(Emu *e, u16 sel, u32 *base, u32 *limit, u16 *attr)
+{
+    unsigned acc, type;
+    if (sel == 0) return 0;                       /* the null selector never tests */
+    if (!read_desc(e, sel, base, limit, attr)) return 0;
+    acc = (unsigned)(*attr & 0xFFu);
+    type = acc & 0x0Fu;
+    if (!(acc & 0x10u)) {                         /* system descriptor */
+        if (type == 0 || type == 8) return 0;     /* invalid / reserved */
+        if (type == 0x0Au || type == 0x0Du) return 0;
+    }
+    return 1;
+}
+
+static unsigned desc_cpl(Emu *e) { return (e->cr0 & CR0_PE) ? (unsigned)(e->cs & 3u) : 0u; }
+
+/* VERR (write==0) / VERW (write==1): is SEL accessible at the current
+ * privilege level and, for VERW, actually writable? */
+static int sel_access_ok(Emu *e, u16 sel, int write)
+{
+    u32 base, limit;
+    u16 attr;
+    unsigned acc, type, dpl, priv;
+    if (!desc_for_sel(e, sel, &base, &limit, &attr)) return 0;
+    acc = (unsigned)(attr & 0xFFu);
+    type = acc & 0x0Fu;
+    dpl = (acc >> 5) & 3u;
+    priv = desc_cpl(e);
+    if ((unsigned)(sel & 3u) > priv) priv = (unsigned)(sel & 3u);
+    if (!(acc & 0x10u)) return 0;                 /* system: neither R nor W */
+    if (write) {
+        if (type & 0x08u) return 0;               /* code segment */
+        if (!(type & 0x02u)) return 0;            /* read-only data */
+    } else if ((type & 0x08u) && !(type & 0x02u)) {
+        return 0;                                 /* execute-only code */
+    }
+    return dpl >= priv;
+}
+
 static int step_386(Emu *e, int seg_ov)
 {
     u8 op2 = fetch8(e);
     int width = (op_is32(e) ? 32 : 16);
 
     switch (op2) {
-    case 0x00: { /* LLDT / SLDT / LTR / STR */
+    case 0x00: { /* LLDT / SLDT / LTR / STR and VERR / VERW (286) */
         MRM m;
         decode_mrm(e, &m, seg_ov);
         switch (m.reg) {
         case 0: e->ldtr = (u16)mrm_r16(e, &m); break;              /* LLDT */
         case 1: mrm_w16(e, &m, e->ldtr); break;                    /* SLDT */
         case 2: e->tr = (u16)mrm_r16(e, &m); break;                /* LTR */
-        default: mrm_w16(e, &m, e->tr); break;                     /* STR */
+        case 3: mrm_w16(e, &m, e->tr); break;                      /* STR */
+        case 4: setf(e, F_ZF, sel_access_ok(e, (u16)mrm_r16(e, &m), 0)); break; /* VERR */
+        default: setf(e, F_ZF, sel_access_ok(e, (u16)mrm_r16(e, &m), 1)); break; /* VERW */
         }
         return 0;
     }
@@ -2217,8 +2265,24 @@ static int step_386(Emu *e, int seg_ov)
             pm_patch_idt(e);
             break;
         }
-        case 4: e->cr0 = (e->cr0 & 0xFFFFFFF0u) | (u32)(mrm_r16(e, &m) & 0x000F); break; /* SMSW */
-        case 5: break;                                             /* LMSW */
+        case 4: { /* SMSW: *read* the machine status word.  This used to write
+                   * the operand into CR0, which is what LMSW does -- so a 286
+                   * program that saved CR0 with SMSW and later restored it
+                   * with LMSW was loading garbage (usually PE=0, i.e. it fell
+                   * back into real mode in the middle of protected code). */
+            if (m.is_reg && width == 32) w32(e, m.rm, e->cr0 & 0x0000FFFFu);
+            else mrm_w16(e, &m, (u16)(e->cr0 & 0xFFFFu));
+            break;
+        }
+        case 5: break;                                             /* reserved */
+        case 6: { /* LMSW: load CR0 bits 0-3 (PE/MP/EM/TS).  It cannot clear
+                   * PE, and on a 286 the whole instruction is the only way into
+                   * protected mode. */
+            u32 v = mrm_r16(e, &m) & 0x000Fu;
+            e->cr0 = (e->cr0 & 0xFFFFFFF0u) | v;
+            seg_cache_sync(e);
+            break;
+        }
         default: break;                                            /* INVLPG */
         }
         return 0;
@@ -2258,6 +2322,17 @@ static int step_386(Emu *e, int seg_ov)
             default: e->cr4 = v; break;
             }
         }
+        return 0;
+    }
+    case 0x21: case 0x25: { /* MOV r32, DRn (386) / MOV r32, TRn (386a) */
+        MRM m;
+        decode_mrm(e, &m, seg_ov);
+        if (m.is_reg) w32(e, m.rm, 0);      /* there are no debug/task registers here */
+        return 0;
+    }
+    case 0x24: case 0x26: { /* MOV TRn, r32 (386a): accepted, nothing to load */
+        MRM m;
+        decode_mrm(e, &m, seg_ov);
         return 0;
     }
     case 0x23: { /* MOV DRn, r32 */
@@ -2416,16 +2491,140 @@ static int step_386(Emu *e, int seg_ov)
         else wv(e, m.reg, (u32)(s32)(s16)mrm_r16(e, &m), width);
         return 0;
     }
+    case 0xB2: case 0xB4: case 0xB5: { /* LSS / LFS / LGS (386) */
+        MRM m;
+        u32 off2;
+        u16 sel;
+        decode_mrm(e, &m, seg_ov);
+        off2 = rd_mem(e, mrm_seg(e, &m), m.ea, width);
+        sel = (u16)rd_mem(e, mrm_seg(e, &m), m.ea + ((u32)width / 8), 16);
+        if (op2 == 0xB2) set_seg_reg(e, SEG_SS, sel);
+        else if (op2 == 0xB4) set_seg_reg(e, SEG_FS, sel);
+        else set_seg_reg(e, SEG_GS, sel);
+        wv(e, m.reg, off2, width);
+        return 0;
+    }
+    case 0xBC: case 0xBD: { /* BSF / BSR (386) */
+        MRM m;
+        u32 src;
+        int k;
+        decode_mrm(e, &m, seg_ov);
+        src = mrm_rv(e, &m, width);
+        if (src == 0) {
+            setf(e, F_ZF, 1);          /* destination undefined: leave it alone */
+        } else {
+            u32 r = 0;
+            if (op2 == 0xBC) {
+                for (k = 0; k < width; k++) if ((src >> k) & 1u) { r = (u32)k; break; }
+            } else {
+                for (k = width - 1; k >= 0; k--) if ((src >> k) & 1u) { r = (u32)k; break; }
+            }
+            wv(e, m.reg, r, width);
+            setf(e, F_ZF, 0);
+        }
+        return 0;
+    }
+    case 0xB0: case 0xB1: { /* CMPXCHG r/m, reg (486) */
+        MRM m;
+        u32 dst, src, acc;
+        decode_mrm(e, &m, seg_ov);
+        dst = mrm_rv(e, &m, width);
+        src = rv(e, m.reg, width);
+        acc = rv(e, 0, width);                 /* AL / AX / EAX */
+        if (dst == acc) {
+            setf(e, F_ZF, 1);
+            mrm_wv(e, &m, src, width);
+        } else {
+            setf(e, F_ZF, 0);
+            wv(e, 0, dst, width);
+        }
+        return 0;
+    }
+    case 0xC0: case 0xC1: { /* XADD r/m, reg (486) */
+        MRM m;
+        u32 dst, src, sum, mask, sign;
+        decode_mrm(e, &m, seg_ov);
+        dst = mrm_rv(e, &m, width);
+        src = rv(e, m.reg, width);
+        mask = (width == 32) ? 0xFFFFFFFFu : (width == 16 ? 0xFFFFu : 0xFFu);
+        sign = (width == 32) ? 0x80000000u : (width == 16 ? 0x8000u : 0x80u);
+        sum = (dst + src) & mask;
+        mrm_wv(e, &m, sum, width);
+        wv(e, m.reg, dst, width);
+        setf(e, F_CF, (dst + src) > mask);
+        setf(e, F_OF, (((dst ^ sum) & (src ^ sum) & sign) != 0));
+        setf(e, F_AF, (((dst ^ src ^ sum) & 0x10u) != 0));
+        if (width == 32) set_szp32(e, sum);
+        else if (width == 16) set_szp16(e, (u16)sum);
+        else set_szp8(e, (u8)sum);
+        return 0;
+    }
+    case 0xC7: { /* group 9: CMPXCHG8B m64 (486) */
+        MRM m;
+        u32 lo, hi;
+        decode_mrm(e, &m, seg_ov);
+        if (m.reg != 1 || m.is_reg) {          /* other slots are no-ops here */
+            if (!m.is_reg && m.reg == 6) {     /* RDRAND/RDSEED: report "no" */
+                setf(e, F_CF, 1);
+            }
+            return 0;
+        }
+        lo = rd_mem(e, mrm_seg(e, &m), m.ea, 32);
+        hi = rd_mem(e, mrm_seg(e, &m), m.ea + 4u, 32);
+        if (lo == e->eax && hi == e->edx) {
+            wr_mem(e, mrm_seg(e, &m), m.ea, e->ebx, 32);
+            wr_mem(e, mrm_seg(e, &m), m.ea + 4u, e->ecx, 32);
+            setf(e, F_ZF, 1);
+        } else {
+            e->eax = lo;
+            e->edx = hi;
+            setf(e, F_ZF, 0);
+        }
+        return 0;
+    }
+    case 0xC8: case 0xC9: case 0xCA: case 0xCB:
+    case 0xCC: case 0xCD: case 0xCE: case 0xCF: { /* BSWAP r32 (486) */
+        u32 v = r32(e, op2 & 7);
+        w32(e, op2 & 7, ((v & 0x000000FFu) << 24) | ((v & 0x0000FF00u) << 8) |
+                        ((v & 0x00FF0000u) >> 8) | ((v & 0xFF000000u) >> 24));
+        return 0;
+    }
+    case 0x18: case 0x19: case 0x1A: case 0x1B:
+    case 0x1C: case 0x1D: case 0x1E: case 0x1F: { /* multi-byte NOP hints */
+        MRM m;
+        decode_mrm(e, &m, seg_ov);
+        (void)m;
+        return 0;
+    }
+    case 0x0D: { /* PREFETCHW */
+        MRM m;
+        decode_mrm(e, &m, seg_ov);
+        return 0;
+    }
     case 0xAE: { /* group 15: fences / clflush - no-op */
         MRM m;
         decode_mrm(e, &m, seg_ov);
         return 0;
     }
-    case 0x02: case 0x03: { /* LAR / LSL */
+    case 0x02: case 0x03: { /* LAR / LSL (286)
+                  * LAR returns the access rights (access byte + byte 6's high
+                  * nibble) and LSL the *effective* limit of the selector's
+                  * descriptor, both with ZF=1.  ZF=0 means "this selector has
+                  * no usable descriptor", which is the only answer the old
+                  * stub ever gave. */
         MRM m;
+        u32 base, limit;
+        u16 attr;
         decode_mrm(e, &m, seg_ov);
-        setf(e, F_ZF, 0);
-        wv(e, m.reg, 0, width);
+        if (desc_for_sel(e, (u16)mrm_r16(e, &m), &base, &limit, &attr)) {
+            u32 v = (op2 == 0x02)
+                    ? ((u32)(attr & 0xFFu) | (((u32)(attr >> 8) & 0xF0u) << 8))
+                    : limit;
+            wv(e, m.reg, v, width);
+            setf(e, F_ZF, 1);
+        } else {
+            setf(e, F_ZF, 0);
+        }
         return 0;
     }
     case 0x40: case 0x41: case 0x42: case 0x43:
@@ -2478,6 +2677,7 @@ static void dos_service_call(Emu *e, int intn)
     else if (intn == 0x31) int31_handler(e);
     else if (intn == 0x33) int33_handler(e);
     else if (intn == 0x60) int60_handler(e);
+    else if (intn == 0xE0) int_e0_handler(e);
     else if (intn == 0x20 || intn == 0x27) {
         e->halted = 1; e->exit_code = 0;
         emu_halt_note(e, intn == 0x20 ? "INT 20h terminate" : "INT 27h terminate");
@@ -2700,9 +2900,17 @@ static int step_8086(Emu *e)
 
     /* --- PUSH/POP reg --- */
     case 0x50: case 0x51: case 0x52: case 0x53:
-    case 0x54: case 0x55: case 0x56: case 0x57: {
+    case 0x55: case 0x56: case 0x57: {
         int width = (op_is32(e) ? 32 : 16);
         pushv(e, rv(e, op & 7, width), width);
+        break;
+    }
+    case 0x54: { /* PUSH SP: the 8086 pushes the value SP had *before* the
+                  * decrement, every 186 and later pushes the decremented
+                  * value.  This is the canonical 8086/186 discriminator
+                  * (push sp / pop ax / cmp ax,sp) that DOS 3.x+ uses. */
+        if (op_is32(e)) push32(e, (e->esp - 4u) & sp_mask(e));
+        else push16(e, (u16)((e->esp - 2u) & sp_mask(e)));
         break;
     }
     case 0x58: case 0x59: case 0x5A: case 0x5B:
@@ -2744,12 +2952,31 @@ static int step_8086(Emu *e)
     }
     case 0x68: { int width = (op_is32(e) ? 32 : 16); pushv(e, fetch_imm(e, width), width); break; }
     case 0x6A: { int width = (op_is32(e) ? 32 : 16); pushv(e, (u32)(s32)(s8)fetch8(e), width); break; }
-    case 0x62: { /* BOUND r16, m16&16 */
-        /* No #BR in this VM: decode the operands and continue.  Some DOS
-         * binaries emit it from a bounds-checking compiler switch. */
+    case 0x62: { /* BOUND r16, m16&16 (186): INT 5 when the index is outside
+                  * the pair of signed limits held in memory.  The emulator used
+                  * to decode this and do nothing, so a program that relies on
+                  * the trap (a bounds-checking compiler switch, or a language
+                  * runtime that uses it as an assertion) silently continued
+                  * with a corrupt index. */
         MRM m;
+        int width = (op_is32(e) ? 32 : 16);
+        u16 site = (u16)(e->ip - 1);          /* opcode byte: the INT 5 return IP */
         decode_mrm(e, &m, seg_ov);
-        (void)m;
+        if (!m.is_reg) {
+            u16 sg = mrm_seg(e, &m);
+            s32 v = (width == 32) ? (s32)rv(e, m.reg, 32) : (s32)(s16)rv(e, m.reg, 16);
+            s32 lo = (width == 32) ? (s32)rd_mem(e, sg, m.ea, 32)
+                                   : (s32)(s16)(u16)rd_mem(e, sg, m.ea, 16);
+            s32 hi = (width == 32) ? (s32)rd_mem(e, sg, m.ea + 4u, 32)
+                                   : (s32)(s16)(u16)rd_mem(e, sg, m.ea + 2u, 16);
+            if (v < lo || v > hi) {
+                intn = 5;
+                int_site_ok = 1;
+                int_site_cs = e->cs;
+                int_site_ip = site;
+                goto do_int;
+            }
+        }
         break;
     }
     case 0x63: { /* ARPL r/m16, r16 (only meaningful in protected mode) */
@@ -3089,15 +3316,22 @@ static int step_8086(Emu *e)
         unsigned cnt;
         u32 v, r;
         decode_mrm(e, &m, seg_ov);
-        if (op == 0xC0 || op == 0xC1) cnt = fetch8(e);
+        if (op == 0xC0 || op == 0xC1) cnt = fetch8(e);        /* 186: imm8 count */
         else if (op == 0xD0 || op == 0xD1) cnt = 1;
-        else cnt = (unsigned)(ad_is32(e) ? r8(e, 1) : r8(e, 1));
+        else cnt = (unsigned)r8(e, 1);                        /* CL */
+        /* A count of zero leaves every flag alone, and the 186 and later
+         * take the count modulo 32 (the 8086 shifts by the full CL, which is
+         * why `shl ax,cl` with cl=20h used to walk 32 single-bit steps and
+         * leave a CF the hardware would not have set). */
+        cnt &= 0x1Fu;
         v = mrm_rv(e, &m, width);
         r = do_shift(e, m.reg, v, cnt, width);
         mrm_wv(e, &m, r, width);
-        if (width == 8) set_szp8(e, (u8)r);
-        else if (width == 32) set_szp32(e, r);
-        else set_szp16(e, (u16)r);
+        if (cnt != 0) {
+            if (width == 8) set_szp8(e, (u8)r);
+            else if (width == 32) set_szp32(e, r);
+            else set_szp16(e, (u16)r);
+        }
         break;
     }
     case 0xF6: case 0xF7: {
@@ -3254,19 +3488,41 @@ static int step_8086(Emu *e)
                 e->irq_depth--;
         break;
     }
-    case 0xC8: { /* ENTER */
+    case 0xC8: { /* ENTER alloc, level (186)
+                  * Intel order: push BP; frame = SP; then (level-1) times
+                  * "BP -= operand size; push [SS:BP]"; push frame; BP = frame;
+                  * SP -= alloc.  The old code pushed the caller's BP value as
+                  * the frame pointer and set BP = SP after the display pushes,
+                  * so a nested ENTER (used by Pascal/Modula-2 runtimes and by
+                  * any language with static links) produced a frame chain that
+                  * pointed into the display copy instead of the frame. */
         u16 size = fetch16(e);
-        u8 level = fetch8(e);
+        u8 level = (u8)(fetch8(e) & 0x1F);
         int width = (op_is32(e) ? 32 : 16);
-        pushv(e, e->ebp, width);
-        u32 frame = ad_is32(e) ? e->ebp : (u32)(u16)e->ebp;
-        for (i = 1; i < (int)(level & 0x1F); i++) {
-            if (ad_is32(e)) e->ebp -= 4; else e->bp = (u16)(e->bp - 2);
-            pushv(e, frame, width);
+        u32 sm = sp_mask(e);
+        u32 frame, bpv;
+        if (width == 32) {
+            push32(e, e->ebp);
+            frame = e->esp;
+            bpv = e->ebp;
+            for (i = 1; i < (int)level; i++) {
+                bpv = (bpv - 4u) & sm;
+                push32(e, rd_mem(e, e->ss, bpv, 32));
+            }
+            if (level > 0) push32(e, frame);
+            e->ebp = frame;
+        } else {
+            push16(e, e->bp);
+            frame = e->esp;
+            bpv = e->bp;
+            for (i = 1; i < (int)level; i++) {
+                bpv = (bpv - 2u) & sm;
+                push16(e, (u16)rd_mem(e, e->ss, bpv, 16));
+            }
+            if (level > 0) push16(e, (u16)frame);
+            e->bp = (u16)frame;
         }
-        pushv(e, frame, width);
-        if (ad_is32(e)) e->ebp = e->esp; else e->bp = e->sp;
-        e->esp = (e->esp - size) & sp_mask(e);
+        e->esp = (e->esp - (u32)size) & sm;
         break;
     }
     case 0xC9: { /* LEAVE */
@@ -3383,6 +3639,7 @@ do_int: {
             else if (intn == 0x31) int31_handler(e);
             else if (intn == 0x33) int33_handler(e);
             else if (intn == 0x60) int60_handler(e);
+            else if (intn == 0xE0) int_e0_handler(e);
             else {
                 /* INT 20h/27h terminate the program.  Which vector did it, and
                  * from where, is exactly what you need to find the exit path of

@@ -12,7 +12,7 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.6.0**。本机验证过：8086 指令测试集 68/68、宿主测试器的 shell / FAT16-32 / 双卷检查、
+当前版本 **1.7.0**。本机验证过：8086 + 186/286 指令测试集 90/90、宿主测试器的 shell / FAT16-32 / 双卷检查、1.9 GB FAT16 卷上 1.5 GB 单文件的写入与读回、切割文件拼接、
 QEMU + OVMF 的 x86_64 与 IA32 启动测试、发行镜像能起动到可交互的 `C:\>`、Windows 1.01 与 1.04
 都能跑到桌面，以及 **Windows 1.01 从 U 盘启动**（QEMU + OVMF 把镜像当作真正的 USB 设备，指针可用，
 见 [`docs/windows1x.md`](docs/windows1x.md) 第 38 轮）。另有 2 项只有在提供真实 MS-DOS 2.11 /
@@ -275,7 +275,7 @@ seek 的 whence 与 INT 21h 相同，`find_first`/`find_next` 回填的字段与
 | FCB 调用族 | 无状态 FCB 层（每次调用重解析 8.3 名），14 个 AH 入口，记录缓冲区是 DTA |
 | 字节锁 | `AH=5Ch AL=0/1`，重叠检测在句柄表内完成，冲突报错误 5 |
 | FAT16 大卷 | 分配游标 + 空闲簇计数；`tools/mkfat16.py` 生成 32 MB / 1.9 GB 稀疏测试卷 |
-| 文件大小 | 保持 `u32`，按 DOS 4.0 语义以 32 MB 为实测上限（已在 1.9 GB FAT16 卷上验证） |
+| 文件大小 | DOS 调用里仍是 `u32` 大小/偏移（FAT32 格式上限 4 GB-1，已用 1.5 GB 文件实测）；`INT E0h` 提供 64 位偏移，再往上是切割文件（`NAME.001`…） |
 | 报告版本 | `AH=30h` 返回 `AX=0x0004`（DOS 4.00），`VER` 显示同一级别；想报告别的版本改 `src/uefidos_config.h` 里的 `UEFIDOS_DOSVER_*` |
 | 数据结构 | `AH=32h` 在保留 ROM 窗口里为每个已挂载盘生成一个 DPB；`AH=52h` 返回 list of lists，其 `+2` 指向该 DPB 链 |
 | EXE 映像装载位置 | `CONFIG.SYS` 写 `EXECHIGH=ON` 时，EXE 映像贴着程序块的**顶端**装载（不再是 PSP 之后的默认位置）；`CONFIG` 显示当前模式，宿主测试器用 `UEFIDOS_EXEC_HIGH_IMAGE` |

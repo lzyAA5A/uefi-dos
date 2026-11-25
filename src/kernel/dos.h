@@ -143,6 +143,18 @@ int  dos_close(int handle);
 int  dos_read(int handle, void *buf, u32 len, u32 *got);
 int  dos_write(int handle, const void *buf, u32 len, u32 *put);
 int  dos_lseek(int handle, u32 pos);
+int  dos_filesize(int handle, u32 *size);
+/* Large files: 64-bit offsets, and split files (NAME.001, NAME.002, ...)
+ * presented as one stream.  flags bit 0 = never join parts (open this very
+ * file), bit 1 = read only.  A joined file is read-only by construction. */
+int  dos_big_open(const char *path, int flags, int *bh, u64 *size);
+int  dos_big_read(int bh, u64 off, void *buf, u32 len, u32 *got);
+int  dos_big_write(int bh, u64 off, const void *buf, u32 len, u32 *put);
+int  dos_big_size(int bh, u64 *size);
+int  dos_big_seek(int bh, u64 off, int whence, u64 *newpos);
+int  dos_big_tell(int bh, u64 *pos);
+int  dos_big_parts(int bh);
+int  dos_big_close(int bh);
 int  dos_attr_get(const char *path, u8 *attr);
 int  dos_attr_set(const char *path, u8 attr);
 
