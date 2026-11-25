@@ -142,6 +142,22 @@ static int g_kbc_pending_out = 0;
  * from the host pointer. */
 static u8 g_bus_latch;      /* 23Dh: signature/latch (5Ah after a reset) */
 static u8 g_bus_cmd;        /* 23Eh: control register as written, | 0Fh */
+
+/* Is an x87 reported to software?  It is emulated in software (step_fpu), so
+ * the answer is yes unless UEFIDOS_NOFPU is set in the environment, which
+ * lets a test drive a "no coprocessor" machine without recompiling. */
+static int fpu_reported(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+#ifdef UEFIDOS_HOST
+        cached = getenv("UEFIDOS_NOFPU") ? 0 : 1;
+#else
+        cached = 1;
+#endif
+    }
+    return cached;
+}
 static u8 g_bus_read;       /* 23Eh: value the next read of it returns */
 static u8 g_bus_ctrl;       /* 23Fh: config register (nonzero = enabled) */
 static int g_bus_dx, g_bus_dy;  /* motion counters the card reports (signed 8 bit) */
@@ -1065,6 +1081,20 @@ static int ring_trace_env(void)
         const char *v = getenv("UEFIDOS_RINGLOG");
         cached = (v && (v[0] == '1' || v[0] == 'y' || v[0] == 'Y' || v[0] == 'o' || v[0] == 'O')) ? 1 : 0;
     }
+    return cached;
+}
+#endif
+#ifdef UEFIDOS_HOST
+/* UEFIDOS_WATCH_LOWMEM=1: halt as soon as the interrupt vector table stops
+ * looking like a vector table.  Writing to segment 0 means a program computed
+ * its buffer from a pointer it should not trust; the ring dump that follows
+ * names the instruction, which is the only way to see a guest-side `rep movs`
+ * to a zero segment (DOS-call buffers are guarded separately, by
+ * UEFIDOS_TRACE_LOWMEM in int21.c). */
+static int lowmem_watch_env(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = getenv("UEFIDOS_WATCH_LOWMEM") ? 1 : 0;
     return cached;
 }
 #endif
@@ -2155,14 +2185,1083 @@ static void wr_mem(Emu *e, u16 sel, u32 off, u32 v, int width)
 }
 
 /* ------------------------------------------------------------------ */
-/* 387 escape (D8..DF): decode the modrm so the instruction length is  */
-/* right, then do nothing, exactly like an 8086 without a coprocessor. */
+/* 8087 / 80287 / 80387 floating point (D8h..DFh)                      */
+/*                                                                     */
+/* The register file is kept in the coprocessor's own raw 80-bit form: */
+/* sign, 15-bit exponent, 64-bit mantissa with an *explicit* integer   */
+/* bit.  That makes FSTP tbyte, FXAM, FSTENV/FNSAVE and the tag word    */
+/* exact.  Arithmetic converts to the host `long double`, which on x86 */
+/* is bit for bit the same 80-bit format, so FADD/FSUB/FMUL/FDIV are    */
+/* executed by the real FPU at full precision and nothing is lost.     */
+/*                                                                     */
+/* The EFI build links -nostdlib (no libc, no libm), so every          */
+/* elementary function the 387 instructions need (sqrt, 2^x, log2,     */
+/* atan, sin, cos) is computed here from series with explicit range    */
+/* reduction.  Accuracy is ~1 ulp over the ranges DOS software and     */
+/* WIN87EM actually use; extreme arguments lose the usual digits to    */
+/* reduction, and FPREM reports an incomplete reduction rather than    */
+/* inventing quotient bits.                                            */
 /* ------------------------------------------------------------------ */
+#define FPU_IE 0x0001           /* invalid operation            */
+#define FPU_DE 0x0002           /* denormalized operand/result  */
+#define FPU_ZE 0x0004           /* divide by zero               */
+#define FPU_OE 0x0008           /* overflow                     */
+#define FPU_UE 0x0010           /* underflow                    */
+#define FPU_PE 0x0020           /* precision                    */
+#define FPU_SF 0x0040           /* stack fault                  */
+#define FPU_ES 0x0080           /* error summary                */
+#define FPU_C0 0x0100
+#define FPU_C1 0x0200
+#define FPU_C2 0x0400
+#define FPU_C3 0x4000
+#define FPU_TOP_MASK 0x3800
+#define FPU_TAG_VALID 0
+#define FPU_TAG_ZERO  1
+#define FPU_TAG_SPEC  2
+#define FPU_TAG_EMPTY 3
+
+/* ---- raw 80-bit image helpers ------------------------------------ */
+static int fpu_exp_field(const u8 *r)
+{
+    return (int)((((u16)r[9] << 8) | r[8]) & 0x7FFF);
+}
+static int fpu_sign_bit(const u8 *r) { return (r[9] >> 7) & 1; }
+static u64 fpu_mant_field(const u8 *r)
+{
+    u64 m = 0;
+    int i;
+    for (i = 7; i >= 0; i--) m = (m << 8) | r[i];
+    return m;
+}
+static int fpu_raw_is_nan(const u8 *r)
+{
+    return fpu_exp_field(r) == 0x7FFF && (fpu_mant_field(r) & 0x7FFFFFFFFFFFFFFFull) != 0;
+}
+static int fpu_raw_is_inf(const u8 *r)
+{
+    return fpu_exp_field(r) == 0x7FFF && (fpu_mant_field(r) & 0x7FFFFFFFFFFFFFFFull) == 0;
+}
+static int fpu_raw_is_zero(const u8 *r)
+{
+    return fpu_exp_field(r) == 0 && fpu_mant_field(r) == 0;
+}
+static void fpu_set_raw(u8 *r, int sign, int se, u64 mant)
+{
+    int i;
+    for (i = 0; i < 8; i++) r[i] = (u8)(mant >> (8 * i));
+    r[8] = (u8)(se & 0xFF);
+    r[9] = (u8)(((se >> 8) & 0x7F) | (sign ? 0x80 : 0));
+}
+/* The host long double on x86 is that same 10-byte payload (12 or 16 bytes
+ * with padding), so the conversions are a straight copy of the low 10. */
+static void fpu_raw_from_ld(long double v, u8 *r)
+{
+    u8 buf[16];
+    memset(buf, 0, sizeof buf);
+    memcpy(buf, &v, sizeof v);
+    memcpy(r, buf, 10);
+}
+static long double fpu_ld_from_raw(const u8 *r)
+{
+    u8 buf[16];
+    long double v;
+    memset(buf, 0, sizeof buf);
+    memcpy(buf, r, 10);
+    memcpy(&v, buf, sizeof v);
+    return v;
+}
+static long double fpu_inf_ld(void)
+{
+    u8 r[10];
+    fpu_set_raw(r, 0, 0x7FFF, 0x8000000000000000ull);
+    return fpu_ld_from_raw(r);
+}
+static long double fpu_nan_ld(void)
+{
+    u8 r[10];
+    fpu_set_raw(r, 0, 0x7FFF, 0xC000000000000000ull);
+    return fpu_ld_from_raw(r);
+}
+static int fpu_ld_is_nan(long double v) { return v != v; }
+static int fpu_ld_is_finite(long double v)
+{
+    if (v != v) return 0;
+    return (v - v) == 0.0L;      /* inf - inf is NaN, so only finite passes */
+}
+static int fpu_ld_is_denorm(long double v)
+{
+    u8 r[10];
+    if (!fpu_ld_is_finite(v) || v == 0.0L) return 0;
+    fpu_raw_from_ld(v, r);
+    return fpu_exp_field(r) == 0;
+}
+
+/* ---- register file ----------------------------------------------- */
+static int fpu_top(Emu *e) { return (e->fpu_sw >> 11) & 7; }
+static void fpu_set_top(Emu *e, int t)
+{
+    e->fpu_sw = (u16)((e->fpu_sw & ~FPU_TOP_MASK) | ((t & 7) << 11));
+}
+static int fpu_phys_of(Emu *e, int i) { return (fpu_top(e) + i) & 7; }
+static u8 *fpu_reg(Emu *e, int i) { return e->fpu_st[fpu_phys_of(e, i)]; }
+static int fpu_tag_get(Emu *e, int p)
+{
+    return (e->fpu_tag >> (2 * (p & 7))) & 3;
+}
+static void fpu_tag_set(Emu *e, int p, int t)
+{
+    u16 sh = (u16)(2 * (p & 7));
+    e->fpu_tag = (u16)((e->fpu_tag & ~(3u << sh)) | ((u32)(t & 3) << sh));
+}
+static int fpu_classify(const u8 *r)
+{
+    int se = fpu_exp_field(r);
+    u64 m = fpu_mant_field(r);
+    if (se == 0x7FFF) return FPU_TAG_SPEC;
+    if (se == 0) return m ? FPU_TAG_SPEC : FPU_TAG_ZERO;
+    return FPU_TAG_VALID;
+}
+static void fpu_retag(Emu *e, int i)
+{
+    fpu_tag_set(e, fpu_phys_of(e, i), fpu_classify(fpu_reg(e, i)));
+}
+static long double fpu_get(Emu *e, int i) { return fpu_ld_from_raw(fpu_reg(e, i)); }
+static void fpu_put(Emu *e, int i, long double v)
+{
+    fpu_raw_from_ld(v, fpu_reg(e, i));
+    fpu_retag(e, i);
+}
+static void fpu_push(Emu *e, long double v)
+{
+    int t = (fpu_top(e) - 1) & 7;
+    if (fpu_tag_get(e, t) != FPU_TAG_EMPTY) {
+        e->fpu_sw |= (u16)(FPU_IE | FPU_SF);
+    }
+    fpu_set_top(e, t);
+    fpu_raw_from_ld(v, fpu_reg(e, 0));
+    fpu_retag(e, 0);
+}
+static long double fpu_pop(Emu *e)
+{
+    long double v = fpu_get(e, 0);
+    if (fpu_tag_get(e, fpu_phys_of(e, 0)) == FPU_TAG_EMPTY) {
+        e->fpu_sw |= (u16)(FPU_IE | FPU_SF);
+        return fpu_nan_ld();
+    }
+    fpu_tag_set(e, fpu_phys_of(e, 0), FPU_TAG_EMPTY);
+    fpu_set_top(e, (fpu_top(e) + 1) & 7);
+    return v;
+}
+static void fpu_exc(Emu *e, int bits)
+{
+    e->fpu_sw |= (u16)bits;
+    if (e->fpu_sw & e->fpu_cw & 0x3F) e->fpu_sw |= (u16)(FPU_ES | FPU_SF);
+}
+static void fpu_set_cc(Emu *e, int c3, int c2, int c0)
+{
+    u16 sw = (u16)(e->fpu_sw & ~(FPU_C0 | FPU_C2 | FPU_C3));
+    if (c3) sw |= FPU_C3;
+    if (c2) sw |= FPU_C2;
+    if (c0) sw |= FPU_C0;
+    e->fpu_sw = sw;
+}
+static void fpu_set_c1(Emu *e, int v)
+{
+    if (v) e->fpu_sw |= FPU_C1;
+    else e->fpu_sw &= (u16)~FPU_C1;
+}
+static void fpu_init_state(Emu *e)
+{
+    int i;
+    for (i = 0; i < 8; i++) memset(e->fpu_st[i], 0, 10);
+    e->fpu_cw = 0x037F;
+    e->fpu_sw = 0;
+    e->fpu_tag = 0xFFFF;
+    e->fpu_ip = e->fpu_dp = 0;
+    e->fpu_cs = e->fpu_ds = e->fpu_op = 0;
+}
+
+/* ---- rounding ---------------------------------------------------- */
+/* Round to an integral value under an explicit RC code (0 nearest-even,
+ * 1 down, 2 up, 3 truncate).  Used by both the instruction path (which takes
+ * RC from the control word) and the internal series, which always use
+ * nearest-even and must not depend on the control word. */
+static long double fpu_round_rc(int rc, long double v)
+{
+    s64 t;
+    long double d;
+    if (v != v) return v;
+    if (v >= 9.2e18L || v <= -9.2e18L) return v;
+    t = (s64)v;                  /* truncation toward zero */
+    d = v - (long double)t;
+    switch (rc) {
+    case 0:                      /* nearest, ties to even */
+        if (d > 0.5L) t += 1;
+        else if (d == 0.5L) { if (t & 1) t += 1; }
+        else if (d < -0.5L) t -= 1;
+        else if (d == -0.5L) { if (t & 1) t -= 1; }
+        break;
+    case 1:                      /* toward -inf */
+        if (d < 0.0L) t -= 1;
+        break;
+    case 2:                      /* toward +inf */
+        if (d > 0.0L) t += 1;
+        break;
+    default:                     /* truncate */
+        break;
+    }
+    return (long double)t;
+}
+static long double fpu_round_int(Emu *e, long double v)
+{
+    return fpu_round_rc((e->fpu_cw >> 10) & 3, v);
+}
+/* Round a result to the precision the control word selects (single 24 bits,
+ * double 53, extended 64).  The host cast does exactly what FNSTS does. */
+static long double fpu_prec(Emu *e, long double v)
+{
+    int pc = (e->fpu_cw >> 8) & 3;
+    if (pc == 3) return v;
+    if (pc == 0) {
+        float f = (float)v;
+        if (fpu_ld_is_finite(v)) {
+            if (!fpu_ld_is_finite((long double)f)) fpu_exc(e, FPU_OE | FPU_PE);
+            else if (f == 0.0f && v != 0.0L) fpu_exc(e, FPU_UE | FPU_PE);
+            else if ((long double)f != v) fpu_exc(e, FPU_PE);
+        }
+        return (long double)f;
+    }
+    {
+        double d = (double)v;
+        if (fpu_ld_is_finite(v)) {
+            if (!fpu_ld_is_finite((long double)d)) fpu_exc(e, FPU_OE | FPU_PE);
+            else if (d == 0.0 && v != 0.0L) fpu_exc(e, FPU_UE | FPU_PE);
+            else if ((long double)d != v) fpu_exc(e, FPU_PE);
+        }
+        return (long double)d;
+    }
+}
+static void fpu_check_result(Emu *e, long double r)
+{
+    if (fpu_ld_is_denorm(r)) fpu_exc(e, FPU_DE);
+}
+
+/* ---- elementary functions without libm --------------------------- */
+static const long double FPU_LN2  = 0.69314718055994530941723212145818L;
+static const long double FPU_PI   = 3.14159265358979323846264338327950L;
+static const long double FPU_PI2  = 1.57079632679489661923132169163975L;
+static const long double FPU_INV_LN2 = 1.44269504088896340735992468100189L;
+static const long double FPU_L2T  = 3.32192809488736234787031942948939L;
+static const long double FPU_LG2  = 0.30102999566398119521373889472449L;
+
+static long double fpu_pow2i(int n)
+{
+    long double r = 1.0L, b;
+    u32 m;
+    if (n == 0) return 1.0L;
+    b = (n < 0) ? 0.5L : 2.0L;
+    m = (u32)(n < 0 ? -n : n);
+    while (m) {
+        if (m & 1) r *= b;
+        b *= b;
+        m >>= 1;
+        if (!fpu_ld_is_finite(r)) return r;
+    }
+    return r;
+}
+static long double fpu_sqrt_ld(long double v)
+{
+    long double r;
+    int i;
+    if (v != v || v <= 0.0L) return v;
+    if (v == fpu_inf_ld()) return v;
+    r = (v > 1.0L) ? v : 1.0L;
+    for (i = 0; i < 200; i++) {
+        long double nr = 0.5L * (r + v / r);
+        if (nr == r) break;
+        r = nr;
+    }
+    return r;
+}
+/* e^x by reduction to |r| <= ln2/2 and a Taylor series */
+static long double fpu_exp_ld(long double x)
+{
+    long double n, r, term, sum;
+    int i;
+    if (x != x) return x;
+    if (x == fpu_inf_ld()) return x;
+    if (x == -fpu_inf_ld()) return 0.0L;
+    if (x > 12000.0L) return fpu_inf_ld();
+    if (x < -12000.0L) return 0.0L;
+    n = fpu_round_rc(0, x * FPU_INV_LN2);
+    r = x - n * FPU_LN2;
+    term = 1.0L; sum = 1.0L;
+    for (i = 1; i < 30; i++) {
+        term = term * r / (long double)i;
+        sum += term;
+        if (term < 1e-21L && term > -1e-21L) break;
+    }
+    return sum * fpu_pow2i((int)n);
+}
+static long double fpu_log2_ld(long double x)
+{
+    long double t, t2, term, sum, sc;
+    int e2 = 0, i;
+    if (x != x) return x;
+    if (x <= 0.0L) return fpu_nan_ld();
+    if (x == fpu_inf_ld()) return x;
+    if (x == 0.0L) return -fpu_inf_ld();
+    sc = x;
+    while (sc >= 2.0L) { sc *= 0.5L; e2++; }
+    while (sc < 1.0L)  { sc *= 2.0L; e2--; }
+    /* log2(m) = 2/ln2 * (t + t^3/3 + t^5/5 + ...), t = (m-1)/(m+1) */
+    t = (sc - 1.0L) / (sc + 1.0L);
+    t2 = t * t;
+    term = t; sum = 0.0L;
+    for (i = 1; i < 45; i += 2) {
+        sum += term / (long double)i;
+        term *= t2;
+    }
+    return (long double)e2 + sum * (2.0L / FPU_LN2);
+}
+static long double fpu_atan_ld(long double x)
+{
+    int neg = 0, inv = 0, halvings = 0;
+    long double x2, term, sum;
+    int i;
+    if (x != x) return x;
+    if (x < 0.0L) { x = -x; neg = 1; }
+    if (x == fpu_inf_ld()) { sum = FPU_PI2; if (neg) sum = -sum; return sum; }
+    if (x > 1.0L) { x = 1.0L / x; inv = 1; }
+    /* atan(x) = 2*atan(x / (1 + sqrt(1+x^2)))  -- shrink until small */
+    while (x > 0.05L && halvings < 8) {
+        x = x / (1.0L + fpu_sqrt_ld(1.0L + x * x));
+        halvings++;
+    }
+    x2 = x * x;
+    term = x; sum = 0.0L;
+    for (i = 1; i < 80; i += 2) {
+        sum += term / (long double)((i & 1) ? i : -i);
+        term *= -x2;
+    }
+    sum *= (long double)(1 << halvings);
+    if (inv) sum = FPU_PI2 - sum;
+    return neg ? -sum : sum;
+}
+static long double fpu_atan2_ld(long double y, long double x)
+{
+    if (x != x || y != y) return fpu_nan_ld();
+    if (x == 0.0L && y == 0.0L) return 0.0L;
+    if (x > 0.0L) return fpu_atan_ld(y / x);
+    if (x < 0.0L) return y >= 0.0L ? fpu_atan_ld(y / x) + FPU_PI
+                                  : fpu_atan_ld(y / x) - FPU_PI;
+    return y > 0.0L ? FPU_PI2 : -FPU_PI2;      /* x == 0 */
+}
+/* sin/cos with quadrant reduction by pi/2 */
+static void fpu_sin_cos_ld(long double x, long double *s, long double *c)
+{
+    long double k, r, r2, ts, tc, ss, cc;
+    int q, i;
+    if (x != x) { *s = *c = x; return; }
+    if (!fpu_ld_is_finite(x)) { *s = *c = fpu_nan_ld(); return; }
+    k = fpu_round_rc(0, x * (2.0L / FPU_PI));
+    r = x - k * FPU_PI2;
+    q = ((s64)k) & 3;
+    r2 = r * r;
+    ts = r; ss = r; tc = 1.0L; cc = 1.0L;
+    for (i = 1; i < 26; i++) {
+        ts = -ts * r2 / (long double)((2 * i) * (2 * i + 1));
+        tc = -tc * r2 / (long double)((2 * i - 1) * (2 * i));
+        ss += ts;
+        cc += tc;
+        if (ts < 1e-21L && ts > -1e-21L && tc < 1e-21L && tc > -1e-21L) break;
+    }
+    if (q < 0) q += 4;
+    switch (q) {
+    case 0: *s = ss;  *c = cc;  break;
+    case 1: *s = cc;  *c = -ss; break;
+    case 2: *s = -ss; *c = -cc; break;
+    default: *s = -cc; *c = ss; break;
+    }
+}
+
+/* ---- memory access ----------------------------------------------- */
+static long double fpu_mem_real(Emu *e, u16 sel, u32 off, int is64)
+{
+    if (is64) {
+        u32 lo = rd_mem(e, sel, off, 32);
+        u32 hi = rd_mem(e, sel, off + 4, 32);
+        u64 bits = ((u64)hi << 32) | lo;
+        double d;
+        memcpy(&d, &bits, 8);
+        return (long double)d;
+    }
+    {
+        u32 bits = rd_mem(e, sel, off, 32);
+        float f;
+        memcpy(&f, &bits, 4);
+        return (long double)f;
+    }
+}
+static long double fpu_mem_int(Emu *e, u16 sel, u32 off, int width)
+{
+    if (width == 16) return (long double)(s16)rd_mem(e, sel, off, 16);
+    if (width == 32) return (long double)(s32)rd_mem(e, sel, off, 32);
+    {
+        u32 lo = rd_mem(e, sel, off, 32);
+        u32 hi = rd_mem(e, sel, off + 4, 32);
+        return (long double)(s64)(((u64)hi << 32) | lo);
+    }
+}
+static void fpu_store_real(Emu *e, long double v, u16 sel, u32 off, int is64)
+{
+    if (is64) {
+        double d = (double)v;
+        u64 bits;
+        memcpy(&bits, &d, 8);
+        wr_mem(e, sel, off, (u32)(bits & 0xFFFFFFFFu), 32);
+        wr_mem(e, sel, off + 4, (u32)(bits >> 32), 32);
+    } else {
+        float f = (float)v;
+        u32 bits;
+        memcpy(&bits, &f, 4);
+        wr_mem(e, sel, off, bits, 32);
+    }
+}
+/* Convert to a signed integer with the control word's rounding; returns 0 and
+ * stores the "integer indefinite" value on invalid/overflow. */
+static int fpu_store_int(Emu *e, long double v, u16 sel, u32 off, int width)
+{
+    long double r = fpu_round_int(e, v);
+    int ok = 1;
+    if (r != r) ok = 0;
+    else if (width == 16) { if (r > 32767.0L || r < -32768.0L) ok = 0; }
+    else if (width == 32) { if (r > 2147483647.0L || r < -2147483648.0L) ok = 0; }
+    else { if (r >= 9.2233720368547758e18L || r <= -9.2233720368547758e18L) ok = 0; }
+    if (!ok) {
+        fpu_exc(e, FPU_IE);
+        if (width == 16) wr_mem(e, sel, off, 0x8000u, 16);
+        else if (width == 32) wr_mem(e, sel, off, 0x80000000u, 32);
+        else {
+            wr_mem(e, sel, off, 0, 32);
+            wr_mem(e, sel, off + 4, 0x80000000u, 32);
+        }
+        return 0;
+    }
+    if (width == 16) wr_mem(e, sel, off, (u16)(s16)(s64)r, 16);
+    else if (width == 32) wr_mem(e, sel, off, (u32)(s32)(s64)r, 32);
+    else {
+        u64 bits = (u64)(s64)r;
+        wr_mem(e, sel, off, (u32)(bits & 0xFFFFFFFFu), 32);
+        wr_mem(e, sel, off + 4, (u32)(bits >> 32), 32);
+    }
+    return 1;
+}
+static void fpu_store_tbyte(Emu *e, long double v, u16 sel, u32 off)
+{
+    u8 r[10];
+    int i;
+    fpu_raw_from_ld(v, r);
+    for (i = 0; i < 10; i++) wr_mem(e, sel, off + (u32)i, r[i], 8);
+}
+static long double fpu_load_tbyte(Emu *e, u16 sel, u32 off)
+{
+    u8 r[10];
+    int i;
+    for (i = 0; i < 10; i++) r[i] = (u8)rd_mem(e, sel, off + (u32)i, 8);
+    return fpu_ld_from_raw(r);
+}
+
+/* ---- packed BCD -------------------------------------------------- */
+static long double fpu_ld_bcd(Emu *e, u16 sel, u32 off)
+{
+    u8 d[10];
+    long double v = 0.0L;
+    int i, ok = 1;
+    for (i = 0; i < 10; i++) d[i] = (u8)rd_mem(e, sel, off + (u32)i, 8);
+    for (i = 9; i >= 0; i--) {
+        int lo = d[i] & 0xF, hi = (d[i] >> 4) & 0xF;
+        if (hi > 9 || lo > 9) ok = 0;
+        v = v * 100.0L + (long double)hi * 10.0L + (long double)lo;
+    }
+    if (!ok) { fpu_exc(e, FPU_IE); return fpu_nan_ld(); }
+    if (d[9] & 0x80) v = -v;
+    return v;
+}
+static void fpu_st_bcd(Emu *e, long double v, u16 sel, u32 off)
+{
+    u8 d[10];
+    long double a = fpu_round_int(e, v);
+    int i;
+    memset(d, 0, sizeof d);
+    if (a != a) { fpu_exc(e, FPU_IE); }
+    else if (a > 9.999999999999999999e17L || a < -9.999999999999999999e17L) {
+        fpu_exc(e, FPU_IE);
+    } else {
+        int neg = a < 0.0L;
+        if (neg) a = -a;
+        for (i = 0; i < 9; i++) {
+            int pair = (int)(a - (long double)(s64)(a / 100.0L) * 100.0L);
+            a = (long double)(s64)(a / 100.0L);
+            d[i] = (u8)(((pair / 10) << 4) | (pair % 10));
+        }
+        if (neg) d[9] |= 0x80;
+    }
+    for (i = 0; i < 10; i++) wr_mem(e, sel, off + (u32)i, d[i], 8);
+}
+
+/* ---- environment / save area images (16-bit and 32-bit layouts) --- */
+static u32 fpu_env_size(Emu *e, int is32) { (void)e; return is32 ? 28u : 14u; }
+static void fpu_store_env(Emu *e, u16 sel, u32 off, int is32)
+{
+    wr_mem(e, sel, off, e->fpu_cw, 16);
+    wr_mem(e, sel, off + 2, e->fpu_sw, 16);
+    wr_mem(e, sel, off + 4, e->fpu_tag, 16);
+    if (!is32) {
+        wr_mem(e, sel, off + 6, e->fpu_ip & 0xFFFF, 32);
+        wr_mem(e, sel, off + 8, e->fpu_cs, 16);
+        wr_mem(e, sel, off + 10, e->fpu_dp & 0xFFFF, 32);
+        wr_mem(e, sel, off + 12, e->fpu_ds, 16);
+    } else {
+        wr_mem(e, sel, off + 6, 0, 16);            /* 32-bit format pad */
+        wr_mem(e, sel, off + 8, e->fpu_ip, 32);
+        wr_mem(e, sel, off + 12, e->fpu_cs, 16);
+        wr_mem(e, sel, off + 14, e->fpu_op, 16);
+        wr_mem(e, sel, off + 16, e->fpu_dp, 32);
+        wr_mem(e, sel, off + 20, e->fpu_ds, 16);
+        wr_mem(e, sel, off + 22, 0, 32);
+    }
+}
+static void fpu_load_env(Emu *e, u16 sel, u32 off, int is32)
+{
+    e->fpu_cw = (u16)rd_mem(e, sel, off, 16);
+    e->fpu_sw = (u16)rd_mem(e, sel, off + 2, 16);
+    e->fpu_tag = (u16)rd_mem(e, sel, off + 4, 16);
+    if (!is32) {
+        e->fpu_ip = rd_mem(e, sel, off + 6, 16);
+        e->fpu_cs = (u16)rd_mem(e, sel, off + 8, 16);
+        e->fpu_dp = rd_mem(e, sel, off + 10, 16);
+        e->fpu_ds = (u16)rd_mem(e, sel, off + 12, 16);
+    } else {
+        e->fpu_ip = rd_mem(e, sel, off + 8, 32);
+        e->fpu_cs = (u16)rd_mem(e, sel, off + 12, 16);
+        e->fpu_op = (u16)rd_mem(e, sel, off + 14, 16);
+        e->fpu_dp = rd_mem(e, sel, off + 16, 32);
+        e->fpu_ds = (u16)rd_mem(e, sel, off + 20, 16);
+    }
+}
+static void fpu_store_all(Emu *e, u16 sel, u32 off, int is32)
+{
+    u32 base = off + fpu_env_size(e, is32);
+    int i;
+    fpu_store_env(e, sel, off, is32);
+    for (i = 0; i < 8; i++) {
+        int k;
+        for (k = 0; k < 10; k++) wr_mem(e, sel, base + (u32)(i * 10 + k), e->fpu_st[i][k], 8);
+    }
+    fpu_init_state(e);                    /* FNSAVE re-initialises */
+}
+static void fpu_load_all(Emu *e, u16 sel, u32 off, int is32)
+{
+    u32 base = off + fpu_env_size(e, is32);
+    int i;
+    fpu_load_env(e, sel, off, is32);
+    for (i = 0; i < 8; i++) {
+        int k;
+        for (k = 0; k < 10; k++) e->fpu_st[i][k] = (u8)rd_mem(e, sel, base + (u32)(i * 10 + k), 8);
+    }
+}
+
+/* ---- comparisons ------------------------------------------------- */
+/* Set the condition codes from a vs b; returns 1 greater, -1 less, 0 equal,
+ * 2 unordered. */
+static int fpu_cmp_cc(Emu *e, long double a, long double b)
+{
+    if (fpu_ld_is_nan(a) || fpu_ld_is_nan(b)) {
+        fpu_set_cc(e, 1, 1, 1);
+        fpu_exc(e, FPU_IE);
+        return 2;
+    }
+    if (a > b) { fpu_set_cc(e, 0, 0, 0); return 1; }
+    if (a < b) { fpu_set_cc(e, 0, 0, 1); return -1; }
+    fpu_set_cc(e, 1, 0, 0);
+    return 0;
+}
+/* The 387's FCOMI/FUCOMI put the result in ZF/PF/CF instead. */
+static void fpu_cmp_flags(Emu *e, long double a, long double b, int quiet_nan)
+{
+    (void)quiet_nan;
+    if (fpu_ld_is_nan(a) || fpu_ld_is_nan(b)) {
+        setf(e, F_CF, 1); setf(e, F_PF, 1); setf(e, F_ZF, 1);
+        fpu_exc(e, FPU_IE);
+        return;
+    }
+    setf(e, F_CF, a < b);
+    setf(e, F_PF, 0);
+    setf(e, F_ZF, a == b);
+}
+
+/* ---- arithmetic -------------------------------------------------- */
+#define FPU_OP_ADD 0
+#define FPU_OP_SUB 1
+#define FPU_OP_SUBR 2
+#define FPU_OP_MUL 3
+#define FPU_OP_DIV 4
+#define FPU_OP_DIVR 5
+static long double fpu_arith(Emu *e, int kind, long double a, long double b)
+{
+    long double r;
+    if (fpu_ld_is_nan(a)) return a;
+    if (fpu_ld_is_nan(b)) return b;
+    switch (kind) {
+    case FPU_OP_ADD: r = a + b; break;
+    case FPU_OP_SUB: r = a - b; break;
+    case FPU_OP_SUBR: r = b - a; break;
+    case FPU_OP_MUL: r = a * b; break;
+    case FPU_OP_DIV:
+    case FPU_OP_DIVR:
+        if (kind == FPU_OP_DIVR) { long double t = a; a = b; b = t; }
+        if (b == 0.0L) {
+            fpu_exc(e, FPU_ZE);
+            return a == 0.0L ? fpu_nan_ld() : (a < 0.0L ? -fpu_inf_ld() : fpu_inf_ld());
+        }
+        if (!fpu_ld_is_finite(a) && !fpu_ld_is_finite(b)) {
+            fpu_exc(e, FPU_IE);
+            return fpu_nan_ld();
+        }
+        r = a / b;
+        break;
+    default: r = a; break;
+    }
+    if (fpu_ld_is_finite(a) && fpu_ld_is_finite(b) && !fpu_ld_is_finite(r)) fpu_exc(e, FPU_OE);
+    r = fpu_prec(e, r);
+    fpu_check_result(e, r);
+    return r;
+}
+
+/* ---- the opcode -------------------------------------------------- */
 static int step_fpu(Emu *e, u8 op, int seg_ov)
 {
     MRM m;
+    int i;
     decode_mrm(e, &m, seg_ov);
-    (void)op;
+    if (!e->fpu_present) return 0;        /* no coprocessor: length only */
+    if (m.is_reg) {
+        /* mod=11: the opcode byte is C0h | reg | rm, so rebuild the whole
+         * second byte instead of comparing the two fields separately. */
+        int r = 0xC0 | (m.reg << 3) | m.rm;
+        int j = m.rm;
+        switch (op) {
+        /* ---------------- D8: ST(0) op= ST(i) ---------------- */
+        case 0xD8:
+            if (r >= 0xC0 && r <= 0xC7) { fpu_put(e, 0, fpu_arith(e, FPU_OP_ADD, fpu_get(e, 0), fpu_get(e, j))); return 0; }
+            if (r >= 0xC8 && r <= 0xCF) { fpu_put(e, 0, fpu_arith(e, FPU_OP_MUL, fpu_get(e, 0), fpu_get(e, j))); return 0; }
+            if (r >= 0xD0 && r <= 0xD7) { fpu_cmp_cc(e, fpu_get(e, 0), fpu_get(e, j)); return 0; }
+            if (r >= 0xD8 && r <= 0xDF) { fpu_cmp_cc(e, fpu_get(e, 0), fpu_get(e, j)); (void)fpu_pop(e); return 0; }
+            if (r >= 0xE0 && r <= 0xE7) { fpu_put(e, 0, fpu_arith(e, FPU_OP_SUB, fpu_get(e, 0), fpu_get(e, j))); return 0; }
+            if (r >= 0xE8 && r <= 0xEF) { fpu_put(e, 0, fpu_arith(e, FPU_OP_SUBR, fpu_get(e, 0), fpu_get(e, j))); return 0; }
+            if (r >= 0xF0 && r <= 0xF7) { fpu_put(e, 0, fpu_arith(e, FPU_OP_DIV, fpu_get(e, 0), fpu_get(e, j))); return 0; }
+            if (r >= 0xF8 && r <= 0xFF) { fpu_put(e, 0, fpu_arith(e, FPU_OP_DIVR, fpu_get(e, 0), fpu_get(e, j))); return 0; }
+            break;
+        /* ---------------- D9: loads, unary ops, constants ----- */
+        case 0xD9:
+            if (r >= 0xC0 && r <= 0xC7) { fpu_push(e, fpu_get(e, j)); return 0; }
+            if (r >= 0xC8 && r <= 0xCF) {                 /* FXCH */
+                long double a = fpu_get(e, 0), b = fpu_get(e, j);
+                fpu_put(e, 0, b);
+                fpu_put(e, j, a);
+                fpu_set_c1(e, 0);
+                return 0;
+            }
+            switch (r) {
+            case 0xD0: fpu_set_c1(e, 0); return 0;                       /* FNOP */
+            case 0xE0: fpu_put(e, 0, -fpu_get(e, 0)); fpu_set_c1(e, 0); return 0;   /* FCHS */
+            case 0xE1: {                                                  /* FABS */
+                long double v = fpu_get(e, 0);
+                fpu_put(e, 0, v < 0.0L ? -v : v);
+                fpu_set_c1(e, 0);
+                return 0;
+            }
+            case 0xE4: fpu_cmp_cc(e, fpu_get(e, 0), 0.0L); return 0;      /* FTST */
+            case 0xE5: {                                                  /* FXAM */
+                u8 *rp = fpu_reg(e, 0);
+                int c3 = 0, c2 = 0, c0 = 0;
+                if (fpu_tag_get(e, fpu_phys_of(e, 0)) == FPU_TAG_EMPTY) { c3 = 1; c0 = 1; }
+                else if (fpu_raw_is_nan(rp)) { c0 = 1; }
+                else if (fpu_raw_is_inf(rp)) { c3 = 1; c2 = 1; c0 = 1; }
+                else if (fpu_raw_is_zero(rp)) { c3 = 1; }
+                else if (fpu_exp_field(rp) == 0) { c2 = 1; c0 = 1; }
+                else { c2 = 1; }
+                fpu_set_cc(e, c3, c2, c0);
+                fpu_set_c1(e, fpu_sign_bit(rp));
+                return 0;
+            }
+            case 0xE8: fpu_push(e, 1.0L); return 0;
+            case 0xE9: fpu_push(e, FPU_L2T); return 0;
+            case 0xEA: fpu_push(e, FPU_INV_LN2); return 0;
+            case 0xEB: fpu_push(e, FPU_PI); return 0;
+            case 0xEC: fpu_push(e, FPU_LG2); return 0;
+            case 0xED: fpu_push(e, FPU_LN2); return 0;
+            case 0xEE: fpu_push(e, 0.0L); return 0;
+            case 0xF0: {                                                  /* F2XM1 */
+                long double x = fpu_get(e, 0);
+                if (x < -1.0L || x > 1.0L) { fpu_exc(e, FPU_IE); break; }
+                fpu_put(e, 0, fpu_exp_ld(x * FPU_LN2) - 1.0L);
+                return 0;
+            }
+            case 0xF1: {                                                  /* FYL2X */
+                long double y = fpu_get(e, 0), x = fpu_get(e, 1);
+                long double r;
+                if (x < 0.0L) { fpu_exc(e, FPU_IE); r = fpu_nan_ld(); }
+                else r = y * fpu_log2_ld(x);
+                (void)fpu_pop(e);
+                fpu_put(e, 0, r);
+                return 0;
+            }
+            case 0xF2: {                                                  /* FPTAN */
+                long double x = fpu_get(e, 0), s, c;
+                if (!fpu_ld_is_finite(x) || x >= 9.2e18L || x <= -9.2e18L) { fpu_exc(e, FPU_IE); break; }
+                fpu_sin_cos_ld(x, &s, &c);
+                if (c == 0.0L) { fpu_exc(e, FPU_ZE); fpu_put(e, 0, fpu_inf_ld()); }
+                else fpu_put(e, 0, s / c);
+                fpu_push(e, 1.0L);                                        /* C2 := 0 */
+                return 0;
+            }
+            case 0xF3: {                                                  /* FPATAN */
+                long double y = fpu_get(e, 0), x = fpu_get(e, 1);
+                long double r = fpu_atan2_ld(y, x);
+                (void)fpu_pop(e);
+                fpu_put(e, 0, r);
+                return 0;
+            }
+            case 0xF4: {                                                  /* FXTRACT */
+                long double v = fpu_get(e, 0), mant, ex;
+                u8 rw[10];
+                if (v != v) { fpu_exc(e, FPU_IE); break; }
+                if (!fpu_ld_is_finite(v)) { fpu_push(e, v < 0.0L ? -fpu_inf_ld() : fpu_inf_ld()); fpu_put(e, 0, v); break; }
+                if (v == 0.0L) { fpu_push(e, -fpu_inf_ld()); fpu_put(e, 0, 0.0L); break; }
+                fpu_raw_from_ld(v, rw);
+                ex = (long double)(fpu_exp_field(rw) - 16383);
+                {
+                    /* mantissa with exponent forced to 0 => [1,2) */
+                    int sign = fpu_sign_bit(rw);
+                    fpu_set_raw(rw, sign, 16383, fpu_mant_field(rw));
+                    mant = fpu_ld_from_raw(rw);
+                }
+                fpu_put(e, 0, ex);                                        /* exponent first */
+                fpu_push(e, mant);
+                return 0;
+            }
+            case 0xF5:                                                    /* FPREM1 */
+            case 0xF8: {                                                  /* FPREM */
+                long double x = fpu_get(e, 0), y = fpu_get(e, 1), q, r;
+                int qbits, incomplete = 0;
+                if (x != x || y != y) { fpu_exc(e, FPU_IE); fpu_put(e, 0, fpu_nan_ld()); return 0; }
+                if (!fpu_ld_is_finite(x) || y == 0.0L) { fpu_exc(e, FPU_IE); fpu_put(e, 0, fpu_nan_ld()); return 0; }
+                if (!fpu_ld_is_finite(y)) { fpu_set_cc(e, 0, 0, 0); fpu_set_c1(e, 0); return 0; }
+                q = x / y;
+                if (q > 9.2233720368547758e18L || q < -9.2233720368547758e18L) incomplete = 1;
+                q = fpu_round_int(e, q);
+                r = x - q * y;
+                if (incomplete) q = 0.0L;
+                qbits = (int)((s64)q & 7);
+                fpu_set_cc(e, (qbits >> 1) & 1, incomplete, (qbits >> 2) & 1);
+                fpu_set_c1(e, qbits & 1);
+                fpu_put(e, 0, r);
+                return 0;
+            }
+            case 0xF6: fpu_set_top(e, (fpu_top(e) + 1) & 7); fpu_set_c1(e, 0); return 0;  /* FDECSTP */
+            case 0xF7: fpu_set_top(e, (fpu_top(e) - 1) & 7); fpu_set_c1(e, 0); return 0;  /* FINCSTP */
+            case 0xF9: {                                                  /* FYL2XP1 */
+                long double y = fpu_get(e, 0), x = fpu_get(e, 1), r;
+                if (x <= -1.0L) { fpu_exc(e, FPU_IE); r = fpu_nan_ld(); }
+                else r = y * fpu_log2_ld(1.0L + x);
+                (void)fpu_pop(e);
+                fpu_put(e, 0, r);
+                return 0;
+            }
+            case 0xFA: {                                                  /* FSQRT */
+                long double v = fpu_get(e, 0);
+                if (v < 0.0L) { fpu_exc(e, FPU_IE); fpu_put(e, 0, fpu_nan_ld()); return 0; }
+                fpu_put(e, 0, fpu_sqrt_ld(v));
+                return 0;
+            }
+            case 0xFB: {                                                  /* FSINCOS */
+                long double x = fpu_get(e, 0), s, c;
+                if (!fpu_ld_is_finite(x) || x >= 9.2e18L || x <= -9.2e18L) { fpu_exc(e, FPU_IE); break; }
+                fpu_sin_cos_ld(x, &s, &c);
+                fpu_put(e, 0, s);
+                fpu_push(e, c);
+                return 0;
+            }
+            case 0xFC:                                                    /* FRNDINT */
+                fpu_put(e, 0, fpu_round_int(e, fpu_get(e, 0)));
+                return 0;
+            case 0xFD: {                                                  /* FSCALE */
+                long double x = fpu_get(e, 0), s = fpu_get(e, 1);
+                long double t = fpu_round_int(e, s);
+                if (t != t) { fpu_exc(e, FPU_IE); break; }
+                if (t > 20000.0L) { fpu_exc(e, FPU_OE); fpu_put(e, 0, fpu_inf_ld()); return 0; }
+                if (t < -20000.0L) { fpu_exc(e, FPU_UE); fpu_put(e, 0, 0.0L); return 0; }
+                fpu_put(e, 0, fpu_prec(e, x * fpu_pow2i((int)t)));
+                return 0;
+            }
+            case 0xFE: {                                                  /* FSIN */
+                long double x = fpu_get(e, 0), s, c;
+                if (!fpu_ld_is_finite(x) || x >= 9.2e18L || x <= -9.2e18L) { fpu_exc(e, FPU_IE); break; }
+                fpu_sin_cos_ld(x, &s, &c);
+                fpu_put(e, 0, s);
+                e->fpu_sw &= (u16)~FPU_C2;
+                return 0;
+            }
+            case 0xFF: {                                                  /* FCOS */
+                long double x = fpu_get(e, 0), s, c;
+                if (!fpu_ld_is_finite(x) || x >= 9.2e18L || x <= -9.2e18L) { fpu_exc(e, FPU_IE); break; }
+                fpu_sin_cos_ld(x, &s, &c);
+                fpu_put(e, 0, c);
+                e->fpu_sw &= (u16)~FPU_C2;
+                return 0;
+            }
+            default: break;
+            }
+            break;
+        /* ---------------- DA: integer add/compare, FCMOVcc ---- */
+        case 0xDA:
+            if (r >= 0xC0 && r <= 0xDF) {                 /* FCMOVcc */
+                int cc;
+                switch ((r >> 3) & 3) {
+                case 0: cc = getf(e, F_CF); break;
+                case 1: cc = getf(e, F_ZF); break;
+                case 2: cc = getf(e, F_CF) || getf(e, F_ZF); break;
+                default: cc = getf(e, F_PF); break;
+                }
+                if (cc) fpu_put(e, 0, fpu_get(e, m.rm));
+                return 0;
+            }
+            if (r == 0xE9) {                              /* FUCOMPP */
+                fpu_cmp_cc(e, fpu_get(e, 0), fpu_get(e, 1));
+                (void)fpu_pop(e);
+                (void)fpu_pop(e);
+                return 0;
+            }
+            break;
+        /* ---------------- DB: FCMOVNcc, FUCOMI/FCOMI, control - */
+        case 0xDB:
+            if (r >= 0xC0 && r <= 0xDF) {                 /* FCMOVNcc */
+                int cc;
+                switch ((r >> 3) & 3) {
+                case 0: cc = !getf(e, F_CF); break;
+                case 1: cc = !getf(e, F_ZF); break;
+                case 2: cc = !(getf(e, F_CF) || getf(e, F_ZF)); break;
+                default: cc = !getf(e, F_PF); break;
+                }
+                if (cc) fpu_put(e, 0, fpu_get(e, m.rm));
+                return 0;
+            }
+            if (r >= 0xE8 && r <= 0xEF) {                 /* FUCOMI */
+                fpu_cmp_flags(e, fpu_get(e, 0), fpu_get(e, m.rm), 1);
+                fpu_set_c1(e, 0);
+                return 0;
+            }
+            if (r >= 0xF0 && r <= 0xF7) {                 /* FCOMI */
+                fpu_cmp_flags(e, fpu_get(e, 0), fpu_get(e, m.rm), 0);
+                fpu_set_c1(e, 0);
+                return 0;
+            }
+            if (r == 0xE0 || r == 0xE1 || r == 0xE4) return 0;   /* FENI/FDISI/FSETPM */
+            if (r == 0xE2) { e->fpu_sw &= 0x7F00; return 0; }    /* FNCLEX */
+            if (r == 0xE3) { fpu_init_state(e); return 0; }      /* FNINIT */
+            break;
+        /* ---------------- DC: ST(i) op= ST(0) ---------------- */
+        case 0xDC:
+            if (r >= 0xC0 && r <= 0xC7) { fpu_put(e, j, fpu_arith(e, FPU_OP_ADD, fpu_get(e, j), fpu_get(e, 0))); return 0; }
+            if (r >= 0xC8 && r <= 0xCF) { fpu_put(e, j, fpu_arith(e, FPU_OP_MUL, fpu_get(e, j), fpu_get(e, 0))); return 0; }
+            if (r >= 0xD0 && r <= 0xD7) { fpu_cmp_cc(e, fpu_get(e, 0), fpu_get(e, j)); return 0; }
+            if (r >= 0xD8 && r <= 0xDF) { fpu_cmp_cc(e, fpu_get(e, 0), fpu_get(e, j)); (void)fpu_pop(e); return 0; }
+            if (r >= 0xE0 && r <= 0xE7) { fpu_put(e, j, fpu_arith(e, FPU_OP_SUBR, fpu_get(e, j), fpu_get(e, 0))); return 0; }
+            if (r >= 0xE8 && r <= 0xEF) { fpu_put(e, j, fpu_arith(e, FPU_OP_SUB, fpu_get(e, j), fpu_get(e, 0))); return 0; }
+            if (r >= 0xF0 && r <= 0xF7) { fpu_put(e, j, fpu_arith(e, FPU_OP_DIVR, fpu_get(e, j), fpu_get(e, 0))); return 0; }
+            if (r >= 0xF8 && r <= 0xFF) { fpu_put(e, j, fpu_arith(e, FPU_OP_DIV, fpu_get(e, j), fpu_get(e, 0))); return 0; }
+            break;
+        /* ---------------- DD: free/store ST(i), FUCOM ---------------- */
+        case 0xDD:
+            if (r >= 0xC0 && r <= 0xC7) {                 /* FFREE */
+                fpu_tag_set(e, fpu_phys_of(e, j), FPU_TAG_EMPTY);
+                return 0;
+            }
+            if (r >= 0xD0 && r <= 0xD7) { fpu_put(e, j, fpu_get(e, 0)); return 0; }   /* FST */
+            if (r >= 0xD8 && r <= 0xDF) { fpu_put(e, j, fpu_pop(e)); return 0; }      /* FSTP */
+            if (r >= 0xE0 && r <= 0xE7) { fpu_cmp_cc(e, fpu_get(e, 0), fpu_get(e, j)); return 0; }
+            if (r >= 0xE8 && r <= 0xEF) { fpu_cmp_cc(e, fpu_get(e, 0), fpu_get(e, j)); (void)fpu_pop(e); return 0; }
+            break;
+        /* ---------------- DE: popped arithmetic, FCOMPP -------- */
+        case 0xDE:
+            if (r >= 0xC0 && r <= 0xC7) {
+                long double v = fpu_arith(e, FPU_OP_ADD, fpu_get(e, j), fpu_get(e, 0));
+                (void)fpu_pop(e);
+                fpu_put(e, 0, v);
+                return 0;
+            }
+            if (r >= 0xC8 && r <= 0xCF) {
+                long double v = fpu_arith(e, FPU_OP_MUL, fpu_get(e, j), fpu_get(e, 0));
+                (void)fpu_pop(e);
+                fpu_put(e, 0, v);
+                return 0;
+            }
+            if (r >= 0xE0 && r <= 0xE7) {
+                long double v = fpu_arith(e, FPU_OP_SUBR, fpu_get(e, j), fpu_get(e, 0));
+                (void)fpu_pop(e);
+                fpu_put(e, 0, v);
+                return 0;
+            }
+            if (r >= 0xE8 && r <= 0xEF) {
+                long double v = fpu_arith(e, FPU_OP_SUB, fpu_get(e, j), fpu_get(e, 0));
+                (void)fpu_pop(e);
+                fpu_put(e, 0, v);
+                return 0;
+            }
+            if (r >= 0xF0 && r <= 0xF7) {
+                long double v = fpu_arith(e, FPU_OP_DIVR, fpu_get(e, j), fpu_get(e, 0));
+                (void)fpu_pop(e);
+                fpu_put(e, 0, v);
+                return 0;
+            }
+            if (r >= 0xF8 && r <= 0xFF) {
+                long double v = fpu_arith(e, FPU_OP_DIV, fpu_get(e, j), fpu_get(e, 0));
+                (void)fpu_pop(e);
+                fpu_put(e, 0, v);
+                return 0;
+            }
+            if (r == 0xD9) {                              /* FCOMPP */
+                fpu_cmp_cc(e, fpu_get(e, 0), fpu_get(e, 1));
+                (void)fpu_pop(e);
+                (void)fpu_pop(e);
+                return 0;
+            }
+            break;
+        /* ---------------- DF: FFREEP, FNSTSW AX, FUCOMIP ---- */
+        case 0xDF:
+            if (r >= 0xC0 && r <= 0xC7) {
+                fpu_tag_set(e, fpu_phys_of(e, j), FPU_TAG_EMPTY);
+                return 0;
+            }
+            if (r == 0xE0) { e->ax = e->fpu_sw; return 0; }
+            if (r >= 0xE8 && r <= 0xEF) {                 /* FUCOMIP */
+                fpu_cmp_flags(e, fpu_get(e, 0), fpu_get(e, m.rm), 1);
+                (void)fpu_pop(e);
+                return 0;
+            }
+            if (r >= 0xF0 && r <= 0xF7) {                 /* FCOMIP */
+                fpu_cmp_flags(e, fpu_get(e, 0), fpu_get(e, m.rm), 0);
+                (void)fpu_pop(e);
+                return 0;
+            }
+            break;
+        }
+        return 0;
+    }
+
+    /* ---- memory forms ---- */
+    {
+        u16 sel = mrm_seg(e, &m);
+        u32 off = m.ea;
+        int is32 = op_is32(e);
+        switch (op) {
+        case 0xD8:                                    /* m32real arithmetic */
+            switch (m.reg) {
+            case 0: fpu_put(e, 0, fpu_arith(e, FPU_OP_ADD, fpu_get(e, 0), fpu_mem_real(e, sel, off, 0))); break;
+            case 1: fpu_put(e, 0, fpu_arith(e, FPU_OP_MUL, fpu_get(e, 0), fpu_mem_real(e, sel, off, 0))); break;
+            case 2: fpu_cmp_cc(e, fpu_get(e, 0), fpu_mem_real(e, sel, off, 0)); break;
+            case 3: fpu_cmp_cc(e, fpu_get(e, 0), fpu_mem_real(e, sel, off, 0)); (void)fpu_pop(e); break;
+            case 4: fpu_put(e, 0, fpu_arith(e, FPU_OP_SUB, fpu_get(e, 0), fpu_mem_real(e, sel, off, 0))); break;
+            case 5: fpu_put(e, 0, fpu_arith(e, FPU_OP_SUBR, fpu_get(e, 0), fpu_mem_real(e, sel, off, 0))); break;
+            case 6: fpu_put(e, 0, fpu_arith(e, FPU_OP_DIV, fpu_get(e, 0), fpu_mem_real(e, sel, off, 0))); break;
+            default: fpu_put(e, 0, fpu_arith(e, FPU_OP_DIVR, fpu_get(e, 0), fpu_mem_real(e, sel, off, 0))); break;
+            }
+            return 0;
+        case 0xDC:                                    /* m64real arithmetic */
+            switch (m.reg) {
+            case 0: fpu_put(e, 0, fpu_arith(e, FPU_OP_ADD, fpu_get(e, 0), fpu_mem_real(e, sel, off, 1))); break;
+            case 1: fpu_put(e, 0, fpu_arith(e, FPU_OP_MUL, fpu_get(e, 0), fpu_mem_real(e, sel, off, 1))); break;
+            case 2: fpu_cmp_cc(e, fpu_get(e, 0), fpu_mem_real(e, sel, off, 1)); break;
+            case 3: fpu_cmp_cc(e, fpu_get(e, 0), fpu_mem_real(e, sel, off, 1)); (void)fpu_pop(e); break;
+            case 4: fpu_put(e, 0, fpu_arith(e, FPU_OP_SUB, fpu_get(e, 0), fpu_mem_real(e, sel, off, 1))); break;
+            case 5: fpu_put(e, 0, fpu_arith(e, FPU_OP_SUBR, fpu_get(e, 0), fpu_mem_real(e, sel, off, 1))); break;
+            case 6: fpu_put(e, 0, fpu_arith(e, FPU_OP_DIV, fpu_get(e, 0), fpu_mem_real(e, sel, off, 1))); break;
+            default: fpu_put(e, 0, fpu_arith(e, FPU_OP_DIVR, fpu_get(e, 0), fpu_mem_real(e, sel, off, 1))); break;
+            }
+            return 0;
+        case 0xDA:                                    /* m32int arithmetic */
+            switch (m.reg) {
+            case 0: fpu_put(e, 0, fpu_arith(e, FPU_OP_ADD, fpu_get(e, 0), fpu_mem_int(e, sel, off, 32))); break;
+            case 1: fpu_put(e, 0, fpu_arith(e, FPU_OP_MUL, fpu_get(e, 0), fpu_mem_int(e, sel, off, 32))); break;
+            case 2: fpu_cmp_cc(e, fpu_get(e, 0), fpu_mem_int(e, sel, off, 32)); break;
+            case 3: fpu_cmp_cc(e, fpu_get(e, 0), fpu_mem_int(e, sel, off, 32)); (void)fpu_pop(e); break;
+            case 4: fpu_put(e, 0, fpu_arith(e, FPU_OP_SUB, fpu_get(e, 0), fpu_mem_int(e, sel, off, 32))); break;
+            case 5: fpu_put(e, 0, fpu_arith(e, FPU_OP_SUBR, fpu_get(e, 0), fpu_mem_int(e, sel, off, 32))); break;
+            case 6: fpu_put(e, 0, fpu_arith(e, FPU_OP_DIV, fpu_get(e, 0), fpu_mem_int(e, sel, off, 32))); break;
+            default: fpu_put(e, 0, fpu_arith(e, FPU_OP_DIVR, fpu_get(e, 0), fpu_mem_int(e, sel, off, 32))); break;
+            }
+            return 0;
+        case 0xDE:                                    /* m16int arithmetic */
+            switch (m.reg) {
+            case 0: fpu_put(e, 0, fpu_arith(e, FPU_OP_ADD, fpu_get(e, 0), fpu_mem_int(e, sel, off, 16))); break;
+            case 1: fpu_put(e, 0, fpu_arith(e, FPU_OP_MUL, fpu_get(e, 0), fpu_mem_int(e, sel, off, 16))); break;
+            case 2: fpu_cmp_cc(e, fpu_get(e, 0), fpu_mem_int(e, sel, off, 16)); break;
+            case 3: fpu_cmp_cc(e, fpu_get(e, 0), fpu_mem_int(e, sel, off, 16)); (void)fpu_pop(e); break;
+            case 4: fpu_put(e, 0, fpu_arith(e, FPU_OP_SUB, fpu_get(e, 0), fpu_mem_int(e, sel, off, 16))); break;
+            case 5: fpu_put(e, 0, fpu_arith(e, FPU_OP_SUBR, fpu_get(e, 0), fpu_mem_int(e, sel, off, 16))); break;
+            case 6: fpu_put(e, 0, fpu_arith(e, FPU_OP_DIV, fpu_get(e, 0), fpu_mem_int(e, sel, off, 16))); break;
+            default: fpu_put(e, 0, fpu_arith(e, FPU_OP_DIVR, fpu_get(e, 0), fpu_mem_int(e, sel, off, 16))); break;
+            }
+            return 0;
+        case 0xD9:
+            switch (m.reg) {
+            case 0: fpu_push(e, fpu_mem_real(e, sel, off, 0)); return 0;      /* FLD m32real */
+            case 2: fpu_store_real(e, fpu_get(e, 0), sel, off, 0); return 0;  /* FST m32real */
+            case 3: fpu_store_real(e, fpu_pop(e), sel, off, 0); return 0;     /* FSTP m32real */
+            case 4: fpu_load_env(e, sel, off, is32); return 0;                /* FLDENV */
+            case 5: e->fpu_cw = (u16)rd_mem(e, sel, off, 16); return 0;       /* FLDCW */
+            case 6: fpu_store_env(e, sel, off, is32); return 0;               /* FNSTENV */
+            case 7: wr_mem(e, sel, off, e->fpu_cw, 16); return 0;             /* FNSTCW */
+            default: return 0;
+            }
+        case 0xDD:
+            switch (m.reg) {
+            case 0: fpu_push(e, fpu_mem_real(e, sel, off, 1)); return 0;      /* FLD m64real */
+            case 2: fpu_store_real(e, fpu_get(e, 0), sel, off, 1); return 0;  /* FST m64real */
+            case 3: fpu_store_real(e, fpu_pop(e), sel, off, 1); return 0;     /* FSTP m64real */
+            case 4: fpu_load_all(e, sel, off, is32); return 0;                /* FRSTOR */
+            case 6: fpu_store_all(e, sel, off, is32); return 0;               /* FNSAVE */
+            case 7: wr_mem(e, sel, off, e->fpu_sw, 16); return 0;             /* FNSTSW m16 */
+            default: return 0;
+            }
+        case 0xDB:
+            switch (m.reg) {
+            case 0: fpu_push(e, fpu_mem_int(e, sel, off, 32)); return 0;      /* FILD m32int */
+            case 1: fpu_store_int(e, fpu_pop(e), sel, off, 32); return 0;     /* FISTTP (SSE3) */
+            case 2: fpu_store_int(e, fpu_get(e, 0), sel, off, 32); return 0;  /* FIST m32int */
+            case 3: fpu_store_int(e, fpu_pop(e), sel, off, 32); return 0;     /* FISTP m32int */
+            case 5: fpu_push(e, fpu_load_tbyte(e, sel, off)); return 0;       /* FLD m80real */
+            case 7: fpu_store_tbyte(e, fpu_pop(e), sel, off); return 0;       /* FSTP m80real */
+            default: return 0;
+            }
+        case 0xDF:
+            switch (m.reg) {
+            case 0: fpu_push(e, fpu_mem_int(e, sel, off, 16)); return 0;      /* FILD m16int */
+            case 2: fpu_store_int(e, fpu_get(e, 0), sel, off, 16); return 0;  /* FIST m16int */
+            case 3: fpu_store_int(e, fpu_pop(e), sel, off, 16); return 0;     /* FISTP m16int */
+            case 4: fpu_push(e, fpu_ld_bcd(e, sel, off)); return 0;           /* FBLD */
+            case 5: fpu_push(e, fpu_mem_int(e, sel, off, 64)); return 0;      /* FILD m64int */
+            case 6: fpu_st_bcd(e, fpu_pop(e), sel, off); return 0;            /* FBSTP */
+            case 7: fpu_store_int(e, fpu_pop(e), sel, off, 64); return 0;     /* FISTP m64int */
+            default: return 0;
+            }
+        default:
+            (void)i;
+            return 0;
+        }
+    }
     return 0;
 }
 
@@ -2362,7 +3461,7 @@ static int step_386(Emu *e, int seg_ov)
             e->eax = 0x00000430u;   /* family 4, model 3, stepping 0 */
             e->ebx = 0;
             e->ecx = 0;
-            e->edx = 0x00000008u;   /* TSC available */
+            e->edx = fpu_reported() ? 0x00000009u : 0x00000008u;   /* bit0 x87, bit3 TSC */
         } else {
             e->eax = e->ebx = e->ecx = e->edx = 0;
         }
@@ -3850,7 +4949,11 @@ static void install_ivt(Emu *e)
      * BIOS", and SimEarth's INSTALL.EXE then refuses graphics and paints into
      * the mono buffer at B000h.  Fill in what a POST leaves behind on a VGA
      * machine, so mode 3 / 13h look like a real card. */
-    emu_ww(e, 0x40, 0x10, 0x0021);   /* equipment: floppy + 80x25 colour (bits 4-5 = 10) */
+    /* equipment word: bit 0 floppy, bit 1 math coprocessor (the x87 is
+     * emulated, see step_fpu), bits 4-5 = 10b (80x25 colour).  A machine
+     * with UEFIDOS_NOFPU set claims no coprocessor, which is how Windows
+     * 2.x and other "is there an 8087?" probes are tested. */
+    emu_ww(e, 0x40, 0x10, fpu_reported() ? 0x0023 : 0x0021);
     emu_wb(e, 0x40, 0x12, 0x00);     /* equipment byte 2: no mouse/joystick */
     emu_ww(e, 0x40, 0x13, 640);      /* KB of conventional memory (word 0x13-0x14:
                                       * the old code zeroed 0x14 as "equipment byte
@@ -4123,6 +5226,8 @@ int emu_init(Emu *e)
     g_pic_ocw3 = 0;
     e->cr0 = 0;
     e->a20_on = 0;              /* gate masked: real-mode addresses wrap at 1 MB */
+    fpu_init_state(e);
+    e->fpu_present = fpu_reported();   /* x87 emulated in software (D8h..DFh) */
     seg_cache_sync(e);          /* real-mode caches: base = sel<<4, limit 64K */
     install_ivt(e);
     return 0;
@@ -4867,6 +5972,19 @@ int emu_run(Emu *e)
             emu_halt_note(e, "segment trap");
             break;
         }
+#ifdef UEFIDOS_HOST
+        if (lowmem_watch_env() && (e->mem[0] != 0x00 || e->mem[1] != 0x01 ||
+                                   e->mem[2] != 0x00 || e->mem[3] != 0xF0)) {
+            fprintf(stderr, "\n[lowmem-hit] IVT[0]=%02X%02X%02X%02X after step %llu at %04X:%04X\n",
+                    e->mem[0], e->mem[1], e->mem[2], e->mem[3],
+                    (unsigned long long)total, e->cs, (u16)e->eip);
+            cs_trap(e, total);
+            e->halted = 1;
+            e->exit_code = 0xFD;
+            emu_halt_note(e, "low memory overwritten");
+            break;
+        }
+#endif
         /* Frame pacing is wall-clock, not step-count.  Windows 1.x never
          * halts: its idle loop runs ~1.9M instructions per second, so flushing
          * only every 256K steps updated the screen about every 140 ms -- the

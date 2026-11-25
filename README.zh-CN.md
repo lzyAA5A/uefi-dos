@@ -12,12 +12,17 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.7.0**。本机验证过：8086 + 186/286 指令测试集 90/90、宿主测试器的 shell / FAT16-32 / 双卷检查、1.9 GB FAT16 卷上 1.5 GB 单文件的写入与读回、切割文件拼接、
-QEMU + OVMF 的 x86_64 与 IA32 启动测试、发行镜像能起动到可交互的 `C:\>`、Windows 1.01 与 1.04
-都能跑到桌面，以及 **Windows 1.01 从 U 盘启动**（QEMU + OVMF 把镜像当作真正的 USB 设备，指针可用，
-见 [`docs/windows1x.md`](docs/windows1x.md) 第 38 轮）。另有 2 项只有在提供真实 MS-DOS 2.11 /
-MS-DOS 5 软盘镜像时才运行（`UEFIDOS_DOS211`、`UEFIDOS_DOS5`），默认跳过。
+当前版本 **1.8.0**。本机验证过：8086 + 186/286 + **8087** 指令测试集 96/96、宿主测试器的 shell / FAT16-32 / 双卷检查、1.9 GB FAT16 卷上 1.5 GB 单文件的写入与读回、切割文件拼接、
+QEMU + OVMF 的 x86_64 与 IA32 启动测试、发行镜像能起动到可交互的 `C:\>`、Windows 1.01 与 1.04 在**宣告协处理器**的情况下仍能跑到桌面，
+以及 **Windows 1.01 从 U 盘启动**（QEMU + OVMF 把镜像当作真正的 USB 设备，指针可用，见 [`docs/windows1x.md`](docs/windows1x.md) 第 38、39 轮）。
+另有 2 项只有在提供真实 MS-DOS 2.11 / MS-DOS 5 软盘镜像时才运行（`UEFIDOS_DOS211`、`UEFIDOS_DOS5`），默认跳过。
 
+1.8.0 是浮点这一轮。`D8h..DFh` 从前只解码 modrm 就扔掉（"没有协处理器的 8086"）；现在仿真器里是一套完整的软件
+8087/80287/80387 —— 八个 80 位寄存器按硬件原样保存（显式整数位，所以 `FSTP tbyte` / `FXAM` / `FSTENV` / `FNSAVE`
+与 tag word 都精确），运算走宿主 `long double`（x86 上就是同一种 80 位格式，不丢精度），带真实的 tag word、环境区与保存区、
+BCD、以及 387 扩展（FSIN/FCOS/FPATAN/F2XM1/FXTRACT/FCMOVcc/FUCOMI）。EFI 构建没有 libm，所以 sqrt、log2、2^x、
+atan、sin/cos 全部在 `src/emu/emu.c` 里用级数加显式参数归约实现。FPU 会在 INT 11h 设备字、CPUID leaf 1 与 CR0.ET
+三处宣告，`UEFIDOS_NOFPU=1` 可以再把它藏起来。细节见 [`docs/itest.md`](docs/itest.md) 的 "1.8.0 -- the 8087 (x87) sweep"。
 1.6.0 是真机这一轮。**UEFI-DOS 与 Windows 1.01 现在能塞进一根普通 FAT32 U 盘** —— 不用安装、
 不用 BIOS、不用引导器：固件直接跑 `EFI\BOOT\BOOTX64.EFI`，U 盘上其余文件就是 `C:`。
 **`AUTOBANC.COM`（autobanch）用来测它所在的那台机器**：八项负载各测满一秒（ALU、`mul`、`div`、

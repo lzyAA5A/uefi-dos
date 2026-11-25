@@ -124,6 +124,17 @@ u32  irq_steps;              /* steps spent inside that handler (watchdog) */
     u8  pal_phase;          /* 0..2 within a 3C9h triple (write) */
     u8  pal_read_phase;
     u16 pal_read_index;     /* 3C7h read index */
+    /* ---- 8087 / 80287 / 80387 floating point ----
+     * The eight data registers are kept in the coprocessor's own raw form
+     * (sign, 15-bit exponent, 64-bit mantissa with an explicit integer bit) so
+     * that FSTP tbyte, FXAM, FSTENV/FSAVE and the tag word are exact; every
+     * arithmetic operation converts to the host `long double`, which *is* the
+     * same 80-bit format on x86, so nothing is lost on the way through. */
+    u8   fpu_st[8][10];
+    u16  fpu_cw, fpu_sw, fpu_tag;
+    u32  fpu_ip, fpu_dp;
+    u16  fpu_cs, fpu_ds, fpu_op;
+    int  fpu_present;
 } Emu;
 
 /* flags */

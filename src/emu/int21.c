@@ -8,6 +8,32 @@
 
 /* AH=37h switch character.  DOS 3.3+ default is '/'; TOOLS (Turbo Link, some
  * installers) read it through AH=37h to know how to write option switches. */
+#ifdef UEFIDOS_HOST
+#include <stdio.h>
+#include <stdlib.h>
+
+/* UEFIDOS_TRACE_LOWMEM=1: shout when a DOS call is asked to touch the first
+ * 4 KB of memory.  That region holds the interrupt vector table and the BIOS
+ * data area; a program that hands DOS a buffer down there has computed its
+ * target from a pointer it should not trust, and the machine dies a few
+ * hundred instructions later when an interrupt vectors into the garbage.
+ * Windows 2.x's loader is the reason this exists. */
+static int trace_lowmem(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("UEFIDOS_TRACE_LOWMEM") ? 1 : 0;
+    return on;
+}
+#define LOWMEM_NOTE(e, what, seg, off, len)                                   \
+    do {                                                                      \
+        if (trace_lowmem() && (u32)((u32)(seg) * 16u + (off)) < 0x1000u)       \
+            fprintf(stderr, "[lowmem] %s buf=%04X:%04X len=%u cs:ip=%04X:%04X\n", \
+                    what, (unsigned)(seg), (unsigned)(off), (unsigned)(len),   \
+                    (unsigned)(e)->cs, (unsigned)(e)->ip);                     \
+    } while (0)
+#else
+#define LOWMEM_NOTE(e, what, seg, off, len) ((void)0)
+#endif
 static u8 g_switch_char = '/';
 static int g_pending_key = -1;
 static int g_pending_scan = -1;
@@ -1054,6 +1080,7 @@ void int21_handler(Emu *e)
         int h = e->bx;
         u32 want = e->cx;
         u16 seg = e->ds, off = e->dx;
+        LOWMEM_NOTE(e, "read", seg, off, want);
         if (h < 5) {
             char tmp[512];
             u32 got = 0;
@@ -1119,6 +1146,7 @@ void int21_handler(Emu *e)
         int h = e->bx;
         u32 len = e->cx;
         u16 seg = e->ds, off = e->dx;
+        LOWMEM_NOTE(e, "write", seg, off, len);
         if (h == 1 || h == 2) {
             for (u32 i = 0; i < len; i++) {
                 char ch = (char)emu_rb(e, seg, (u16)(off + i));
@@ -1283,13 +1311,18 @@ void int21_handler(Emu *e)
             e->bx = max_free;
 #ifdef UEFIDOS_HOST
             arena_dump(e, "AH=48h failed");
-            if (getenv("UEFIDOS_TRACE_EXEC"))
+            if (getenv("UEFIDOS_TRACE_EXEC") || trace_lowmem())
                 fprintf(stderr, "[mem] 48h need=%04X fail max=%04X psp=%04X\n",
                         (unsigned)e->bx, (unsigned)max_free, (unsigned)g_dos.psp_seg);
 #endif
             set_err(e, 8);                       /* insufficient memory */
             return;
         }
+#ifdef UEFIDOS_HOST
+        if (trace_lowmem())
+            fprintf(stderr, "[mem] 48h paras=%04X -> %04X cs:ip=%04X:%04X\n",
+                    (unsigned)e->bx, (unsigned)ds, e->cs, e->ip);
+#endif
         e->ax = ds;
         set_ok(e);
         return;
@@ -1305,6 +1338,11 @@ void int21_handler(Emu *e)
             set_err(e, 8);
             return;
         }
+#ifdef UEFIDOS_HOST
+        if (trace_lowmem())
+            fprintf(stderr, "[mem] 4Ah es=%04X want=%04X ok cs:ip=%04X:%04X\n",
+                    (unsigned)e->es, (unsigned)e->bx, e->cs, e->ip);
+#endif
 #ifdef UEFIDOS_HOST
         arena_dump(e, "after AH=4Ah");
 #endif

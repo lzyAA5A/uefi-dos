@@ -182,6 +182,33 @@ static const u8 c_bswap[]       = { 0x66, 0xB9, 0x78, 0x56, 0x34, 0x12,
                                     0x89, 0xC8 };                  /* mov ax,cx */
 static const u8 c_lgs[]         = { 0x0F, 0xB5, 0x07 };              /* lgs ax,[bx] */
 static const u8 c_insw[]        = { 0x6D };                          /* insw */
+/* ---- x87 (8087) streams.  Every one starts with FNINIT so the cases are
+ * independent of each other: the emulator instance is shared.  DD 1F is
+ * "fstp qword [bx]", DF 1F "fistp word [bx]", DF 07 "fild word [bx]". ---- */
+static const u8 c_fpu_fadd[]    = { 0xDB, 0xE3,                    /* fninit */
+                                    0xD9, 0xE8,                    /* fld1 */
+                                    0xD8, 0xC0,                    /* fadd st0,st0 */
+                                    0xDD, 0x1F };                  /* fstp qword [bx] */
+static const u8 c_fpu_sqrt[]    = { 0xDB, 0xE3, 0xD9, 0xE8, 0xD8, 0xC0,
+                                    0xD9, 0xFA,                    /* fsqrt */
+                                    0xDD, 0x1F };
+static const u8 c_fpu_fild[]    = { 0xDB, 0xE3,
+                                    0xDF, 0x07,                    /* fild word [bx] */
+                                    0xD8, 0xC0,                    /* fadd st0,st0 */
+                                    0xDF, 0x1F };                  /* fistp word [bx] */
+static const u8 c_fpu_fscale[]  = { 0xDB, 0xE3,
+                                    0xDF, 0x07,                    /* fild word [bx] = 3 */
+                                    0xD9, 0xE8,                    /* fld1 */
+                                    0xD9, 0xFD,                    /* fscale -> 8 */
+                                    0xDF, 0x1F };                  /* fistp word [bx] */
+static const u8 c_fpu_fcom[]    = { 0xDB, 0xE3,
+                                    0xD9, 0xE8,                    /* fld1 */
+                                    0xD9, 0xEE,                    /* fldz  (st0=0, st1=1) */
+                                    0xD8, 0xD1,                    /* fcom st1 -> C0=1 */
+                                    0xDF, 0xE0 };                  /* fnstsw ax */
+static const u8 c_fpu_fchs[]    = { 0xDB, 0xE3, 0xD9, 0xE8,
+                                    0xD9, 0xE0,                    /* fchs */
+                                    0xDD, 0x1F };
 static const u8 c_outsw[]       = { 0x6F };                          /* outsw */
 
 /* ---- memory fixtures (8 bytes each) ---- */
@@ -203,6 +230,14 @@ static const u8 m_zeros16[]       = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
  * SI DI, so the LAST one pushed (DI) sits lowest: DI SI BP SP BX DX CX AX. */
 static const u8 m_pusha_stack[]   = { 0x66, 0x66, 0x55, 0x55, 0x77, 0x77, 0x00, 0xFF,
                                       0x22, 0x22, 0x44, 0x44, 0x33, 0x33, 0x11, 0x11 };
+/* x87 fixtures: 2.0 and -1.0 as IEEE doubles, sqrt(2) as an IEEE double,
+ * and the 16-bit integers the FILD/FIST cases use. */
+static const u8 m_fpu_two[]     = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40 };
+static const u8 m_fpu_neg1[]    = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0xBF };
+static const u8 m_fpu_sqrt2[]   = { 0xCD, 0x3B, 0x7F, 0x66, 0x9E, 0xA0, 0xF6, 0x3F };
+static const u8 m_fpu_three[]   = { 0x03, 0x00 };
+static const u8 m_fpu_eight[]   = { 0x08, 0x00 };
+static const u8 m_fpu_six[]     = { 0x06, 0x00 };
 
 static const it_case g_cases[] = {
     /* --- ALU with the register as destination.  Real bug: the result was
@@ -402,7 +437,25 @@ static const it_case g_cases[] = {
     CASE("outsw to port 61h", c_outsw,
          ((it_regs){.si = IT_DATA_OFF}), ((it_regs){.si = IT_DATA_OFF + 2}), IT_C_SI, 1,
          m_words, 0, IT_SEG, IT_DATA_OFF, 2),
-};
+    /* --- x87 floating point (D8h..DFh) --- */
+    CASE("fpu fld1; fadd st0,st0; fstp qword", c_fpu_fadd,
+         ((it_regs){.bx = IT_DATA_OFF}), ((it_regs){.bx = IT_DATA_OFF}), IT_C_MEM,
+         4, m_zeros16, m_fpu_two, IT_SEG, IT_DATA_OFF, 8),
+    CASE("fpu fsqrt 2 -> 1.41421356 (double)", c_fpu_sqrt,
+         ((it_regs){.bx = IT_DATA_OFF}), ((it_regs){.bx = IT_DATA_OFF}), IT_C_MEM,
+         5, m_zeros16, m_fpu_sqrt2, IT_SEG, IT_DATA_OFF, 8),
+    CASE("fpu fchs -1.0 (double)", c_fpu_fchs,
+         ((it_regs){.bx = IT_DATA_OFF}), ((it_regs){.bx = IT_DATA_OFF}), IT_C_MEM,
+         4, m_zeros16, m_fpu_neg1, IT_SEG, IT_DATA_OFF, 8),
+    CASE("fpu fild word, fadd st0,st0, fistp word", c_fpu_fild,
+         ((it_regs){.bx = IT_DATA_OFF}), ((it_regs){.bx = IT_DATA_OFF}), IT_C_MEM,
+         4, m_fpu_three, m_fpu_six, IT_SEG, IT_DATA_OFF, 2),
+    CASE("fpu fscale (1.0 * 2^3 = 8)", c_fpu_fscale,
+         ((it_regs){.bx = IT_DATA_OFF}), ((it_regs){.bx = IT_DATA_OFF}), IT_C_MEM,
+         5, m_fpu_three, m_fpu_eight, IT_SEG, IT_DATA_OFF, 2),
+    CASE("fpu fcom st1 + fnstsw ax (0 < 1 -> C0, top=6)", c_fpu_fcom,
+         ((it_regs){}), ((it_regs){.ax = 0x3100}), IT_C_AX,
+         5, 0, 0, 0, 0, 0),};
 
 #define IT_NCASES ((int)(sizeof(g_cases) / sizeof(g_cases[0])))
 

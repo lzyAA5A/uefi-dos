@@ -188,3 +188,54 @@ lgs ax,[bx]
 insw from port 61h
 outsw to port 61h
 ```
+
+## 1.8.0 -- the 8087 (x87) sweep
+
+`step_fpu()` used to decode the modrm of D8h..DFh and do nothing, i.e. the
+machine behaved like an 8086 with no coprocessor.  It is now a full software
+x87: eight 80-bit registers kept in the coprocessor's own raw form (sign,
+15-bit exponent, 64-bit mantissa with the *explicit* integer bit, so FSTP
+tbyte / FXAM / FSTENV / FNSAVE and the tag word are exact), and arithmetic that
+converts to the host `long double` -- on x86 that *is* the same 80-bit format,
+so FADD/FSUB/FMUL/FDIV run on the real FPU at full precision.
+
+Covered (D8h..DFh, both the memory and the register forms):
+
+| group | instructions |
+| --- | --- |
+| transfer | FLD/FST/FSTP m32real, m64real, m80real, ST(i); FILD/FIST/FISTP m16/m32/m64int; FBLD/FBSTP; FXCH; FFREE/FFREEP; FINCSTP/FDECSTP |
+| arithmetic | FADD/FSUB/FSUBR/FMUL/FDIV/FDIVR (+P forms, both operand orders) and their FI* memory-integer forms |
+| compare | FCOM/FCOMP/FCOMPP, FUCOM/FUCOMP/FUCOMPP, FICOM/FICOMP, FTST, FXAM, FUCOMI/FCOMI/FUCOMIP/FCOMIP (ZF/PF/CF) |
+| unary | FCHS, FABS, FSQRT, FRNDINT, FSCALE, FXTRACT, F2XM1, FYL2X, FYL2XP1, FPTAN, FPATAN, FSIN, FCOS, FSINCOS, FPREM, FPREM1 |
+| constants | FLD1, FLDZ, FLDPI, FLDL2T, FLDL2E, FLDLG2, FLDLN2 |
+| control | FINIT/FNINIT, FLDCW/FNSTCW, FCLEX/FNCLEX, FSTSW AX, FNSTSW m16, FLDENV/FNSTENV (14/28-byte), FRSTOR/FNSAVE (94/108-byte), FENI/FDISI/FSETPM, FNOP |
+| 387 extras | FCMOVB/E/BE/U and the NB/NE/NBE/NU forms, FUCOMI/FCOMI, FXCH, PREFETCHW |
+
+The EFI build links `-nostdlib` (no libc, no libm), so every elementary
+function the 387 needs -- sqrt, 2^x, log2, atan, sin, cos -- is computed in
+`src/emu/emu.c` from series with explicit range reduction; FPREM reports an
+incomplete reduction (C2=1) instead of inventing quotient bits, and the
+transcendentals lose digits for arguments far outside +-2^20, exactly like the
+hardware's own "inexact reduction" flag warns about.
+
+The FPU is reported to software in all three places a program looks: bit 1 of
+the INT 11h equipment word, bit 0 of CPUID leaf 1 EDX, and CR0.ET (EM/TS stay
+clear).  `UEFIDOS_NOFPU=1` in the host harness hides it again, which is how the
+"no coprocessor" path stays testable.
+
+New cases (96 total, all passing):
+
+```text
+fpu fld1; fadd st0,st0; fstp qword
+fpu fsqrt 2 -> 1.41421356 (double)
+fpu fchs -1.0 (double)
+fpu fild word, fadd st0,st0, fistp word
+fpu fscale (1.0 * 2^3 = 8)
+fpu fcom st1 + fnstsw ax (0 < 1 -> C0, top=6)
+```
+
+Every x87 case starts with FNINIT because the emulator instance is shared
+between cases, and the two floating-point fixtures are exact bit patterns
+(`m_fpu_sqrt2` is sqrt(2) as an IEEE double, `m_fpu_two`/`m_fpu_neg1` likewise),
+so a rounding mistake shows up as a byte difference rather than as "close
+enough".

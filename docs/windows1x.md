@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.6.0).** Windows **1.01** runs its MS-DOS
+**Where this line of work stands (1.8.0).** Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
 its desktop, and since 1.5.1 its **mouse works**: the pointer appears, follows
 the host and a double-click on a CALENDAR.EXE entry starts the application
@@ -4516,3 +4516,83 @@ the three fixes above).  `AUTOBANC.COM` is built by `build.ps1` from
 `tools/autobanch.asm` with the mingw binutils and ships inside the release
 image and the zip; `make_release.ps1` gained `-SkipBuild` so a CI that already
 built the artifacts does not build them twice.
+
+## Round 39 -- an 8087 in software, and Windows 2.03's first real fault (1.8.0)
+
+Windows 1.x never touches the coprocessor, so the machine could get away with
+`step_fpu()` being a modrm decoder that did nothing.  2.03 is a different
+proposition (Windows/286 probes the hardware properly, and WIN87EM only exists
+so that *no*-FPU machines can still run), so this round built the FPU and then
+used it as a lens on 2.03.
+
+### The x87
+
+`src/emu/emu.c` now carries a complete software 8087/80287/80387 (see
+`docs/itest.md`, section "1.8.0 -- the 8087 (x87) sweep" for the instruction
+table).  The design points worth remembering:
+
+* registers live in the coprocessor's own 80-bit image, `long double` is the
+  same format on x86, so an add is `a + b` on the host FPU at full precision;
+* the eight stack registers are addressed through the status word's TOP field,
+  and the tag word is reclassified on every store (`valid/zero/special/empty`);
+* the EFI build has no libm, so sqrt (Newton), 2^x and log2 (series after
+  reduction to [1,2) resp. |r| <= ln2/2), atan (half-angle reduction then
+  Taylor) and sin/cos (quadrant reduction by pi/2) are implemented in emu.c;
+* the FPU is announced in the INT 11h equipment word (bit 1), CPUID leaf 1 EDX
+  bit 0 and CR0.ET, and `UEFIDOS_NOFPU=1` hides it again for testing.
+
+`--itest` grew from 90 to 96 checks, six of them x87, with exact IEEE bit
+patterns as expected memory (a rounding mistake is a byte difference, not a
+"close enough").
+
+### Windows 2.03: what actually happens now
+
+The workspace copy of the 2.03 media is the **installer** set: it contains
+`WIN.CNF` (the loader template), `SETUP.EXE`/`SETUP.INF`, `KERNEL/GDI/USER`,
+`WIN200.BIN` (226048 B) and `WIN200.OVL` (272528 B) -- and no `WIN.COM` and no
+`SYSTEM.INI`, because `SETUP` creates both.  The images from the earlier rounds
+(`build/w203c.img`) were a *partial* install: `WIN` had nothing to run.
+
+This round assembled a runnable tree by hand (`build/mk203.ps1`): every media
+file into `\WINDOWS`, the `[machine]` profile's drivers copied to their
+canonical names (`cga.drv` -> `display.drv`, `usa.drv` -> `keyboard.drv`), a
+`SYSTEM.INI` with the `[boot]` section that profile implies, and the media's own
+built `WIN.COM`.  `WIN.COM` now starts, loads `WIN200.BIN`, and the real-mode
+init reaches its DOS/IVT setup -- then executes
+
+```text
+0E68:8730  2b 7e fe     sub  di,[bp-2]
+0E68:8733  8e c0        mov  es,ax        ; AX == 0
+0E68:8735  33 ff        xor  di,di
+0E68:8737  fc           cld
+0E68:8738  b9 40 00     mov  cx,0040h
+0E68:873B  f3 a4        rep movsb         ; 64 bytes of NE header -> 0000:0000
+```
+
+i.e. it copies the "NE" header of `WIN200.BIN` (source buffer `0E3A:0000`, which
+holds `4e 45 05 01 ...`) **into segment 0**, wiping the interrupt vector table;
+the next `int 21h` vectors into the garbage (`FF01:28C3`) and the segment trap
+ends the run.  AX came back 0 from the helper at `0E68:5CC7`, called as
+`push ax (0) / push ax (0) / push di (0x3D3) / push cs / call`, which is the
+shape of a "map this block" query -- the value is the segment the caller then
+uses as the destination.
+
+Two host-side debug aids came out of the hunt and stay in the tree:
+
+* `UEFIDOS_TRACE_LOWMEM=1` -- every DOS read/write and every AH=48h/4Ah whose
+  buffer or block lands in the first 4 KB is printed with the caller's CS:IP;
+* `UEFIDOS_WATCH_LOWMEM=1` -- halt the moment the IVT stops looking like a
+  vector table, then dump the 4096-step ring (`build/cs_trap.txt`), which is how
+  the instruction above was found.  `UEFIDOS_RINGLOG=1` fills that ring.
+
+Neither DOS-side guard fired for 2.03, which by itself is the finding: the
+loader never calls AH=48h/4Ah (nothing to allocate wrongly) and never hands DOS
+a low buffer -- it destroys memory **itself**, with a `rep movsb` to a segment
+it computed from both a returned 0 and its own arithmetic.  The next lead is the
+helper at `0E68:5CC7` in `WIN200.BIN` and the three arguments it is handed;
+`build/mk203.ps1` plus `build/w203full.img` make that reproducible in one
+command.
+
+Windows 1.04 and 1.01 were re-run with the FPU announced: both still reach their
+desktops (1.04: `build/fpu104b.ppm.00012.ppm` shows the Executive with the
+pointer), so claiming a coprocessor costs the 1.x line nothing.

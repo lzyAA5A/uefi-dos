@@ -13,16 +13,26 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.7.0**.  Verified here by: the 8086 + 186/286 instruction suite (90 of
-90), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB single-file
-write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU + OVMF boot
-smoke tests for x86_64 and IA32, the release image booting to a live `C:\>`
-prompt, Windows 1.01 and 1.04 reaching their desktops, and Windows 1.01 booting
-from a **USB stick** under QEMU + OVMF with a working pointer
-([`docs/windows1x.md`](docs/windows1x.md), Round 38).  Two checks still skip
-unless real MS-DOS 2.11 / MS-DOS 5 floppy images are supplied (`UEFIDOS_DOS211`,
-`UEFIDOS_DOS5`).
+Version **1.8.0**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
+single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU +
+OVMF boot smoke tests for x86_64 and IA32, the release image booting to a live
+`C:\>` prompt, Windows 1.01 and 1.04 reaching their desktops **with the
+coprocessor announced**, and Windows 1.01 booting from a **USB stick** under
+QEMU + OVMF with a working pointer ([`docs/windows1x.md`](docs/windows1x.md),
+Rounds 38 and 39).  Two checks still skip unless real MS-DOS 2.11 / MS-DOS 5
+floppy images are supplied (`UEFIDOS_DOS211`, `UEFIDOS_DOS5`).
 
+1.8.0 is the floating-point round: `D8h..DFh` used to be decoded and discarded
+("an 8086 without a coprocessor"); the emulator now carries a complete software
+8087/80287/80387 -- eight 80-bit registers kept in the hardware's own raw image,
+arithmetic through the host `long double` (the same format), a real tag word,
+the environment and save areas, BCD, the 387 extras (FSIN/FCOS/FPATAN/F2XM1/
+FXTRACT/FCMOVcc/FUCOMI), and -- because the EFI build has no libm -- sqrt, log2,
+2^x, atan and sin/cos written as series with explicit range reduction.  The FPU
+is announced in the INT 11h equipment word, CPUID leaf 1 and CR0.ET, and
+`UEFIDOS_NOFPU=1` hides it again.  Details: [`docs/itest.md`](docs/itest.md),
+section "1.8.0 -- the 8087 (x87) sweep".
 1.7.0 is the large-file and instruction-completeness round.  **The 32 MB "DOS 4.0
 file limit" was a testing boundary, not a limit in the code**: a single file can
 be written up to the FAT32 directory-entry ceiling of 4 GB - 1 through the
