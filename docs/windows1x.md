@@ -2,16 +2,22 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.5.1).** Windows **1.01** runs its MS-DOS
+**Where this line of work stands (1.6.0).** Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
 its desktop, and since 1.5.1 its **mouse works**: the pointer appears, follows
 the host and a double-click on a CALENDAR.EXE entry starts the application
 (Round 36 for the desktop, Round 37 for the mouse).  Windows **2.03** installs
 completely and then stops right after its logo, in the kernel's DOS-structure
-scan (Round 36; two leads left, both in that section).  Everything below is the
-lab log in the order the problems were solved -- the paragraphs immediately
-following are from the very first 1.01 rounds, when the kernel still died before
-its first window; they are kept as history.
+scan (Round 36; two leads left, both in that section).  1.6.0 is the real-hardware
+round: UEFI-DOS plus Windows 1.01 now fit on a plain FAT32 **USB stick** (boot
+verified as a USB device under QEMU + OVMF, pointer and all), `AUTOBANC.COM`
+measures the machine it runs on, and the 8253 timer counter is emulated so a
+guest can read a real 1.19 MHz clock instead of guessing from the 55 ms BIOS tick
+(Round 38 -- it also documents what a real machine gets for mouse, colour and
+resolution).  Everything below is the lab log in the order the problems were
+solved -- the paragraphs immediately following are from the very first 1.01
+rounds, when the kernel still died before its first window; they are kept as
+history.
 
 **Goal of this line of work:** make a real, unmodified Windows 1.01 reach its desktop
 under UEFI-DOS. **State of that first attempt: not achieved.** UEFI-DOS starts `WIN.COM`, the kernel runs,
@@ -4343,3 +4349,170 @@ Logitech/Microsoft "standard bus mouse", so that first probe must fail (`0Eh` !=
 exactly the path its packet reader implements (`90h/0B0h/0D0h/0F0h` into 23Eh,
 data out of 23Ch).
 
+
+## Round 38 -- a bootable stick, autobanch, and a guest-readable clock (1.6.0)
+
+**The ask.** Put UEFI-DOS and Windows 1.01 on a USB stick (the stick's previous
+life was a Hackintosh -- OpenCore, kexts and all -- and it was declared
+disposable), write a benchmark called *autobanch* to measure the machine it runs
+on, and answer three questions about real hardware: mouse, colour, resolution.
+
+### 1. The stick
+
+Contents (all of it plain FAT32 on the volume the firmware already boots from --
+UEFI-DOS mounts the boot volume itself as C: and needs nothing else):
+
+```
+EFI\BOOT\BOOTX64.EFI, BOOTIA32.EFI    the whole OS, 217 KB / 205 KB
+WINDOWS\                               Windows 1.01 (WIN100.OVL carries the bus-mouse driver)
+TOOLS\AUTOBANC.COM                     autobanch (the file name is 8.3: AUTOBANC, not AUTOBANCH)
+TOOLS\MOUSETST.COM CGATEST.COM CGATEXT.COM VRAM.COM VESATEST.COM GFXTEST.COM
+TOOLS\KEYTEST.COM INFO.COM CAL.COM SUM.COM HEX.COM CLOCK.COM HELLO.COM DOS4TEST.COM
+AUTOEXEC.BAT                           banner, the three SETVER lines, PATH \TOOLS
+CONFIG.SYS                             FILES=40 / LASTDRIVE=D / EXECHIGH=ON / MOUSESPEED=2
+BENCH.BAT, WIN1.BAT                    one-word commands
+README.TXT                             what the stick is, in DOS-friendly text
+```
+
+54 files, 1.48 MB.  The three `SETVER ... 3.30` lines are not optional: both
+1.01 and 1.04 check the DOS version and refuse to start under the 4.00 that
+UEFI-DOS reports (`docs/windows1x.md`, Round 36).
+
+**Batch files run from the prompt now.** Until this round the shell only ever ran
+one batch file, `AUTOEXEC.BAT` (`shell_run()` calls `run_batch_file()` once);
+typing `BENCH` fell through to the program loader, which tried `BENCH`,
+`BENCH.COM`, `BENCH.EXE`, and then ran `BENCH.BAT` *as a binary*, which of course
+died on its first `ECHO` ("no handler for INT 20").  `dispatch()` in
+`src/shell/shell.c` now probes `NAME.BAT` (appending `.BAT` when the typed name
+has no extension) before the external-program path, with a nesting guard so a
+batch that calls itself stops at depth 8.  `BENCH` and `WIN1` therefore work as
+one-word commands, which is the difference between a usable stick and one that
+needs a README next to the keyboard.
+
+**Verified twice, in two different ways.**
+
+* Host harness, same FAT32 image, same tree: `WIN1` reaches the MS-DOS Executive
+  with the pointer on screen -- `build\usb101.png` (640x200, menus File/View/
+  Special, drives A: C: D:, `C:\WINDOWS`, the whole file list, arrow at the
+  centre).
+* **As a genuine USB stick**: QEMU + OVMF with `-device qemu-xhci` and a
+  `usb-storage` device holding that image, no other disk, so the firmware's only
+  boot option is `PciRoot(0x0)/Pci(0x3,0x0)/USB(0x0,0x0)`.  OVMF booted it,
+  UEFI-DOS mounted it as C:, `AUTOEXEC.BAT` ran, `WIN1` started 1.01, and
+  `build\win_shot1.png` is the desktop as the *firmware's* framebuffer shows it
+  (1280x800).  Then one QMP `input-send-event` moved the virtual USB mouse by
+  +140/+40 mickeys and `build\win_shot2.png` shows the arrow at its new position:
+  **firmware mouse -> EFI_SIMPLE_POINTER_PROTOCOL -> emulated bus mouse ->
+  Windows 1.01's MOUSE.DRV** is a working chain on the real UEFI path, not just in
+  the host harness.
+
+The stick itself was written by deleting everything on the volume (the OpenCore
+tree had to be removed with `[System.IO.Directory]::Delete(..., $true)` after
+`Remove-Item -Recurse` gave up on a nested `.kext` directory) and copying the
+54 files; 0 size mismatches on read-back.
+
+### 2. autobanch, and the clock problem behind it
+
+`tools/autobanch.asm` -> `build\AUTOBANC.COM` (5,324 bytes, 8086-only, a .COM).
+Eight workloads, each timed to a fixed window, printing operations per second:
+
+| line | what it does | host harness | QEMU+OVMF (nested) |
+| --- | --- | ---: | ---: |
+| ALU chain (8 ops) | `add/xor/mov` ring in registers | 14,908,416 | 1,629,184 |
+| MUL r/m16 x2 | two `mul` per unit | 9,712,128 | 952,192 |
+| DIV r/m16 | `div` by 7 | 8,708,032 | 451,520 |
+| REP MOVSW copy KB | 1 KB block copy | 119,568 | 5,740 |
+| REP STOSW fill KB | 1 KB block fill | 179,144 | 8,044 |
+| REP LODSW read KB | 1 KB block read | 361,236 | 13,008 |
+| INT 21h call | `AH=30h`, i.e. the DOS dispatch path | 486,384 | 220,968 |
+| Disk read KB | 64 KB re-read through `AH=3Fh` | 144,512 | 3,968 |
+
+plus DOS version, video mode/columns, conventional memory, and the BIOS tick rate
+measured against the PIT.
+
+**Why the first version was useless.** It timed with the BIOS tick at `0040:006C`
+-- the only clock UEFI-DOS offered.  That clock has 55 ms of resolution *and* its
+rate is whatever the wall-clock pacer negotiated for the current instruction mix,
+so the same binary reported `MUL 2,080,000 /s` in one run and `MUL 90,240 /s` in
+the next, and `DIV` swung by 20x the same way.  The pacer (`timer_pace()` in
+`src/emu/emu.c`) re-measures the emulator's speed every 125 ms and moves the
+steps-per-tick figure with a 3/4 weight, which is exactly right for keeping
+Windows' double-click window honest and exactly wrong as a measuring stick: the
+window ends up being measured in a unit that is itself being re-calibrated.
+
+**The fix: emulate the readable half of the 8253.** Channel 0 is a free-running
+1.193182 MHz down counter that reloads every 65536 counts, latches on
+`out 43h,0`, and is read as low byte then high byte on `in 40h`.  UEFI-DOS now
+answers those reads (`pit_sample()` / `pit_count_now()`), deriving the counter
+from `plat_ticks_ms()` so one 65536-count reload is 54.9 ms -- the same period the
+emulated timer interrupt fires at, which is what a guest expects.  Only the read
+side exists: a programmed reload value or mode is accepted and ignored, and
+channel 2 (the speaker) is still silent.
+
+autobanch now runs each test for **exactly 1,193,182 counts = 1.000 s**, so the
+raw iteration count *is* the per-second figure (no scaling, no rounding), and
+each test is preceded by a 0.25 s warm-up that is thrown away, because the pacer
+needs a moment to settle after the previous test changed the instruction mix.
+Repeat runs of the host harness now agree to within ~15% (ALU 14.9M / 14.0M /
+16.1M in three runs) instead of a factor of 20, and the totals line is a single
+comparable index.
+
+### 3. Three bugs the benchmark found on the way
+
+* **The BIOS data area claimed 128 KB of memory.**  `emu_init()` wrote 640 to
+  `0040:0013` and then a line commented "equipment byte 2: no serial/parallel
+  ports" wrote `0` to `0040:0014` -- which is the *high byte* of that same word.
+  Every program that reads the BDA directly therefore saw 128 KB; autobanch
+  printed `Conventional RAM .... 128 KB` and made it obvious.  The stray write is
+  gone (`src/emu/emu.c`), and autobanch now prints 640.
+* **`INT 11h` and `INT 12h` were not dispatched at all.**  They fell through to
+  the "unknown vector" path, which *halts the machine*; a program asking the BIOS
+  how much memory there is got a leftover register instead of an answer.  Both are
+  now answered from the BDA (`AX = [0040:0010]` / `[0040:0013]`) in both the
+  real-mode and the protected-mode dispatch chains.
+* **The host harness clock was 15.6 ms coarse.**  `plat_ticks_ms()` used
+  `GetTickCount64()`, whose granularity is the scheduler tick; the pacer
+  re-measures over 125 ms, so its estimate was ~30% off and *guest time itself*
+  ran fast.  autobanch's tick-rate line showed `23 /s` where 18.2 was correct.
+  `src/host/host_plat.c` now uses `QueryPerformanceCounter()`: the same line reads
+  `19 /s` (18.2 plus counter quantisation), and the UEFI build was already using
+  the TSC.
+
+That tick-rate line is not decoration: it is how you find out whether the
+emulated machine keeps real time, which is what makes a 500 ms double-click
+window feel like 500 ms.
+
+### 4. Real hardware: mouse, colour, resolution
+
+* **Mouse -- works, if the firmware lets it.**  `src/uefi/efi_plat.c` looks for
+  `EFI_SIMPLE_POINTER_PROTOCOL` and polls it (`plat_mouse_poll()`); UEFI-DOS then
+  feeds the resulting mickeys to the emulated Microsoft bus mouse, whose driver
+  in `WIN100.OVL` (1.01) and `MOUSE.DRV` (1.04) reads them through ports
+  `23Ch..23Fh`.  Verified end to end above (QMP moved the USB mouse, the Windows
+  arrow followed).  If a machine's pointer does not move, the firmware kept the
+  mouse for itself -- that is a firmware setting, not a UEFI-DOS one.
+* **Colour -- CGA, so four colours in graphics and two in 640-wide.**  The
+  emulated adapter is CGA-compatible: text mode 3, `320x200x4` (modes 4/5) with
+  the two CGA palettes and the intensity bit (`out 3D8h/3D9h`), and
+  `640x200x2` (mode 6).  `CGATEST.COM` draws the 320x200 stripes, `CGATEXT.COM`
+  the graphics-mode text, `VRAM.COM` writes page 0 directly.  Windows 1.01/1.04
+  run their own CGA driver, so the desktop is 640x200 in two colours -- correct
+  for the period, and the reason the screenshots look the way they do.
+* **Resolution -- the guest's is 640x200; the picture is upscaled to the panel.**
+  `plat_video_gfx_begin()` picks the smallest GOP mode at least as large as the
+  requested picture and integer-upscales horizontally (up to 4x) with a
+  fractional vertical step to 4:3, so a 1280x800 panel shows the 640x200 desktop
+  at 2x/4x -- `build\win_shot1.png` is that scaling.  Making *Windows* sharper
+  would need a completely different emulated adapter: 1.01/1.04 media ship
+  `EGAHIRES.DRV` (640x350x16), `EGALORES.DRV`, `HERCULES.DRV` and friends, but
+  UEFI-DOS has no EGA emulation (no planar A0000, no 3C0h-3CFh sequencer/CRTC/
+  graphics registers), so a 640x350 desktop is not reachable yet.  VGA is out of
+  reach for a different reason: 1.04 predates it and ships no VGA driver.
+
+### 5. Release 1.6.0
+
+Version 1.6.0 (feature round: new clock, new tool, new shell command path, plus
+the three fixes above).  `AUTOBANC.COM` is built by `build.ps1` from
+`tools/autobanch.asm` with the mingw binutils and ships inside the release
+image and the zip; `make_release.ps1` gained `-SkipBuild` so a CI that already
+built the artifacts does not build them twice.

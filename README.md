@@ -13,10 +13,34 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.5.1** — 32 of 32 automated checks pass on the Windows host harness
-and on QEMU + OVMF (x86_64 and IA32); two further checks skip unless real
-MS-DOS 2.11 / MS-DOS 5 floppy images are supplied (`UEFIDOS_DOS211`,
+Version **1.6.0**.  Verified here by: the 8086 instruction suite (68 of 68), the
+host harness shell, FAT16/32 and dual-case checks, the QEMU + OVMF boot smoke
+tests for x86_64 and IA32, the release image booting to a live `C:\>` prompt,
+Windows 1.01 and 1.04 reaching their desktops, and Windows 1.01 booting from a
+**USB stick** under QEMU + OVMF with a working pointer
+([`docs/windows1x.md`](docs/windows1x.md), Round 38).  Two checks still skip
+unless real MS-DOS 2.11 / MS-DOS 5 floppy images are supplied (`UEFIDOS_DOS211`,
 `UEFIDOS_DOS5`).
+
+1.6.0 is the real-hardware round.  **UEFI-DOS and Windows 1.01 fit on a plain
+FAT32 USB stick** -- no install, no BIOS, no bootloader: the firmware runs
+`EFI\BOOT\BOOTX64.EFI` and the rest of the stick becomes `C:`.  **`AUTOBANC.COM`
+(autobanch) measures the machine it runs on**: eight workloads timed over exactly
+one second each (ALU, `mul`, `div`, block copy/fill/read, `INT 21h` dispatch, disk
+read), plus DOS version, video mode, memory and the emulated BIOS tick rate.  To
+time anything at all a guest needs a clock, so this round also **emulates the
+readable half of the 8253 timer**: channel 0's 1.193182 MHz counter latches on
+`out 43h,0` and reads back on `in 40h` -- the BIOS tick alone has 55 ms of
+resolution and a rate the wall-clock pacer keeps re-negotiating, which made the
+first version of the benchmark swing by 20x between runs.  Three fixes fell out
+of building it: the BIOS data area no longer reports **128 KB of conventional
+memory** (a stray write zeroed the high byte of `0040:0013`, so a program reading
+the BDA directly saw a quarter of the machine), `INT 11h`/`INT 12h` are actually
+dispatched instead of halting the machine, and the Windows host harness uses
+`QueryPerformanceCounter` instead of the 15.6 ms `GetTickCount64` -- whose
+coarseness had the pacer running guest time about 30% fast.  The shell also runs
+`NAME.BAT` from the prompt now, so a stick can offer `WIN1` and `BENCH` instead of
+command lines.  Mouse, colour and resolution on real hardware: Round 38.
 
 1.5.1 fixes the one thing Windows 1.04 still lacked: **its mouse works**.
 1.04's `MOUSE.DRV` does not stop at checking the bus-mouse signature -- it then
@@ -523,6 +547,37 @@ Adding a case is a five-line table edit; see [`docs/itest.md`](docs/itest.md) fo
 the format, the traps (macro commas, `lodsb` preserving `AH`) and what is still
 uncovered.
 
+## Real hardware: a USB stick and autobanch
+
+**The stick.**  Nothing has to be installed: a FAT32 volume holding
+`EFI\BOOT\BOOTX64.EFI` (or `BOOTIA32.EFI` on 32-bit firmware) is the whole
+operating system, and every file on that same volume is `C:`.  Windows 1.01 can
+live next to it, which is what the USB kit does: `WINDOWS\` holds the tree from
+the 1.01 disks, `AUTOEXEC.BAT` sets the three `SETVER ... 3.30` entries 1.01 and
+1.04 need (both refuse to start under the DOS 4.00 that UEFI-DOS reports),
+`CONFIG.SYS` carries `FILES=40 / LASTDRIVE=D / EXECHIGH=ON / MOUSESPEED=2`, and
+`WIN1.BAT` / `BENCH.BAT` give one-word commands -- `WIN1`, `BENCH` -- because the
+shell now runs `NAME.BAT` from the prompt instead of handing it to the program
+loader.  Boot verified on the real firmware path by attaching the image as a
+**USB stick** to QEMU + OVMF (`-device qemu-xhci` plus `usb-storage`, no other
+disk, so the firmware's only boot option is the stick), then moving a virtual USB
+mouse with a QMP event: the pointer follows it into the 1.01 desktop
+(`docs/windows1x.md`, Round 38).
+
+**autobanch.**  `AUTOBANC.COM` (5,324 bytes, `tools/autobanch.asm`) is an
+8086-only .COM that measures the machine it runs on: ALU chain, `mul`, `div`,
+`rep movsw` / `stosw` / `lodsw` block rates, `INT 21h` dispatch cost and disk read
+throughput, each timed over exactly one second, plus DOS version, video mode,
+conventional memory and the BIOS tick rate measured against the timer chip.
+Since 1.6.0 the emulator answers reads of the 8253 channel-0 counter (`out 43h,0`
+to latch, `in 40h` twice for low and high byte), so a guest has a real 1.193182
+MHz clock; the earlier version had to time with the 55 ms BIOS tick, whose rate
+the wall-clock pacer keeps adjusting, and the same binary then reported `MUL
+2,080,000 /s` in one run and `MUL 90,240 /s` in the next.  Same binary, two
+machines: on the Windows host harness `ALU 14.9M /s`, `copy 120 MB/s`,
+`INT 21h 486k /s`, `disk 145 MB/s`; inside QEMU + OVMF (nested emulation)
+`1.6M /s`, `5.7 MB/s`, `221k /s`, `4 MB/s`.
+
 ## Graphics, extra drives, long names
 
 **Graphics.** `GFXTEST.COM` switches to `INT 10h` mode 13h, loads the whole DAC
@@ -858,6 +913,7 @@ tools/
   make_fcb_test.py   hand-assembles FCBTEST.COM (FCB create/write/read/delete)
   make_dos4_test.py  hand-assembles DOS4TEST.COM (DOS 4.0 call surface, 30 checks)
   make_video_test.py hand-assembles CGATEST.COM (mode 4 stripes) and MOUSETST.COM (INT 33h)
+  autobanch.asm      autobanch: 8086 benchmark .COM (as/ld/objcopy, see build.ps1)
 make_cgatext.py    hand-assembles CGATEXT.COM (INT 10h text into the CGA bitmap)
   make_tools.py      generates the bundled utilities INFO/CAL/SUM/HEX/CLOCK
   mkfat16.py         sparse FAT16 formatter (32 MB .. 1.9 GB test volumes)

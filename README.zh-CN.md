@@ -12,6 +12,26 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
+当前版本 **1.6.0**。本机验证过：8086 指令测试集 68/68、宿主测试器的 shell / FAT16-32 / 双卷检查、
+QEMU + OVMF 的 x86_64 与 IA32 启动测试、发行镜像能起动到可交互的 `C:\>`、Windows 1.01 与 1.04
+都能跑到桌面，以及 **Windows 1.01 从 U 盘启动**（QEMU + OVMF 把镜像当作真正的 USB 设备，指针可用，
+见 [`docs/windows1x.md`](docs/windows1x.md) 第 38 轮）。另有 2 项只有在提供真实 MS-DOS 2.11 /
+MS-DOS 5 软盘镜像时才运行（`UEFIDOS_DOS211`、`UEFIDOS_DOS5`），默认跳过。
+
+1.6.0 是真机这一轮。**UEFI-DOS 与 Windows 1.01 现在能塞进一根普通 FAT32 U 盘** —— 不用安装、
+不用 BIOS、不用引导器：固件直接跑 `EFI\BOOT\BOOTX64.EFI`，U 盘上其余文件就是 `C:`。
+**`AUTOBANC.COM`（autobanch）用来测它所在的那台机器**：八项负载各测满一秒（ALU、`mul`、`div`、
+块拷贝/填充/读取、`INT 21h` 调用开销、磁盘读），另外打印 DOS 版本、显示模式、常规内存，以及用定时器
+芯片反推出来的 BIOS tick 频率。要计时就得有钟，所以这一轮还**模拟了 8253 定时器可读的那一半**：
+通道 0 的 1.193182 MHz 计数器在 `out 43h,0` 时锁存、`in 40h` 读回高低字节；只靠 BIOS tick 的话
+分辨率只有 55 ms，而且它的频率是由墙钟调速环不断重估的 —— 早期版本的 autobanch 因此出现同一份程序
+两次跑差 20 倍的读数。做这个工具顺带修掉三处：BIOS 数据区不再把常规内存报成 **128 KB**
+（有一行把 `0040:0013` 的**高字节**清零了，所有直接读 BDA 的程序都以为只有四分之一的内存）、
+`INT 11h`/`INT 12h` 现在真的会派发（原来会掉进“未知中断→停机”），以及 Windows 宿主测试器改用
+`QueryPerformanceCounter`（原来用 15.6 ms 粒度的 `GetTickCount64`，害得调速环把客户机时间跑快约 30%）。
+另外 shell 现在能在提示符下直接跑 `名字.BAT`，所以 U 盘上可以只打 `WIN1`、`BENCH`。
+真机上的鼠标/彩色/分辨率结论见第 38 轮。
+
 当前版本 **1.5.1** —— 32 项自动化检查全部通过（Windows 宿主测试器，以及 QEMU + OVMF
 的 x86_64 与 IA32 实机启动）；另有 2 项只有在提供真实 MS-DOS 2.11 / MS-DOS 5 软盘镜像时
 才运行（`UEFIDOS_DOS211`、`UEFIDOS_DOS5`），默认跳过。
@@ -461,6 +481,29 @@ ITEST PASSED
 
 加一条用例就是改五行表格；格式、坑（宏里的逗号、`lodsb` 不动 `AH`）以及尚未覆盖的
 部分见 [`docs/itest.md`](docs/itest.md)。
+
+## 真机：U 盘 + autobanch
+
+**U 盘。** 什么都不用装：一个 FAT32 卷里放上 `EFI\BOOT\BOOTX64.EFI`（32 位固件用
+`BOOTIA32.EFI`）就是整个操作系统，同一卷上的其它文件就是 `C:`。Windows 1.01 可以
+直接住在旁边 —— U 盘版就是这样：`WINDOWS\` 放 1.01 的整套文件，`AUTOEXEC.BAT` 写入
+1.01/1.04 都需要的三条 `SETVER ... 3.30`（它们看到 UEFI-DOS 报的 DOS 4.00 会拒绝启动），
+`CONFIG.SYS` 放 `FILES=40 / LASTDRIVE=D / EXECHIGH=ON / MOUSESPEED=2`，再用
+`WIN1.BAT` / `BENCH.BAT` 做成一个词就能打的命令（`WIN1`、`BENCH`）—— 因为 shell 现在
+能在提示符下直接执行 `名字.BAT`。真固件路径上的验证方式：把镜像当作**真正的 USB 设备**
+挂到 QEMU + OVMF（`-device qemu-xhci` + `usb-storage`，不接其它磁盘，于是固件唯一的启动项
+就是这根 U 盘），再用一条 QMP 事件移动虚拟 USB 鼠标：指针跟着走进 1.01 桌面
+（`docs/windows1x.md` 第 38 轮）。
+
+**autobanch。** `AUTOBANC.COM`（5,324 字节，源码 `tools/autobanch.asm`）是个纯 8086 的
+.COM，用来测它所在的机器：ALU 链、`mul`、`div`、`rep movsw`/`stosw`/`lodsw` 的块速度、
+`INT 21h` 调用开销、磁盘读吞吐，每项都测满一秒，外加 DOS 版本、显示模式、常规内存，
+以及拿定时器芯片反推的 BIOS tick 频率。从 1.6.0 起模拟器会应答 8253 通道 0 的读操作
+（`out 43h,0` 锁存，再 `in 40h` 两次取低/高字节），客人程序终于有一块真正的 1.193182 MHz
+时钟；在这之前只能拿 55 ms 的 BIOS tick 计时，而它的频率被墙钟调速环不停重估，同一份程序
+两次跑出 `MUL 2,080,000 /s` 和 `MUL 90,240 /s`。同一份程序、两台“机器”：Windows 宿主测试器上
+`ALU 14.9M /s`、`拷贝 120 MB/s`、`INT 21h 486k /s`、`磁盘 145 MB/s`；在 QEMU + OVMF 里
+（套了两层模拟）是 `1.6M /s`、`5.7 MB/s`、`221k /s`、`4 MB/s`。
 
 ## 图形、额外盘符与长文件名
 

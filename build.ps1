@@ -1,4 +1,4 @@
-﻿# UEFI-DOS build script (PowerShell, Windows).
+# UEFI-DOS build script (PowerShell, Windows).
 # Builds the x86_64 UEFI application, the Windows host test harness and
 # (optionally) a bootable FAT32 image.
 #
@@ -107,6 +107,32 @@ try {
         Write-Host "built: $hostExe"
     }
 
+    # ---- AUTOBANC.COM: the benchmark tool --------------------------------
+    # A 16-bit DOS .COM assembled from tools/autobanch.asm.  The mingw binutils
+    # here link PE only (no ELF emulation), so the .COM is produced by linking a
+    # PE image with .text at 0x100 and then stripping it down to that one
+    # section; the recipe is written up at the top of tools/autobanch.asm.
+    {
+        $As = Join-Path $Mingw 'as.exe'
+        $Ld = Join-Path $Mingw 'ld.exe'
+        $Oc = Join-Path $Mingw 'objcopy.exe'
+        $benchSrc = Join-Path $Root 'tools/autobanch.asm'
+        if ((Test-Path $As) -and (Test-Path $Ld) -and (Test-Path $Oc) -and (Test-Path $benchSrc)) {
+            $bo   = Join-Path $Build 'autobanch.o'
+            $bpe  = Join-Path $Build 'autobanch.pe'
+            $bcom = Join-Path $Build 'AUTOBANC.COM'
+            & $As '--32' '-o' $bo $benchSrc
+            if ($LASTEXITCODE -ne 0) { throw 'autobanch assemble failed' }
+            & $Ld '-m' 'i386pe' '-Ttext' '0x100' '--image-base' '0' '-nostdlib' '-o' $bpe $bo
+            if ($LASTEXITCODE -ne 0) { throw 'autobanch link failed' }
+            & $Oc '-O' 'binary' '--only-section=.text' $bpe $bcom
+            if ($LASTEXITCODE -ne 0) { throw 'autobanch objcopy failed' }
+            Write-Host "built: $bcom"
+        } else {
+            Write-Host 'skip AUTOBANC.COM: as/ld/objcopy or tools/autobanch.asm not available'
+        }
+    }
+
     if (-not $SkipImage) {
         $img = Join-Path $Build 'UEFIDOS.img'
         $generators = @(
@@ -161,6 +187,10 @@ try {
         $extraFiles = @()
         foreach ($prog in $programs) { $extraFiles += @('--file', "$Build/$prog=$prog") }
         foreach ($prog in $nativePrograms) { $extraFiles += @('--file', "$Build/$prog=$prog") }
+        # autobanch is optional: it needs binutils (as/ld/objcopy) to be built
+        if (Test-Path (Join-Path $Build 'AUTOBANC.COM')) {
+            $extraFiles += @('--file', "$Build/AUTOBANC.COM=AUTOBANC.COM")
+        }
 
         $autoexecLines = @(
             'VER','DIR','TYPE HELLO.TXT','HELLO','TELETYPE','MZEXE','RUNNER','VRAM',

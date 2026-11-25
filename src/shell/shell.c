@@ -388,6 +388,8 @@ static int cmd_ren(const char *rest)
 /* batch handling                                                      */
 /* ------------------------------------------------------------------ */
 static int run_batch_text(const char *text, u32 len);
+static int run_batch_file(const char *path);
+static int batch_depth;     /* guards against a batch file calling itself */
 
 static int cmd_echo(const char *rest)
 {
@@ -938,6 +940,34 @@ static int dispatch(char *line)
 
     if (ci_equal(cmd, "APITEST")) { cmd_apitest(arg); return FAT_OK; }
     if (ci_equal(cmd, "RUN64")) return cmd_run64(arg);
+
+    /* a batch file on disk: DOS runs NAME.BAT when you type NAME (or NAME.BAT).
+     * Until now the only batch the shell ever ran was AUTOEXEC.BAT, so a bootable
+     * stick could not offer "BENCH" or "WIN1" as one-word commands. */
+    if (batch_depth < 8) {
+        char bpath[DOS_MAX_PATH];
+        u8 attr;
+        int n = 0, has_dot = 0;
+        const char *q;
+        for (q = cmd; *q && n < (int)sizeof(bpath) - 5; q++) {
+            if (*q == '.') has_dot = 1;
+            bpath[n++] = *q;
+        }
+        if (!has_dot && n > 0) {
+            bpath[n++] = '.';
+            bpath[n++] = 'B';
+            bpath[n++] = 'A';
+            bpath[n++] = 'T';
+        }
+        bpath[n] = 0;
+        if (n > 0 && dos_attr_get(bpath, &attr) == 0 && !(attr & 0x10)) {
+            int rc;
+            batch_depth++;
+            rc = run_batch_file(bpath);
+            batch_depth--;
+            return rc;
+        }
+    }
 
     /* external command: find & run through the emulator */
     {

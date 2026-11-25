@@ -1,4 +1,4 @@
-﻿# Build a ready-to-run UEFI-DOS release folder + zip.
+# Build a ready-to-run UEFI-DOS release folder + zip.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File make_release.ps1
 #
@@ -16,7 +16,8 @@
 # DOS disk images used by the optional floppy checks stay with their owners.
 param(
     [string]$OutDir = 'build/release',
-    [int]$SizeMB = 64
+    [int]$SizeMB = 64,
+    [switch]$SkipBuild      # reuse the artifacts already in build/ (CI rebuilds them first)
 )
 $ErrorActionPreference = 'Stop'
 $Root  = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -31,7 +32,11 @@ $Stage = Join-Path (Join-Path $Root $OutDir) $Name
 Write-Host "== release $Version -> $Stage"
 
 # ---- 1. the EFI payload and the bundled programs must be up to date ----
-& (Join-Path $Root 'build.ps1') | Out-Null
+if (-not $SkipBuild) {
+    & (Join-Path $Root 'build.ps1') | Out-Null
+} else {
+    Write-Host '(-SkipBuild: using the artifacts already in build/)'
+}
 foreach ($f in 'BOOTX64.EFI','BOOTIA32.EFI','INFO.COM','CAL.COM','SUM.COM','HEX.COM','CLOCK.COM',
                'HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM','UPCALL.COM',
                'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM','CGATEST.COM','MOUSETST.COM','HELLO64.EXE','HELLO32.EXE','FILET64.EXE','FILET32.EXE') {
@@ -49,11 +54,14 @@ $makeArgs = @($img, '--size-mb', "$SizeMB",
     '--dir',       'DEMO',
     '--text',      'DEMO/INNER.TXT=inside DEMO',
     '--text',      "CONFIG.SYS=FILES=20`nLASTDRIVE=D",
-    '--text',      'README.TXT=UEFI-DOS release image. Type HELP for commands.')
+    '--text',      'README.TXT=UEFI-DOS release image. Type HELP for commands, AUTOBANC for a benchmark.')
 foreach ($p in 'HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM','UPCALL.COM',
                'INFO.COM','CAL.COM','SUM.COM','HEX.COM','CLOCK.COM',
                'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM','CGATEST.COM','MOUSETST.COM','HELLO64.EXE','HELLO32.EXE','FILET64.EXE','FILET32.EXE') {
     $makeArgs += @('--file', "$Build/$p=$p")
+}
+if (Test-Path (Join-Path $Build 'AUTOBANC.COM')) {
+    $makeArgs += @('--file', (Join-Path $Build 'AUTOBANC.COM') + '=AUTOBANC.COM')
 }
 # No SHUTDOWN here: the user gets a shell prompt to play with.
 $autoexec = @(
@@ -76,6 +84,7 @@ $autoexec = @(
     'ECHO      DOS4TEST  (DOS 4.0 call conformance probe)',
     'ECHO      CGATEST   (INT 10h mode 4: CGA 320x200x4 stripes)',
     'ECHO      MOUSETST (INT 33h mouse: reset / position / motion)',
+    'ECHO      AUTOBANC  (autobanch: measures this machine, ~13 s)',
     'ECHO Type SHUTDOWN to power off.'
 ) -join "`n"
 $makeArgs += @('--autoexec', $autoexec)
@@ -104,6 +113,7 @@ Double-click start.bat to boot (QEMU must be installed first):
 Contents
   start.bat      launcher (finds qemu-system-x86_64.exe and its edk2/OVMF files)
   UEFIDOS.IMG    bootable 64 MB FAT32 image, EFI/BOOT/BOOTX64.EFI + BOOTIA32.EFI
+                 里含 AUTOBANC.COM：性能测试（AUTOBANC，约 13 秒，打印各项 /s）
   README.md      English documentation
   README.zh-CN.md  中文文档
   LICENSE        MIT

@@ -272,6 +272,55 @@ static void timer_pace(u64 total, u32 now_ms)
     if (g_tick_period < 512u) g_tick_period = 512u;
 }
 
+/* ---- 8253 programmable interval timer, channel 0 (readable) --------- *
+ * Guest time.  Until now the only clock a guest could read was the BIOS tick
+ * counter at 0040:006C: 55 ms of resolution, and its rate is whatever the
+ * wall-clock pacer talked the tick period into (see timer_pace), so a program
+ * that times itself got a number that moved with the pacing loop rather than
+ * with the machine -- a benchmark built on the tick swung by 20x between runs.
+ * Channel 0 is a free-running down counter clocked at 1.193182 MHz that reloads
+ * every 65536 counts; a guest latches it (out 43h,0) and then reads the low and
+ * the high byte (in 40h twice), which is what DOS benchmarks, profilers and
+ * games have always done.
+ *
+ * The counter is derived from the platform clock (plat_ticks_ms) rather than
+ * from the step counter: the pacer's steps-per-tick estimate is a feedback loop
+ * that needs a moment to settle after the instruction mix changes, and anything
+ * that measures time with it inherits that loop's wobble.  One 65536-count
+ * reload is 54.9 ms, i.e. the BIOS tick rate, so the guest still sees the timer
+ * and the PIT as the same clock.
+ *
+ * Only the read side exists.  A programmed reload value or mode is accepted and
+ * ignored, because the counter is already channel 0 at its BIOS-programmed
+ * rate; channel 2 (the speaker) is not emulated, so PC-speaker sound still does
+ * nothing. */
+static u16 g_pit_value;         /* channel 0 counter, as of the last sample */
+static u64 g_pit_ms_base;       /* plat_ticks_ms() the counter was zeroed at */
+static u16 g_pit_latch;         /* latched count, for the two-byte read */
+static int g_pit_lo_next;
+
+/* Counter value now, in the 65536 .. 0 range a running channel 0 shows. */
+static u16 pit_count_now(void)
+{
+    return g_pit_value;
+}
+
+/* Refresh the counter from the platform clock.  Called from the same
+ * 1-in-1024-step sample that already asks the platform for the time. */
+static void pit_sample(u32 now_ms)
+{
+    u64 counts;
+    u32 d;
+    if (!g_pit_ms_base) {
+        g_pit_ms_base = now_ms;
+        g_pit_value = 0;
+        return;
+    }
+    d = (u32)(now_ms - (u32)g_pit_ms_base);
+    counts = ((u64)d * 1193182u) / 1000u;      /* 1.193182 MHz of guest time */
+    g_pit_value = (u16)((65536u - (counts & 0xFFFFu)) & 0xFFFFu);
+}
+
 /* ---- 8259A programmable interrupt controller (master only) --------- *
  * Windows' timer ISR asks the controller WHICH interrupt is in service:
  *
@@ -319,6 +368,12 @@ u16 emu_in_port(Emu *e, u16 port)
         }
         return v;
     }
+    case 0x40: {                /* PIT channel 0 counter: low byte, then high */
+        u8 v = g_pit_lo_next ? (u8)(g_pit_latch >> 8) : (u8)(g_pit_latch & 0xFF);
+        g_pit_lo_next = !g_pit_lo_next;
+        return v;
+    }
+    case 0x43: return 0;        /* write-only on the real part */
     case 0x61: return 0x20;     /* timer gate / speaker off */
     case 0x92: return (u16)(e->a20_on ? 0x02 : 0x00); /* system control port A */
     case 0x64:                  /* keyboard controller status */
@@ -399,6 +454,12 @@ void emu_out_port(Emu *e, u16 port, u16 val)
         break;
     case 0x21:      /* PIC mask register */
         g_pic_imr = (u8)(val & 0xFF);
+        break;
+    case 0x43:      /* PIT command: 00h = latch channel 0 (mode/reload ignored) */
+        if ((val & 0xC0) == 0x00) {
+            g_pit_latch = pit_count_now();
+            g_pit_lo_next = 0;
+        }
         break;
     case 0x3D4: g_crtc_idx = (u16)(val & 0x1F); break;
     case 0x3D5: g_crtc_reg[g_crtc_idx & 31] = (u8)val; break;
@@ -2410,6 +2471,8 @@ static void dos_service_call(Emu *e, int intn)
     else if (intn == 0x16) int16_handler(e);
     else if (intn == 0x13) int13_handler(e);
     else if (intn == 0x15) int15_handler(e);
+    else if (intn == 0x11) e->ax = (u16)emu_rw(e, 0x40, 0x10);  /* equipment word */
+    else if (intn == 0x12) e->ax = (u16)emu_rw(e, 0x40, 0x13);  /* KB of memory */
     else if (intn == 0x1A) int1a_handler(e);
     else if (intn == 0x2F) int2f_handler(e);
     else if (intn == 0x31) int31_handler(e);
@@ -3313,6 +3376,8 @@ do_int: {
             else if (intn == 0x16) int16_handler(e);
             else if (intn == 0x13) int13_handler(e);
             else if (intn == 0x15) int15_handler(e);
+            else if (intn == 0x11) e->ax = (u16)emu_rw(e, 0x40, 0x10);  /* equipment word */
+            else if (intn == 0x12) e->ax = (u16)emu_rw(e, 0x40, 0x13);  /* KB of memory */
             else if (intn == 0x1A) int1a_handler(e);
             else if (intn == 0x2F) int2f_handler(e);
             else if (intn == 0x31) int31_handler(e);
@@ -3530,8 +3595,11 @@ static void install_ivt(Emu *e)
      * machine, so mode 3 / 13h look like a real card. */
     emu_ww(e, 0x40, 0x10, 0x0021);   /* equipment: floppy + 80x25 colour (bits 4-5 = 10) */
     emu_wb(e, 0x40, 0x12, 0x00);     /* equipment byte 2: no mouse/joystick */
-    emu_ww(e, 0x40, 0x13, 640);      /* KB of conventional memory */
-    emu_wb(e, 0x40, 0x14, 0x00);     /* no serial/parallel ports (keeps POST simple) */
+    emu_ww(e, 0x40, 0x13, 640);      /* KB of conventional memory (word 0x13-0x14:
+                                      * the old code zeroed 0x14 as "equipment byte
+                                      * 2", which is the high byte of this word, so
+                                      * every program that reads the BDA directly
+                                      * saw 128 KB of memory) */
     emu_wb(e, 0x40, 0x49, 3);        /* video mode: 3 = 80x25 colour text */
     emu_ww(e, 0x40, 0x4A, 80);       /* columns */
     emu_ww(e, 0x40, 0x4C, 4096);     /* bytes per video page (80*25*2 rounded) */
@@ -4577,6 +4645,7 @@ int emu_run(Emu *e)
                     plat_pump_events();
                 }
                 timer_pace(total, now);
+                pit_sample((u32)now);
             }
         }
         /* IRQ0 (timer, 18.2 Hz) and IRQ1 (keyboard) go to the guest's own

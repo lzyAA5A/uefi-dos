@@ -321,7 +321,20 @@ int plat_kbd_scan(void) { return g_last_scan; }
 
 void plat_shutdown(void) { g_plat_shutdown_requested = 1; }
 
-u64 plat_ticks_ms(void) { return GetTickCount64(); }
+/* Millisecond clock for the pacing loop and guest timing.  GetTickCount64 is
+ * quantised to the 15.6 ms scheduler tick, which is too coarse for timer_pace()
+ * (it re-measures the emulator's speed over a 125 ms window): the estimate came
+ * out 30% off, so guest time ran fast enough to matter for double-click timing.
+ * The performance counter is sub-microsecond. */
+u64 plat_ticks_ms(void)
+{
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    if (!freq.QuadPart) return GetTickCount64();
+    return (u64)((now.QuadPart * 1000ull) / freq.QuadPart);
+}
 void plat_sleep_ms(u32 ms) { Sleep(ms); }
 void plat_pump_events(void) { }   /* the host has no firmware event queue */
 
