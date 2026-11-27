@@ -24,38 +24,47 @@ int g_plat_shutdown_requested = 0;
 /* ------------------------------------------------------------------ */
 /* pointing device (INT 33h backing store)                             */
 /* ------------------------------------------------------------------ */
-static EFI_SIMPLE_POINTER_PROTOCOL *g_mouse;
-static EFI_ABSOLUTE_POINTER_PROTOCOL *g_abs;
+/* A laptop routinely publishes MORE than one pointer: the built-in touchpad,
+ * often as a handle that never reports anything, next to the USB mouse that
+ * works.  Holding only the first one -- which is what this code used to do --
+ * is then a mouse that does not move while a perfectly good device sits one
+ * handle further along the list.  Keep them all and poll them all. */
+#define MOUSE_MAX_DEV 8
+static EFI_SIMPLE_POINTER_PROTOCOL *g_mouse_list[MOUSE_MAX_DEV];
+static EFI_ABSOLUTE_POINTER_PROTOCOL *g_abs_list[MOUSE_MAX_DEV];
+static int g_mouse_n_simple, g_mouse_n_abs;   /* handles the firmware published */
+static int g_mouse_used, g_abs_used;          /* protocols we actually hold */
 static int g_mouse_tried;
-static int g_mouse_n_simple, g_mouse_n_abs;
 static int g_mouse_swept;       /* the ConnectController sweep was needed */
 static int g_mouse_relisted;    /* polled long enough to look again */
 static int g_mouse_last_buttons = -1;
-static UINT64 g_abs_last_x, g_abs_last_y;
-static int g_abs_have_last;
+static UINT64 g_abs_last_x[MOUSE_MAX_DEV], g_abs_last_y[MOUSE_MAX_DEV];
+static int g_abs_have_last[MOUSE_MAX_DEV];
 
 void plat_serial_puts(const char *s);
 
 /* Fill in the protocol pointers and the counts of handles that carry each one.
- * Counting every handle (not just the first) matters on a laptop that publishes
- * its touchpad and a USB mouse at the same time. */
+ * Every handle is kept, up to MOUSE_MAX_DEV: counting them is not enough, a
+ * machine with a silent touchpad handle first and a working USB mouse second
+ * only moves if the second one is polled too. */
 static void mouse_enumerate(void)
 {
     EFI_HANDLE *handles = NULL;
     UINTN n = 0;
-    g_mouse = NULL;
-    g_abs = NULL;
+    UINTN i;
     g_mouse_n_simple = 0;
     g_mouse_n_abs = 0;
+    g_mouse_used = 0;
+    g_abs_used = 0;
     if (!gBS || !gBS->LocateHandleBuffer) return;
     if (!EFI_ERROR(gBS->LocateHandleBuffer(2 /* ByProtocol */,
                                           &gEfiSimplePointerProtocolGuid,
                                           NULL, &n, &handles))) {
         g_mouse_n_simple = (int)n;
-        for (UINTN i = 0; i < n && !g_mouse; i++) {
+        for (i = 0; i < n && g_mouse_used < MOUSE_MAX_DEV; i++) {
             void *p = NULL;
             if (!EFI_ERROR(gBS->HandleProtocol(handles[i], &gEfiSimplePointerProtocolGuid, &p)) && p)
-                g_mouse = (EFI_SIMPLE_POINTER_PROTOCOL *)p;
+                g_mouse_list[g_mouse_used++] = (EFI_SIMPLE_POINTER_PROTOCOL *)p;
         }
     }
     n = 0;
@@ -64,12 +73,25 @@ static void mouse_enumerate(void)
                                           &gEfiAbsolutePointerProtocolGuid,
                                           NULL, &n, &handles))) {
         g_mouse_n_abs = (int)n;
-        for (UINTN i = 0; i < n && !g_abs; i++) {
+        for (i = 0; i < n && g_abs_used < MOUSE_MAX_DEV; i++) {
             void *p = NULL;
             if (!EFI_ERROR(gBS->HandleProtocol(handles[i], &gEfiAbsolutePointerProtocolGuid, &p)) && p)
-                g_abs = (EFI_ABSOLUTE_POINTER_PROTOCOL *)p;
+                g_abs_list[g_abs_used++] = (EFI_ABSOLUTE_POINTER_PROTOCOL *)p;
         }
     }
+}
+
+/* Reset every device we hold and forget the sample history. */
+static void mouse_reset_all(void)
+{
+    int i;
+    for (i = 0; i < g_mouse_used; i++)
+        if (g_mouse_list[i]->Reset) g_mouse_list[i]->Reset(g_mouse_list[i], 0);
+    for (i = 0; i < g_abs_used; i++) {
+        if (g_abs_list[i]->Reset) g_abs_list[i]->Reset(g_abs_list[i], 0);
+        g_abs_have_last[i] = 0;
+    }
+    g_mouse_last_buttons = -1;
 }
 
 /* Ask DxeCore to run driver binding on every controller it has.  This is what
@@ -94,7 +116,7 @@ int plat_mouse_present(void)
     if (!g_mouse_tried) {
         g_mouse_tried = 1;
         mouse_enumerate();
-        if (!g_mouse && !g_abs) {
+        if (!g_mouse_used && !g_abs_used) {
             /* BDS is supposed to have bound UsbMouseDxe (or the PS/2 driver) to
              * every pointing device before it handed us the console, and on a
              * lot of firmwares it does not: Fast Boot skips "full USB
@@ -105,12 +127,9 @@ int plat_mouse_present(void)
             mouse_connect_sweep();
             mouse_enumerate();
         }
-        if (!g_mouse && gBS && gBS->LocateProtocol)
-            gBS->LocateProtocol(&gEfiSimplePointerProtocolGuid, NULL, (void **)&g_mouse);
-        if (g_mouse && g_mouse->Reset) g_mouse->Reset(g_mouse, 0);
-        if (g_abs && g_abs->Reset) g_abs->Reset(g_abs, 0);
+        mouse_reset_all();
     }
-    return g_mouse != NULL || g_abs != NULL;
+    return g_mouse_used > 0 || g_abs_used > 0;
 }
 
 /* One line, printed once, that says what the firmware actually offered.  On a
@@ -122,13 +141,13 @@ void plat_mouse_report(void)
     (void)plat_mouse_present();
     plat_puts("mouse: simple-pointer=");
     plat_putc((char)('0' + (g_mouse_n_simple > 9 ? 9 : g_mouse_n_simple)));
-    plat_puts(g_mouse ? " (in use)" : " (none)");
+    plat_puts(g_mouse_n_simple ? " (polling)" : " (none)");
     plat_puts("  absolute-pointer=");
     plat_putc((char)('0' + (g_mouse_n_abs > 9 ? 9 : g_mouse_n_abs)));
-    plat_puts(g_abs ? " (in use)" : " (none)");
+    plat_puts(g_mouse_n_abs ? " (polling)" : " (none)");
     if (g_mouse_swept) plat_puts("  [driver sweep]");
     plat_puts("\n");
-    if (!g_mouse && !g_abs)
+    if (!g_mouse_used && !g_abs_used)
         plat_puts("mouse: no pointer protocol -- type MOUSE at the prompt to "
                   "probe the firmware\n");
 }
@@ -254,44 +273,54 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
     EFI_ABSOLUTE_POINTER_STATE ast;
     static int ps2_buttons;
     static unsigned silent;
-    int b;
+    int b, i;
     if (!dx || !dy || !buttons) return 0;
     if (plat_mouse_present()) {
         int btns = g_mouse_last_buttons < 0 ? 0 : g_mouse_last_buttons;
         int changed;
         *dx = 0;
         *dy = 0;
-        if (g_mouse && g_mouse->GetState(g_mouse, &st) == EFI_SUCCESS) {
-            *dx = half_count(st.RelativeMovementX);
-            *dy = half_count(st.RelativeMovementY);
-            btns = (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
+        /* Every device the firmware published, not just the first: a laptop
+         * usually has a touchpad handle that never reports anything and a USB
+         * mouse handle that does.  Movement adds up, buttons OR together -- a
+         * silent device contributes nothing, so it cannot cancel the other. */
+        for (i = 0; i < g_mouse_used; i++) {
+            if (g_mouse_list[i]->GetState(g_mouse_list[i], &st) == EFI_SUCCESS) {
+                *dx += half_count(st.RelativeMovementX);
+                *dy += half_count(st.RelativeMovementY);
+                btns |= (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
+            }
         }
-        /* A touchpad published in absolute coordinates: turn the new position
-         * into a delta and scale it so the guest's 640-pixel width maps onto
-         * the pad's own range.  The first sample only records the origin -- the
-         * finger is already somewhere when the program starts, and reporting
-         * that as a movement would slam the pointer into a corner. */
-        else if (g_abs && g_abs->GetState(g_abs, &ast) == EFI_SUCCESS) {
+        /* A device published in absolute coordinates (tablet, some touchpads):
+         * turn the new position into a delta and scale it so the guest's
+         * 640-pixel width maps onto the device's own range.  The first sample
+         * only records the origin -- the finger is already somewhere when the
+         * program starts, and reporting that as a movement would slam the
+         * pointer into a corner. */
+        for (i = 0; i < g_abs_used; i++) {
+            if (g_abs_list[i]->GetState(g_abs_list[i], &ast) != EFI_SUCCESS) continue;
             UINT64 minx = 0, maxx = 1, miny = 0, maxy = 1;
-            if (g_abs->Mode) {
-                minx = g_abs->Mode->MinimumX; maxx = g_abs->Mode->MaximumX;
-                miny = g_abs->Mode->MinimumY; maxy = g_abs->Mode->MaximumY;
+            if (g_abs_list[i]->Mode) {
+                minx = g_abs_list[i]->Mode->MinimumX;
+                maxx = g_abs_list[i]->Mode->MaximumX;
+                miny = g_abs_list[i]->Mode->MinimumY;
+                maxy = g_abs_list[i]->Mode->MaximumY;
             }
             UINT64 spanx = (maxx > minx) ? (maxx - minx + 1) : 1;
             UINT64 spany = (maxy > miny) ? (maxy - miny + 1) : 1;
-            btns = (int)(ast.ActiveButtons & 3u);
-            if (!g_abs_have_last) {
-                g_abs_have_last = 1;
-                g_abs_last_x = ast.CurrentX;
-                g_abs_last_y = ast.CurrentY;
+            btns |= (int)(ast.ActiveButtons & 3u);
+            if (!g_abs_have_last[i]) {
+                g_abs_have_last[i] = 1;
+                g_abs_last_x[i] = ast.CurrentX;
+                g_abs_last_y[i] = ast.CurrentY;
             } else {
-                INT64 ax = (INT64)ast.CurrentX - (INT64)g_abs_last_x;
-                INT64 ay = (INT64)ast.CurrentY - (INT64)g_abs_last_y;
-                g_abs_last_x = ast.CurrentX;
-                g_abs_last_y = ast.CurrentY;
+                INT64 ax = (INT64)ast.CurrentX - (INT64)g_abs_last_x[i];
+                INT64 ay = (INT64)ast.CurrentY - (INT64)g_abs_last_y[i];
+                g_abs_last_x[i] = ast.CurrentX;
+                g_abs_last_y[i] = ast.CurrentY;
                 /* half_count() below halves again, so ask for twice the pixels */
-                *dx = (int)((ax * 1280) / (INT64)spanx);
-                *dy = (int)((ay * 1280) / (INT64)spany);
+                *dx += (int)((ax * 1280) / (INT64)spanx);
+                *dy += (int)((ay * 1280) / (INT64)spany);
             }
         }
         /* A button *release* carries no movement, so reporting only "something
@@ -311,13 +340,10 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
         if (!changed && ++silent == 64 && !g_mouse_relisted) {
             g_mouse_relisted = 1;
             mouse_enumerate();
-            if (g_mouse && g_mouse->Reset) g_mouse->Reset(g_mouse, 0);
-            if (g_abs && g_abs->Reset) g_abs->Reset(g_abs, 0);
-            g_mouse_last_buttons = -1;
-            g_abs_have_last = 0;
+            mouse_reset_all();
             return 0;
         }
-        if (g_mouse || g_abs) return 0;
+        if (g_mouse_used || g_abs_used) return 0;
     }
     /* Nothing from the firmware protocol (some builds expose it and never
      * report a single state): after a moment of silence take the controller

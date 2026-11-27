@@ -53,7 +53,7 @@ WriteLf "$stage\CONFIG.SYS" @(
 
 WriteLf "$stage\AUTOEXEC.BAT" @(
     'ECHO.',
-    'ECHO   UEFI-DOS 1.9.2 on real hardware -- booted from this USB stick',
+    'ECHO   UEFI-DOS 1.9.3 on real hardware -- booted from this USB stick',
     'ECHO   ==========================================================',
     'ECHO.',
     'ECHO   BENCH    autobanch: this machine, eight loads, one second each',

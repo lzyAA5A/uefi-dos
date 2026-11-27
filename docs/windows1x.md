@@ -5039,3 +5039,24 @@ publishes no pointer protocol still has no pointer: the sweep cannot invent a
 device, and the PS/2 fallback cannot see an I2C bus.  What 1.9.2 promises is
 that the machine *says which of those cases it is in*, in one command, instead
 of showing an arrow that never moves.
+
+### 1.9.3: poll every device, not the first one
+
+The first version of this round still held exactly **one** protocol pointer
+(`g_mouse`, the first handle `LocateHandleBuffer` returned) and only counted the
+others.  On a laptop that is the wrong one surprisingly often: the built-in
+touchpad is published first -- usually as a handle whose `GetState` always
+returns `EFI_NOT_READY`, because the real touchpad is on I2C and the firmware
+exposes a stub -- and the USB mouse that works sits one handle further along.
+Holding only the first is then a pointer that does not move while a perfectly
+good device is attached.
+
+1.9.3 keeps them all (`g_mouse_list[MOUSE_MAX_DEV]`, `g_abs_list[...]`, up to
+eight each) and **sums** what they report: movement adds, buttons OR together,
+so a silent stub contributes nothing and cannot cancel a working mouse.  The
+absolute-pointer branch keeps per-device sample history (`g_abs_last_x[i]`,
+`g_abs_have_last[i]`) for the same reason -- two absolute devices must not share
+one "last position".  `plat_mouse_report()` now prints `(polling)` rather than
+`(in use)` because that is what actually happens: `simple-pointer=2 (polling)`
+on a laptop with a stub touchpad plus a USB mouse is the expected reading, and
+is exactly the case 1.9.2 got wrong.
