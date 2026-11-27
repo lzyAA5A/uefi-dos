@@ -29,6 +29,25 @@ before our halving and clamping), the device table printed both before and after
 the ten-second probe, a `ps/2 aux:` line, and a verdict that says "counts arrive
 on one axis only" out loud.
 
+1.10.2 is the click.  With movement fixed the pointer travelled normally but
+a button did nothing at all: no selection, no menu, no double-click.  The
+emulated bus-mouse card was putting the button in the packet's button bits and
+Windows' driver does build an event word from each packet -- bit 0 "moved",
+bits 1-4 the left/right press and release -- but it only forwards the packet to
+Windows when the moved bit is set, and the Windows side reads those bits and
+nothing else.  A button on its own has no movement, so that packet was thrown
+away; the pointer moved perfectly because motion packets did carry the bit.
+The card now sends one count with a button packet, signed by the transition
+(press +1, release -1), so a click's two packets cancel exactly and the pointer
+does not creep, while Windows finally sees the button.  Measured in the host
+harness: a double-click on `CALC.EXE` launches the Calculator, `File` + drag +
+release opens the Run dialog, and Windows 1.04 launches its Calendar the same
+way.  Two host-side helpers came out of the hunt: `UEFIDOS_NO_PTR_OVERLAY=1`
+dumps a frame with only what the guest itself drew (it is how we proved the
+arrow on screen is Windows' own cursor, not an overlay of ours), and
+`UEFIDOS_TRACE_MOUSE` now ends a run with a count of every card port access and
+every IRQ5 delivery.
+
 1.10.0 is the benchmarking round, and it starts with the pointer.  On the real
 laptop the mouse was recognised but **flew across the screen** the moment it
 moved: 1.9.3 polled every pointer handle the firmware published and added their
@@ -58,7 +77,7 @@ sieve to 65536, insertion sort 1024, CRC32 and a 32x32 matrix multiply.
 images, so it needs `BOOTIA32.EFI`.  `TYPE B*.TXT` prints the result (TYPE now
 accepts wildcards, because a batch file cannot know today's date).
 
-Version **1.10.1**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+Version **1.10.2**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
 single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU +
 OVMF boot smoke tests for x86_64 and IA32, the release image booting to a live

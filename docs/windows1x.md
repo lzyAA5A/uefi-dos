@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.10.1).** The machine UEFI-DOS pretends to be
+**Where this line of work stands (1.10.2).** The machine UEFI-DOS pretends to be
 is now consistent with the machine it emulates: an **80286 AT**, not an 8088 XT
 (Round 42).  Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
@@ -5257,3 +5257,114 @@ a click, through the emulated bus-mouse card.  `--itest` still 96 passed /
 The stick was rewritten with this build (316 files, `verify: 0 problem(s)`,
 `D:\EFI\BOOT\BOOTX64.EFI` = 268748 bytes containing `1.10.1`), and the stick's
 README now explains the `raw=` column and the "one axis only" verdict.
+
+## Round 46 -- the packet Windows never looks at (1.10.2)
+
+The report was one sentence: "鼠标运动没问题了，但是无法点击" -- movement fine, clicks
+dead.  Not "clicks are unreliable": nothing at all.  No selection in the file
+list, no menu, no double-click, in Windows 1.01, on the laptop and in the host
+harness alike.
+
+### What the emulation was doing
+
+The card (`src/emu/emu.c`, `case 0x23C`) answers the four nibble reads and puts
+the button state into the Y-high read, active low, exactly as the
+driver disassembly of the 1.04 `MOUSE.DRV` asked:
+
+```c
+case 0xF0:
+    v = (u8)(((y >> 4) & 0x0F) | 0xE0);
+    if (e->mouse_buttons & 0x01) v = (u8)(v & ~0x80);   /* left down */
+    if (e->mouse_buttons & 0x04) v = (u8)(v & ~0x40);   /* middle */
+    if (e->mouse_buttons & 0x02) v = (u8)(v & ~0x20);   /* right */
+```
+
+and the packet was delivered: `UEFIDOS_TRACE_MOUSE` showed
+
+```
+[mouse] card dx=0 dy=0 btn=1 irq5=1
+[mouse] irq5 -> 167D:0020
+```
+
+with the new counters (`in=28/1/10001/0 ... irq5 delivered=7`) proving the ISR
+really did four reads per interrupt.  So the card, the IRQ and the driver were
+all doing what they were told.  The click was dying further inside Windows.
+
+### Two readings of the driver
+
+The 1.01 driver (inside `WIN100.OVL`, loaded at cs `16A9`, ISR vectors to
+`167D:0020`) reads the four nibbles at `0x16816`, builds an event word at
+`[0x010E]` and the button state at `[0x0110]`:
+
+```
+1686A  mov ax,di / not ax / mov dl,ah / shr dl,3 / and dx,1   ; left = inverted bit 7
+16881  xchg dx,[0x0110] / cmp dx,[0x0110]
+1688D  orb [0x010E],4        ; press   (old < new)
+1688B  orb [0x010E],2        ; release (old > new)
+168C6  mov ax,bx / or ax,cx / je 168D1
+168CC  orb [0x010E],1        ; "moved" -- ONLY when X or Y is non-zero
+```
+
+and then far-calls the Windows handler at `[0x0014]` = `1FF7:5BC2` with
+`AX = [0x010E]`.  The handler starts like this:
+
+```
+25B8E  test al,1
+25B90  jne  25B95      ; the moved bit -> do the work below
+25B92  jmp  25C5D      ; no moved bit -> pop ds/si and return, doing NOTHING
+```
+
+That is the whole bug.  The button bits are carried *inside* the movement
+event: Windows only reads them on a packet that also reports movement
+(`shr dx,1 / shr dx,1` twice, once per button, at `25B76`), and a packet that
+says "nothing moved" is thrown away before any of that code runs.  A button on
+its own produces `X = Y = 0`, so the packet that said "the left button just went
+down" was silently discarded on every single click, while motion packets went
+through and moved the pointer perfectly -- which is exactly the symptom that was
+reported.
+
+### The fix
+
+A button change now travels with one count of movement, signed by the
+transition, so the two packets of a click cancel exactly and the pointer does
+not creep:
+
+```c
+/* A button on its own has to travel as movement. ... */
+if (e->mouse_buttons != buttons && !rx && !ry) {
+    int pressed = buttons & ~e->mouse_buttons & 0x07;
+    rx = pressed ? 1 : -1;
+}
+```
+
+One count is two pixels on the 640x200 screen, added on the press and taken off
+again on the release, so nothing is visible.  The card, the nibble protocol and
+the 1.04 `MOUSE.DRV` path are untouched.
+
+### Verified in the host harness
+
+* `build\fclast.png` -- a double-click on the `CALC.EXE` row launched
+  **Calculator**, with its display, its MC/MR/M+/CE column and its keypad.
+* `build\rulast.png` -- press `File`, drag into the drop-down, release on
+  `Run...`: the Run dialog appears with its edit field.
+* `build\dclast.png` / `build\mnlast.png` -- a single click selects a row
+  (`CALENDAR.EXE` highlighted), which it never did before.
+* `build\r4last.png` -- Windows 1.04, same double-click: **Calendar
+  (untitled)** with its hour list and scrollbar.  No regression.
+* `--itest`: 96 passed, 0 failed.
+
+### Two false leads worth recording
+
+The pointer we had been looking at was **not ours**.  `UEFIDOS_NO_PTR_OVERLAY=1`
+(new, host only) suppresses the emulator's own arrow in a frame dump; with it
+set the dump is byte-identical to the one with it, so the arrow that follows the
+mouse is Windows' own cursor and `INT 33h` is never called at all (`show=0` in
+the counter line).  Everything we had "seen working" was genuine guest
+rendering.
+
+The second: a full `UEFIDOS_TRACE_PORT` run is the wrong tool here.  It slows the
+machine ~100x and the run then spends its whole budget inside the driver's
+10000-iteration probe loop, which made it look as if the ISR never read the card.
+Measuring is cheap instead: the new `UEFIDOS_TRACE_MOUSE` summary at exit prints
+`in=<23C>/<23D>/<23E>/<23F> out=... irq5 delivered=...` for the whole run, which
+is what proved the four reads per packet in one line.

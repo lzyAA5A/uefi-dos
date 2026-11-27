@@ -146,6 +146,18 @@ static u8 g_bus_cmd;        /* 23Eh: control register as written, | 0Fh */
 /* Is an x87 reported to software?  It is emulated in software (step_fpu), so
  * the answer is yes unless UEFIDOS_NOFPU is set in the environment, which
  * lets a test drive a "no coprocessor" machine without recompiling. */
+/* Host-only: print the mouse pipeline (what the host sent, what the card got,
+ * when IRQ5 fired) so "the pointer moves but clicks do nothing" can be traced
+ * without the very slow full port trace. */
+#ifdef UEFIDOS_HOST
+static int trace_mouse_env(void)
+{
+    static int cached = -1;
+    if (cached < 0) cached = getenv("UEFIDOS_TRACE_MOUSE") ? 1 : 0;
+    return cached;
+}
+#endif
+
 static int fpu_reported(void)
 {
     static int cached = -1;
@@ -226,6 +238,12 @@ static int g_bus_acc_x, g_bus_acc_y;    /* host-delta remainders (< 16 / < 10) *
 #ifdef UEFIDOS_HOST
 /* UEFIDOS_TRACE_PORT=1: log every bus-mouse register access, so the driver's
  * protocol can be observed instead of guessed. */
+/* Host-only counters for the bus-mouse card: how many times the guest touched
+ * each of the four ports and how many IRQ5s we actually delivered.  Printed at
+ * exit when UEFIDOS_TRACE_MOUSE is set, so a run can be measured without the
+ * (very slow) full port trace. */
+static unsigned long g_card_in[4], g_card_out[4], g_card_irq;
+
 static void bus_trace(Emu *e, const char *dir, u16 port, int val)
 {
     static int on = -1;
@@ -235,6 +253,12 @@ static void bus_trace(Emu *e, const char *dir, u16 port, int val)
             dir, port, val & 0xFF, e->cs, (u16)e->eip, e->ax);
 }
 #else
+/* Host-only counters for the bus-mouse card: how many times the guest touched
+ * each of the four ports and how many IRQ5s we actually delivered.  Printed at
+ * exit when UEFIDOS_TRACE_MOUSE is set, so a run can be measured without the
+ * (very slow) full port trace. */
+static unsigned long g_card_in[4], g_card_out[4], g_card_irq;
+
 static void bus_trace(Emu *e, const char *dir, u16 port, int val)
 { (void)e; (void)dir; (void)port; (void)val; }
 #endif
@@ -456,6 +480,7 @@ u16 emu_in_port(Emu *e, u16 port)
         return (u16)(0x14 | (e->kbd_out_valid ? 0x01 : 0x00));
     /* ---- Microsoft bus mouse (InPort) ---- */
     case 0x23C: {               /* data: nibble picked by the last command */
+        g_card_in[0]++;
         u8 v = 0;
         if (g_bus_ctrl) {
             /* The card reports movement counters, not a position: the driver
@@ -492,8 +517,9 @@ u16 emu_in_port(Emu *e, u16 port)
         bus_trace(e, "in ", 0x23C, v);
         return v;
     }
-    case 0x23D: bus_trace(e, "in ", 0x23D, g_bus_latch); return g_bus_latch;
+    case 0x23D: g_card_in[1]++; bus_trace(e, "in ", 0x23D, g_bus_latch); return g_bus_latch;
     case 0x23E: {               /* control register read-back */
+        g_card_in[2]++;
         /* The card answers with the register it holds and then forces its
          * low four bits to 1: bit 0 is the interrupt latch, so the first
          * read after the enable returns 0Eh (no interrupt pending) and
@@ -505,7 +531,7 @@ u16 emu_in_port(Emu *e, u16 port)
         bus_trace(e, "in ", 0x23E, v);
         return v;
     }
-    case 0x23F: bus_trace(e, "in ", 0x23F, g_bus_ctrl); return g_bus_ctrl;
+    case 0x23F: g_card_in[3]++; bus_trace(e, "in ", 0x23F, g_bus_ctrl); return g_bus_ctrl;
     default: return 0;
     }
 }
@@ -569,10 +595,12 @@ void emu_out_port(Emu *e, u16 port, u16 val)
         break;
     /* ---- Microsoft bus mouse (InPort) ---- */
     case 0x23D:     /* signature/latch, written back by the probe */
+        g_card_out[1]++;
         g_bus_latch = (u8)val;
         bus_trace(e, "out", 0x23D, val);
         break;
     case 0x23E:     /* control: 90h/0B0h = X low/high, 0D0h/0F0h = Y low/high */
+        g_card_out[2]++;
         /* The register keeps the written selector in bits 6-7 (and the hold
          * counter in bit 7) and reads back with its low four bits set, so
          * the driver sees 0Fh -- except for the very first read after the
@@ -594,6 +622,7 @@ void emu_out_port(Emu *e, u16 port, u16 val)
         bus_trace(e, "out", 0x23E, val);
         break;
     case 0x23F:     /* config: 91h = 8255 mode set, which enables the card */
+        g_card_out[3]++;
         g_bus_ctrl = (u8)val;
         if (val & 0x91) {
             /* "Device active" also clears the interrupt latch: the first
@@ -1295,6 +1324,13 @@ static void gfx_verify(Emu *e, int w, int h)
 #endif
 static void draw_pointer(Emu *e, u8 *fb, int w, int h, int record)
 {
+#ifdef UEFIDOS_HOST
+    /* UEFIDOS_NO_PTR_OVERLAY=1: skip the emulator's own arrow so a frame dump
+     * shows only what the guest drew itself. */
+    static int no_overlay = -1;
+    if (no_overlay < 0) no_overlay = getenv("UEFIDOS_NO_PTR_OVERLAY") ? 1 : 0;
+    if (no_overlay) { (void)record; return; }
+#endif
     if (!e->mouse_visible || e->mouse_show_count <= 0) return;
     for (int row = 0; row < 12; row++) {
         int py = e->mouse_y + row;
@@ -5974,6 +6010,21 @@ void emu_mouse_pump(Emu *e)
             g_bus_acc_x -= rx * scx;
             g_bus_acc_y -= ry * scy;
         }
+        /* A button on its own has to travel as movement.  Windows 1.x's mouse
+         * driver builds its event word from the packet (bit 0 = "moved" is
+         * set only when X or Y is non-zero, bits 1-4 = left/right press and
+         * release) and the Windows side of the driver drops a packet whose
+         * moved bit is clear -- it never looks at the button bits.  Clicks
+         * therefore did nothing while the pointer moved perfectly.  Sending
+         * one count with the button fixes that; the sign follows the
+         * transition (press +1, release -1) so the two packets of a click
+         * cancel exactly and the pointer does not creep.  One count is two
+         * pixels on the 640x200 screen, i.e. it is taken out again by the
+         * matching release before anyone sees it. */
+        if (e->mouse_buttons != buttons && !rx && !ry) {
+            int pressed = buttons & ~e->mouse_buttons & 0x07;
+            rx = pressed ? 1 : -1;
+        }
         if (rx || ry || e->mouse_buttons != buttons) {
             int nx = g_bus_dx + rx, ny = g_bus_dy + ry;
             if (nx > 127) nx = 127;
@@ -5983,6 +6034,11 @@ void emu_mouse_pump(Emu *e)
             g_bus_dx = nx;
             g_bus_dy = ny;
             e->bus_irq_pending = 1;
+#ifdef UEFIDOS_HOST
+            if (trace_mouse_env())
+                fprintf(stderr, "[mouse] card dx=%d dy=%d btn=%d irq5=1\n",
+                        rx, ry, buttons);
+#endif
             bus_trace(e, "irq", 0x23C, 0xFF);
         }
     }
@@ -6207,7 +6263,13 @@ int emu_run(Emu *e)
                         e->bus_irq_pending = 0;     /* driver has not hooked IRQ5 yet */
                     } else if (!delivered) {
                         e->bus_irq_pending = 0;
+#ifdef UEFIDOS_HOST
+                        if (trace_mouse_env())
+                            fprintf(stderr, "[mouse] irq5 -> %04X:%04X\n",
+                                    emu_rw(e, 0, 0x0D * 4 + 2), emu_rw(e, 0, 0x0D * 4));
+#endif
                         bus_trace(e, "irq", 0x23D, 0x0D);
+                        g_card_irq++;
                         inject_irq(e, 0x0D);
                         delivered = 1;
                     }
@@ -6259,6 +6321,14 @@ int emu_run(Emu *e)
                 fclose(f);
             }
         }
+        if (trace_mouse_env())
+            fprintf(stderr,
+                    "[mouse] card i/o: in=%lu/%lu/%lu/%lu out=%lu/%lu/%lu/%lu irq5 delivered=%lu"
+                    " pos=%d,%d buttons=%u show=%d",
+                    g_card_in[0], g_card_in[1], g_card_in[2], g_card_in[3],
+                    g_card_out[0], g_card_out[1], g_card_out[2], g_card_out[3],
+                    g_card_irq, e->mouse_x, e->mouse_y, e->mouse_buttons,
+                    e->mouse_show_count);
     }
 #endif
     g_dos.last_error = 0;
