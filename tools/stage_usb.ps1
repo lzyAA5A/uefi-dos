@@ -38,6 +38,11 @@ foreach ($t in $tools) {
     $src = "build\$t"
     if (Test-Path $src) { Copy-Item $src "$stage\TOOLS\$t" -Force } else { "MISSING $src" }
 }
+# native 32/64-bit benchmarks (sdk/build_sdk.ps1)
+foreach ($t in @('BENCH64.EXE', 'BENCH32.EXE')) {
+    $src = "build\sdk\$t"
+    if (Test-Path $src) { Copy-Item $src "$stage\TOOLS\$t" -Force } else { "MISSING $src" }
+}
 
 function WriteLf([string]$path, [string[]]$lines) {
     [System.IO.File]::WriteAllText((Join-Path (Get-Location) $path), (($lines -join "`n") + "`n"),
@@ -53,10 +58,10 @@ WriteLf "$stage\CONFIG.SYS" @(
 
 WriteLf "$stage\AUTOEXEC.BAT" @(
     'ECHO.',
-    'ECHO   UEFI-DOS 1.9.3 on real hardware -- booted from this USB stick',
+    'ECHO   UEFI-DOS 1.10.0 on real hardware -- booted from this USB stick',
     'ECHO   ==========================================================',
     'ECHO.',
-    'ECHO   BENCH    autobanch: this machine, eight loads, one second each',
+    'ECHO   BENCH    autobanch: 16 tests in 16/64-bit, saved to B+date.TXT',
     'ECHO   WIN101   Windows 1.01  (desktop + pointer)',
     'ECHO   WIN104   Windows 1.04  (desktop + pointer, needs SETVER 3.30)',
     'ECHO   WIN203   Windows 2.03  (286 -- still stops in its loader)',
@@ -90,9 +95,22 @@ WriteLf "$stage\WIN203.BAT" @(
     'WIN'
 )
 
+# One file, three views of the same machine: 16-bit through the emulator,
+# then the same box natively in 64 bits.  Both append to B<yymmdd>.TXT, so
+# the timings end up on one page.
 WriteLf "$stage\BENCH.BAT" @(
-    'ECHO AUTOBANCH -- performance of this machine',
-    'TOOLS\AUTOBANC'
+    'ECHO ==== UEFI-DOS performance probe ====',
+    'ECHO   16-bit real mode (this is the Windows 1.x path) ...',
+    'TOOLS\AUTOBANC',
+    'ECHO',
+    'ECHO   64-bit native ...',
+    'RUN64 TOOLS\BENCH64.EXE',
+    'ECHO',
+    'ECHO   BENCH32.EXE is the 32-bit twin, but a 64-bit kernel runs only',
+    'ECHO   64-bit images: boot BOOTIA32.EFI to use it.',
+    'ECHO',
+    'ECHO ==== results file ====',
+    'TYPE B*.TXT'
 )
 
 $readme = @(
@@ -172,7 +190,7 @@ $readme = @(
     '          supports, presented to programs as a Microsoft bus mouse',
     '          (MOUSETST / Windows 1.x pointer)',
     '  colour  CGA 320x200x4 colours, plus text',
-    '  speed   run BENCH on the target machine',
+    '  speed   run BENCH: 16-bit, 32-bit and 64-bit probes, one result file',
     '',
     'IF THE MOUSE DOES NOT MOVE',
     '--------------------------',
@@ -182,8 +200,16 @@ $readme = @(
     '                              the usual answer for a USB mouse',
     '  absolute-pointer=1         an absolute device (tablet, some touchpads)',
     '  both 0                     no pointing device at all in the firmware',
-    'Then for ten seconds it prints one line per second (events / moving /',
-    'total dx,dy / buttons) -- move the mouse and click while it runs.',
+    'Then it lists each device it holds (moves=, last=) -- that table is what',
+    'says WHICH handle is moving -- and for ten seconds prints one line per',
+    'second (events / moving / total dx,dy / buttons).  Move the mouse and',
+    'click while it runs.',
+    '',
+    'If the pointer moves but jumps around: only ONE device moves the pointer',
+    'per poll (the one that moved most), because firmware often publishes the',
+    'same mouse twice and adding both doubled every movement.  A handle that',
+    'repeats the same counts for a third of a second is treated as stuck and',
+    'ignored.',
     '',
     '  counts appear      the firmware side is fine; the problem is then the',
     '                     guest side -- report the numbers',
@@ -197,6 +223,28 @@ $readme = @(
     'A laptop touchpad wired to I2C is not reachable from a UEFI application:',
     'the firmware usually does not publish it, and it never reaches the PS/2',
     'controller either, so a real USB mouse is the reliable answer.',
+    '',
+    'BENCHMARKS -- WHERE THE NUMBERS GO',
+    '----------------------------------',
+    'BENCH runs the probes and writes every figure into ONE file on this stick,',
+    'named B plus today s date (B261128.TXT for 28 Nov 2026):',
+    '',
+    '  TOOLS\AUTOBANC.COM   16-bit real mode, the Windows 1.x path.  Sixteen',
+    '                       one-second windows: ALU, MUL, DIV, memory copy /',
+    '                       fill / read, INT 21h calls, disk read, x87 FPU',
+    '                       chain, FSQRT, a 640x200 frame written by hand, CGA',
+    '                       text fill, sieve of Eratosthenes, insertion sort,',
+    '                       CRC16, 8x8 matrix multiply',
+    '  TOOLS\BENCH64.EXE    64-bit native (started with RUN64), TSC-timed:',
+    '                       ALU, MUL, DIV, copy, fill, double FPU chain, Newton',
+    '                       sqrt, sieve to 65536, insertion sort 1024, CRC32,',
+    '                       32x32 matrix multiply',
+    '  TOOLS\BENCH32.EXE    the 32-bit twin of BENCH64, but a 64-bit kernel',
+    '                       runs only 64-bit images: it needs the 32-bit',
+    '                       loader (EFI\BOOT\BOOTIA32.EFI)',
+    '',
+    'TYPE B*.TXT prints the file (TYPE accepts wildcards).  Compare two machines',
+    'line by line; AUTOBANC total summed rate is a rough single figure.',
     '',
     'ABOUT WINDOWS 2.03',
     '  The 2.03 media is the installer set: WIN.COM and SYSTEM.INI are created',

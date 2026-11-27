@@ -38,6 +38,8 @@ int  plat_mouse_poll(int *dx, int *dy, int *buttons);
 int  plat_mouse_present(void);
 /* one line naming the pointing-device protocols the firmware published */
 void plat_mouse_report(void);
+/* Per-device diagnostic lines for the shell's MOUSE command. */
+void plat_mouse_detail(void);
 void plat_shutdown(void);
 u64  plat_ticks_ms(void);
 void plat_sleep_ms(u32 ms);

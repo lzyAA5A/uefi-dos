@@ -128,8 +128,20 @@ try {
             & $Oc '-O' 'binary' '--only-section=.text' $bpe $bcom
             if ($LASTEXITCODE -ne 0) { throw 'autobanch objcopy failed' }
             Write-Host "built: $bcom"
+        }
+    }
+
+    # ---- BENCH32.EXE / BENCH64.EXE: the native probes ----------------------
+    # Built by sdk/build_sdk.ps1 (freestanding PE, no CRT); copied here so that
+    # make_release.ps1 finds them next to the other bundled tools.
+    {
+        $sdkScript = Join-Path $Root 'sdk/build_sdk.ps1'
+        $gccExe = Join-Path $Mingw 'gcc.exe'
+        if ((Test-Path $sdkScript) -and (Test-Path $gccExe)) {
+            & $sdkScript -Gcc $gccExe -OutDir $Build
+            Write-Host 'built: BENCH32.EXE / BENCH64.EXE (with the SDK examples)'
         } else {
-            Write-Host 'skip AUTOBANC.COM: as/ld/objcopy or tools/autobanch.asm not available'
+            Write-Host 'skip BENCH32/64: sdk/build_sdk.ps1 or gcc not available'
         }
     }
 

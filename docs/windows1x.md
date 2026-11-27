@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.9.2).** The machine UEFI-DOS pretends to be
+**Where this line of work stands (1.10.0).** The machine UEFI-DOS pretends to be
 is now consistent with the machine it emulates: an **80286 AT**, not an 8088 XT
 (Round 42).  Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
@@ -5060,3 +5060,111 @@ one "last position".  `plat_mouse_report()` now prints `(polling)` rather than
 `(in use)` because that is what actually happens: `simple-pointer=2 (polling)`
 on a laptop with a stub touchpad plus a USB mouse is the expected reading, and
 is exactly the case 1.9.2 got wrong.
+
+## Round 44 -- one device per poll, and a benchmark that writes its own report (1.10.0)
+
+**The pointer that flew across the screen.** 1.9.3 kept every pointing device
+the firmware published and *added their movements together*.  On the real
+laptop the answer to "the pointer is recognised but it flails the moment it
+moves" was therefore arithmetic: a firmware that publishes the same physical
+mouse -- or a touchpad handle that keeps repeating a stale count -- as two or
+three handles, and a guest that receives two or three times the motion the hand
+made.  1.10.0 changes the rule in `plat_mouse_poll()` (`src/uefi/efi_plat.c`):
+
+* **winner-take-one.** Every device is still asked, but only the one that moved
+  most in this poll gets to move the pointer (`best`/`bestmag`); the others
+  contribute buttons only.  Absolute pointers are consulted only when *no*
+  relative device moved -- an absolute device and a relative device are the same
+  hand far more often than they are two hands.
+* **stuck detection.** A handle that answers with the very same `dx,dy` for
+  `DEV_STUCK_REPEATS` (128) polls in a row is not a hand moving, it is a device
+  repeating a constant; it is ignored until it changes.  The counters reset as
+  soon as the device reports zero movement.
+* **clamp.** One wild sample (a touchpad wake-up, a resume glitch) moves the
+  pointer `MOUSE_POLL_CLAMP` (96) counts at most instead of throwing it into a
+  corner.
+* **absolute range sanity.** A `Mode` block with `max <= min`, or a span below
+  64 counts, is not believed -- that is how a bogus range turns into a scale
+  factor of thousands and a pointer that teleports.
+* **`MOUSE` grew a device table.** `plat_mouse_detail()` (new, declared in
+  `src/plat.h`, stubbed in `src/host/host_plat.c`) prints one line per held
+  device: `dev N: simple-pointer moves=... last=dx,dy`, plus the absolute
+  device's range and a `[stuck, ignored]` marker.  Which handle is moving is
+  the one fact a misbehaving pointer cannot be diagnosed without.
+
+**The pointer cost a third of the machine.** `emu_mouse_pump()` used to be
+called every 1024 instructions, which on a fast host is ~40 000 firmware calls a
+second; each one walks the USB stack.  It is now gated on wall-clock time
+(`g_mouse_pump_ms`, one poll every 2 ms) inside the same `(steps & 0x3FF) == 0`
+block.  The keyboard keeps its step-count cadence.
+
+**AUTOBANCH 2.0** (`tools/autobanch.asm`, 16 tests, one second each, still
+8086-only): the eight original tests plus
+
+| test | unit |
+| --- | --- |
+| x87 chain (FLD/FADD/FMUL/FSUB/FDIV/FSTP) | 6 FP ops |
+| FSQRT | 1 sqrt |
+| 640x200x256 frame written into A000 by hand (INT 10h mode 13h) | 64000 B |
+| CGA text fill (2000 words at B800:0000) | one screen |
+| sieve of Eratosthenes to 4096 | one sieve |
+| insertion sort, 256 words, refilled from a 16-bit LCG | one sort |
+| CRC16-CCITT over 1 KB | 1 KB |
+| 8x8 int16 matrix multiply | 512 mul+add |
+
+and it **writes its own report**: `B<yymmdd>.TXT` (`B261128.TXT` for 28 Nov
+2026), created from the DOS date (`INT 21h AH=2Ah`) at start-up and appended to
+(`AH=3Dh` open read/write, fall back to `AH=3Ch` create, then `AH=42h AL=02`
+seek to end), so the 16-bit, 32-bit and 64-bit probes land in one file.  Every
+character that reaches the console is mirrored into it: `puts` had to be changed
+from `AH=9` to a character loop through `put_ch`, because `AH=9` bypasses the
+mirroring hook and left the file with holes where the label text had been.
+Output to the file is buffered in 512-byte chunks (`flush_file`).
+
+Two assembler lessons, both worth the paragraph:
+
+* `mov cx, SORT_N` with `SORT_N = 256` assembled to `mov cx, [0x0100]` -- a
+  **memory load from the PSP** -- because in GNU as a bare symbol operand is a
+  memory reference, not an immediate.  It has to be `mov cx, offset SORT_N`.
+  The symptom was a sieve that never terminated and a halt inside the buffer
+  area.
+* `[si+di]` is not an 8086 addressing mode.  The sieve keeps one base register
+  and adds the offset into it.
+
+**Native 32- and 64-bit probes**: `sdk/examples/bench.c` builds
+`TOOLS\BENCH64.EXE` (and `BENCH32.EXE`), freestanding, no libm -- so sqrt is a
+Newton loop and number printing is hand-written.  Timing is RDTSC calibrated
+against the 55 ms BIOS tick (`get_ticks`, 30 ticks = 1.65 s, error under 2%),
+then every window runs until it has spent exactly one TSC second.  Eleven
+tests: ALU, MUL, DIV, 4 KB copy, 4 KB fill, double FPU chain, Newton sqrt,
+sieve to 65536, insertion sort 1024, CRC32, 32x32 matrix multiply.
+`RUN64 TOOLS\BENCH64.EXE` starts it and it appends its section to the same
+`B<yymmdd>.TXT`.
+
+* **A 64-bit kernel only runs 64-bit images.**  `native loader: image bitness
+  does not match this UEFI-DOS build` is what `RUN64 BENCH32.EXE` answers on the
+  x64 build; the 32-bit twin needs `BOOTIA32.EFI`.  `BENCH.BAT` says so.
+* **No 32-bit libgcc in this toolchain**, so `__udivdi3` does not exist for
+  `-m32` and 64-bit `/ 10` failed to link.  `bench.c` now divides with
+  `udiv_small()`, which does the long division bit by bit over the low half --
+  no compiler helper needed.
+
+**`TYPE` accepts wildcards** (`cmd_type` in `src/shell/shell.c`): `TYPE B*.TXT`
+prints every match with a `----- name -----` header, because a batch file has no
+way to know today's date.  `BENCH.BAT` ends with exactly that line.
+
+**The stick** (316 files, 6.46 MB, verified byte-for-byte): `W101`, `W104`,
+`W203`, `TOOLS` with 17 programs (AUTOBANC, BENCH64, BENCH32, MOUSETST,
+CGATEST, CGATEXT, VRAM, VESATEST, GFXTEST, KEYTEST, INFO, CAL, SUM, HEX, CLOCK,
+HELLO, DOS4TEST), `BENCH.BAT`, `WIN101.BAT`, `WIN104.BAT`, `WIN203.BAT`, and a
+README that now carries the benchmark section and the one-device-per-poll note.
+`BENCH.BAT` calls `TOOLS\AUTOBANC` and `RUN64 TOOLS\BENCH64.EXE` with explicit
+paths: `RUN64` does not search `PATH`.
+
+Harness figures from this round (i9-14900HX host, 120 M-step runs): 1.01 still
+reaches its Executive with the pointer drawn (`build\w101n3_last.png`, frame 39
+of 42), `--itest` 96 passed / 0 failed, and one `BENCH` run produced
+ALU 6.7 M/s, MUL 0.93 M/s, DIV 0.48 M/s, copy 19 MB/s, x87 chain 47 k/s,
+FSQRT 252 k/s, 640x200 frame 715 frames/s, sieve 57/s, sort 28/s, matmul 308/s
+for the 16-bit side, and ALU 6.8 G/s, copy 12.5 GB/s, DSQRT 2.5 M/s,
+sieve 3.4 k/s, CRC32 28 MB/s, matmul 0.97 G MAC/s for the native 64-bit side.

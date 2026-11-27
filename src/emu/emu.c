@@ -1163,6 +1163,7 @@ static int lowmem_watch_env(void)
 }
 #endif
 static u32 g_fw_pump_ms = 0;    /* last plat_pump_events() call (firmware input) */
+static u32 g_mouse_pump_ms = 0; /* last plat_mouse_poll() call (see the loop) */
 
 /* CGA modes 4/5/6 keep their pixels at B8000 in the even/odd interleaved
  * layout, packed 2 (mode 4/5) or 1 (mode 6) bits per pixel.  They are expanded
@@ -6086,7 +6087,20 @@ int emu_run(Emu *e)
         if ((total & 0x3FFFFull) == 0) dump_vram(e);   /* steps resets on keys */
         if ((steps & 0x3FFull) == 0) {
             emu_kbd_pump(e);
-            emu_mouse_pump(e);
+            /* The pointer is polled on wall-clock time, not on a step count.
+             * Under a real UEFI every poll is a firmware call that walks the
+             * USB stack; asking it 40000 times a second (what "every 1024
+             * steps" becomes on a fast host) cost a third of the machine, and
+             * the fraction moved with the firmware -- which is exactly the kind
+             * of noise that makes a benchmark unrepeatable.  Once every 2 ms is
+             * more than a mouse can use. */
+            {
+                u32 mnow = plat_ticks_ms();
+                if ((u32)(mnow - g_mouse_pump_ms) >= 2) {
+                    g_mouse_pump_ms = mnow;
+                    emu_mouse_pump(e);
+                }
+            }
             /* Under a real UEFI the firmware only moves input packets out of its
              * drivers when its own events get dispatched (Stall/WaitForEvent at
              * TPL_APPLICATION).  Without this the guest sees a frozen keyboard

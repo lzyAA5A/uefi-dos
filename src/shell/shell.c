@@ -272,10 +272,10 @@ static int cmd_dir(const char *spec)
 /* ------------------------------------------------------------------ */
 /* TYPE / COPY / DELETE / RENAME                                       */
 /* ------------------------------------------------------------------ */
-static int cmd_type(const char *spec)
+static int type_one(const char *path)
 {
     int h, rc;
-    rc = dos_open(spec, 0, &h);
+    rc = dos_open(path, 0, &h);
     if (rc != FAT_OK) return rc;
     char buf[512];
     int prev = 0;
@@ -292,6 +292,44 @@ static int cmd_type(const char *spec)
     }
     dos_close(h);
     return rc;
+}
+
+/* TYPE.  With a wildcard (TYPE B*.TXT) every match is printed: the benchmark
+ * programs write a date-stamped B<yymmdd>.TXT, and a batch file has no way to
+ * know today's date, so it needs the pattern form to show the result. */
+static int cmd_type(const char *spec)
+{
+    char pattern[DOS_MAX_PATH];
+    int rc;
+    if (!*spec) { say("Required parameter missing"); return FAT_EINVAL; }
+    strncpy(pattern, spec, sizeof(pattern) - 1);
+    pattern[sizeof(pattern) - 1] = 0;
+    if (!wildcard(pattern)) return type_one(pattern);
+    {
+        dos_find f;
+        char name[13];
+        char lname[FAT_LFN_MAX];
+        u8 attr;
+        u32 size;
+        u16 t, d;
+        int n = 0;
+        rc = dos_find_first_ex(pattern, 0x3F, &f, name, &attr, &size, &t, &d,
+                               lname, (int)sizeof(lname));
+        while (rc == FAT_OK) {
+            if (!(attr & 0x10)) {
+                if (n) plat_putc('\n');
+                plat_puts("----- ");
+                plat_puts(lname[0] ? lname : name);
+                plat_puts(" -----\n");
+                type_one(lname[0] ? lname : name);
+                n++;
+            }
+            rc = dos_find_next_ex(&f, name, &attr, &size, &t, &d, lname,
+                                  (int)sizeof(lname));
+        }
+        if (!n) say("File not found");
+    }
+    return FAT_OK;
 }
 
 static int cmd_copy(const char *rest)
@@ -769,6 +807,7 @@ static int cmd_mouse(const char *rest)
     int sx = 0, sy = 0;
     (void)rest;
     plat_mouse_report();
+    plat_mouse_detail();
     if (!plat_mouse_present()) {
         say("mouse: the firmware publishes no pointing device -- nothing to poll.");
         say("mouse: a mouse plugged in after the firmware's own scan needs a");

@@ -225,6 +225,15 @@ void plat_mouse_report(void)
     plat_puts(")\n");
 }
 
+/* The harness has exactly one pointer, so the per-device table is one line. */
+void plat_mouse_detail(void)
+{
+    if (!g_mouse_loaded) plat_mouse_present();
+    plat_puts("mouse: host harness (one device: ");
+    plat_puts(g_mouse_script[0] ? "UEFIDOS_MOUSE script" : "Windows cursor");
+    plat_puts(")\n");
+}
+
 int plat_mouse_poll(int *dx, int *dy, int *buttons)
 {
     if (!dx || !dy || !buttons) return 0;

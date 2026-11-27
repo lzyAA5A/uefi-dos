@@ -40,6 +40,17 @@ static int g_mouse_relisted;    /* polled long enough to look again */
 static int g_mouse_last_buttons = -1;
 static UINT64 g_abs_last_x[MOUSE_MAX_DEV], g_abs_last_y[MOUSE_MAX_DEV];
 static int g_abs_have_last[MOUSE_MAX_DEV];
+/* Per-device history.  A firmware handle that answers every poll with the same
+ * non-zero "movement" is not a mouse that is moving, it is a device stuck
+ * reporting a constant -- the touchpad half of "the pointer flies around when I
+ * touch it".  Count identical repeats and stop listening to that device. */
+static int g_dev_last_dx[MOUSE_MAX_DEV], g_dev_last_dy[MOUSE_MAX_DEV];
+static int g_dev_same[MOUSE_MAX_DEV];
+static int g_dev_moves[MOUSE_MAX_DEV + MOUSE_MAX_DEV];  /* diagnostics */
+static int g_dev_dx_now[MOUSE_MAX_DEV + MOUSE_MAX_DEV];
+static int g_dev_dy_now[MOUSE_MAX_DEV + MOUSE_MAX_DEV];
+#define DEV_STUCK_REPEATS 128    /* identical reports in a row -> ignore */
+#define MOUSE_POLL_CLAMP 96      /* counts we are willing to believe per poll */
 
 void plat_serial_puts(const char *s);
 
@@ -90,6 +101,16 @@ static void mouse_reset_all(void)
     for (i = 0; i < g_abs_used; i++) {
         if (g_abs_list[i]->Reset) g_abs_list[i]->Reset(g_abs_list[i], 0);
         g_abs_have_last[i] = 0;
+    }
+    for (i = 0; i < MOUSE_MAX_DEV; i++) {
+        g_dev_last_dx[i] = 0;
+        g_dev_last_dy[i] = 0;
+        g_dev_same[i] = 0;
+    }
+    for (i = 0; i < MOUSE_MAX_DEV + MOUSE_MAX_DEV; i++) {
+        g_dev_moves[i] = 0;
+        g_dev_dx_now[i] = 0;
+        g_dev_dy_now[i] = 0;
     }
     g_mouse_last_buttons = -1;
 }
@@ -159,6 +180,68 @@ static int half_count(INT64 v)
     if (v > 0) return (int)((v + 1) / 2);
     if (v < 0) return -(int)(((0 - v) + 1) / 2);
     return 0;
+}
+
+static void put_int(int v)
+{
+    char buf[12];
+    int n = 0;
+    unsigned u;
+    if (v < 0) {
+        plat_putc('-');
+        u = (unsigned)(-(v + 1)) + 1u;
+    } else {
+        u = (unsigned)v;
+    }
+    do {
+        buf[n++] = (char)('0' + (u % 10u));
+        u /= 10u;
+    } while (u && n < 11);
+    while (n) plat_putc(buf[--n]);
+}
+
+/* Per-device diagnostics for the shell's MOUSE command.  The question "why does
+ * the pointer misbehave on this laptop" cannot be answered from one summary
+ * line: it needs to be visible which handle is moving and by how much. */
+void plat_mouse_detail(void)
+{
+    int i;
+    (void)plat_mouse_present();
+    plat_puts("mouse: relative devices (winner-take-one, each poll)\n");
+    for (i = 0; i < g_mouse_used; i++) {
+        plat_puts("  dev ");
+        put_int(i);
+        plat_puts(": simple-pointer  moves=");
+        put_int(g_dev_moves[i]);
+        plat_puts(" last=");
+        put_int(g_dev_dx_now[i]);
+        plat_puts(",");
+        put_int(g_dev_dy_now[i]);
+        if (g_dev_same[i] >= DEV_STUCK_REPEATS) plat_puts("  [stuck, ignored]");
+        plat_puts("\n");
+    }
+    for (i = 0; i < g_abs_used; i++) {
+        plat_puts("  dev ");
+        put_int(g_mouse_used + i);
+        plat_puts(": absolute-pointer moves=");
+        put_int(g_dev_moves[MOUSE_MAX_DEV + i]);
+        plat_puts(" last=");
+        put_int(g_dev_dx_now[MOUSE_MAX_DEV + i]);
+        plat_puts(",");
+        put_int(g_dev_dy_now[MOUSE_MAX_DEV + i]);
+        if (g_abs_list[i] && g_abs_list[i]->Mode) {
+            plat_puts("  range ");
+            put_int((int)g_abs_list[i]->Mode->MinimumX);
+            plat_puts("..");
+            put_int((int)g_abs_list[i]->Mode->MaximumX);
+            plat_puts(" x ");
+            put_int((int)g_abs_list[i]->Mode->MinimumY);
+            plat_puts("..");
+            put_int((int)g_abs_list[i]->Mode->MaximumY);
+        }
+        plat_puts("\n");
+    }
+    if (!g_mouse_used && !g_abs_used) plat_puts("  (no device)\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -278,50 +361,112 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
     if (plat_mouse_present()) {
         int btns = g_mouse_last_buttons < 0 ? 0 : g_mouse_last_buttons;
         int changed;
+        int best = -1, bestmag = 0;
+        int rdx = 0, rdy = 0;
         *dx = 0;
         *dy = 0;
-        /* Every device the firmware published, not just the first: a laptop
-         * usually has a touchpad handle that never reports anything and a USB
-         * mouse handle that does.  Movement adds up, buttons OR together -- a
-         * silent device contributes nothing, so it cannot cancel the other. */
+        /* Every device the firmware published is asked, but only ONE of them
+         * gets to move the pointer.  Adding them up (what this used to do) is
+         * wrong on a laptop: the firmware often publishes the same physical
+         * mouse -- or a touchpad handle that keeps repeating stale counts -- as
+         * several handles, and the guest then sees two or three times the motion
+         * the user made, which is exactly "the pointer flies across the screen".
+         * The device that moved most this poll wins outright. */
         for (i = 0; i < g_mouse_used; i++) {
-            if (g_mouse_list[i]->GetState(g_mouse_list[i], &st) == EFI_SUCCESS) {
-                *dx += half_count(st.RelativeMovementX);
-                *dy += half_count(st.RelativeMovementY);
-                btns |= (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
+            int vx, vy, mag;
+            if (g_mouse_list[i]->GetState(g_mouse_list[i], &st) != EFI_SUCCESS) continue;
+            btns |= (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
+            if (!st.RelativeMovementX && !st.RelativeMovementY) {
+                g_dev_same[i] = 0;
+                continue;
+            }
+            vx = half_count(st.RelativeMovementX);
+            vy = half_count(st.RelativeMovementY);
+            /* A handle that answers with the very same counts for a third of a
+             * second is not a hand moving, it is a stuck device. */
+            if (vx == g_dev_last_dx[i] && vy == g_dev_last_dy[i]) {
+                if (g_dev_same[i] < DEV_STUCK_REPEATS) g_dev_same[i]++;
+            } else {
+                g_dev_same[i] = 0;
+            }
+            g_dev_last_dx[i] = vx;
+            g_dev_last_dy[i] = vy;
+            g_dev_dx_now[i] = vx;
+            g_dev_dy_now[i] = vy;
+            if (g_dev_same[i] >= DEV_STUCK_REPEATS) continue;
+            mag = (vx < 0 ? -vx : vx) + (vy < 0 ? -vy : vy);
+            if (mag > bestmag) {
+                bestmag = mag;
+                best = i;
+                rdx = vx;
+                rdy = vy;
             }
         }
+        if (best >= 0) g_dev_moves[best]++;
         /* A device published in absolute coordinates (tablet, some touchpads):
          * turn the new position into a delta and scale it so the guest's
-         * 640-pixel width maps onto the device's own range.  The first sample
-         * only records the origin -- the finger is already somewhere when the
-         * program starts, and reporting that as a movement would slam the
-         * pointer into a corner. */
-        for (i = 0; i < g_abs_used; i++) {
-            if (g_abs_list[i]->GetState(g_abs_list[i], &ast) != EFI_SUCCESS) continue;
-            UINT64 minx = 0, maxx = 1, miny = 0, maxy = 1;
-            if (g_abs_list[i]->Mode) {
-                minx = g_abs_list[i]->Mode->MinimumX;
-                maxx = g_abs_list[i]->Mode->MaximumX;
-                miny = g_abs_list[i]->Mode->MinimumY;
-                maxy = g_abs_list[i]->Mode->MaximumY;
-            }
-            UINT64 spanx = (maxx > minx) ? (maxx - minx + 1) : 1;
-            UINT64 spany = (maxy > miny) ? (maxy - miny + 1) : 1;
-            btns |= (int)(ast.ActiveButtons & 3u);
-            if (!g_abs_have_last[i]) {
-                g_abs_have_last[i] = 1;
+         * 640-pixel width maps onto the device's own range.  It only speaks when
+         * no relative device moved -- an absolute device and a relative device
+         * are the same hand far more often than they are two hands. */
+        if (best < 0) {
+            for (i = 0; i < g_abs_used; i++) {
+                UINT64 minx = 0, maxx = 1, miny = 0, maxy = 1, spanx, spany;
+                INT64 ax, ay;
+                int vx, vy, mag;
+                if (g_abs_list[i]->GetState(g_abs_list[i], &ast) != EFI_SUCCESS) continue;
+                if (g_abs_list[i]->Mode) {
+                    minx = g_abs_list[i]->Mode->MinimumX;
+                    maxx = g_abs_list[i]->Mode->MaximumX;
+                    miny = g_abs_list[i]->Mode->MinimumY;
+                    maxy = g_abs_list[i]->Mode->MaximumY;
+                }
+                /* A Mode block with an empty or absurd range produces a scale
+                 * factor of thousands and a pointer that teleports.  Demand a
+                 * sane range before believing any of it. */
+                if (maxx <= minx || maxy <= miny) continue;
+                spanx = maxx - minx + 1;
+                spany = maxy - miny + 1;
+                if (spanx < 64 || spany < 64) continue;
+                btns |= (int)(ast.ActiveButtons & 3u);
+                if (!g_abs_have_last[i]) {
+                    g_abs_have_last[i] = 1;
+                    g_abs_last_x[i] = ast.CurrentX;
+                    g_abs_last_y[i] = ast.CurrentY;
+                    continue;
+                }
+                ax = (INT64)ast.CurrentX - (INT64)g_abs_last_x[i];
+                ay = (INT64)ast.CurrentY - (INT64)g_abs_last_y[i];
                 g_abs_last_x[i] = ast.CurrentX;
                 g_abs_last_y[i] = ast.CurrentY;
-            } else {
-                INT64 ax = (INT64)ast.CurrentX - (INT64)g_abs_last_x[i];
-                INT64 ay = (INT64)ast.CurrentY - (INT64)g_abs_last_y[i];
-                g_abs_last_x[i] = ast.CurrentX;
-                g_abs_last_y[i] = ast.CurrentY;
-                /* half_count() below halves again, so ask for twice the pixels */
-                *dx += (int)((ax * 1280) / (INT64)spanx);
-                *dy += (int)((ay * 1280) / (INT64)spany);
+                if (!ax && !ay) {
+                    g_dev_same[MOUSE_MAX_DEV - 1 - i] = 0;
+                    continue;
+                }
+                /* 1280 half-counts is the whole 640-pixel screen */
+                vx = (int)((ax * 1280) / (INT64)spanx);
+                vy = (int)((ay * 1280) / (INT64)spany);
+                g_dev_dx_now[MOUSE_MAX_DEV + i] = vx;
+                g_dev_dy_now[MOUSE_MAX_DEV + i] = vy;
+                mag = (vx < 0 ? -vx : vx) + (vy < 0 ? -vy : vy);
+                if (mag == 0) continue;
+                if (mag > bestmag) {
+                    bestmag = mag;
+                    best = MOUSE_MAX_DEV + i;
+                    rdx = vx;
+                    rdy = vy;
+                }
             }
+            if (best >= 0) g_dev_moves[best]++;
+        }
+        if (best >= 0) {
+            /* One wild sample -- a touchpad wake-up, a resume glitch -- should
+             * nudge the pointer, not throw it into a corner. */
+            if (rdx > MOUSE_POLL_CLAMP) rdx = MOUSE_POLL_CLAMP;
+            if (rdx < -MOUSE_POLL_CLAMP) rdx = -MOUSE_POLL_CLAMP;
+            if (rdy > MOUSE_POLL_CLAMP) rdy = MOUSE_POLL_CLAMP;
+            if (rdy < -MOUSE_POLL_CLAMP) rdy = -MOUSE_POLL_CLAMP;
+            *dx = rdx;
+            *dy = rdy;
         }
         /* A button *release* carries no movement, so reporting only "something
          * moved or some button is held" swallowed every release and left the

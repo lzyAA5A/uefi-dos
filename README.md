@@ -13,7 +13,36 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.9.3**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+1.10.0 is the benchmarking round, and it starts with the pointer.  On the real
+laptop the mouse was recognised but **flew across the screen** the moment it
+moved: 1.9.3 polled every pointer handle the firmware published and added their
+movements together, so a firmware that publishes the same physical mouse -- or a
+touchpad handle repeating a stale count -- as two or three handles handed the
+guest two or three times the motion the hand made.  The rule is now
+**winner-take-one**: every device is asked, only the one that moved most in this
+poll moves the pointer, buttons still OR together; a handle that repeats the
+same counts for 128 polls is treated as stuck and ignored, one wild sample is
+clamped to 96 counts, an absolute `Mode` range that is empty or absurd is not
+believed, and `MOUSE` now prints a per-device table (`moves=`, `last=`) that
+says which handle is moving.  The pointer is also polled on wall-clock time
+(once every 2 ms) instead of every 1024 instructions, because on a fast host
+that was 40 000 firmware calls a second and a third of the machine.
+
+The benchmark is `BENCH`.  **AUTOBANCH 2.0** (`tools/autobanch.asm`, 16-bit,
+8086-only) runs sixteen one-second windows -- the original ALU/MUL/DIV/memory/
+INT 21h/disk set plus an **x87 chain, FSQRT, a 640x200x256 frame written into
+A000 by hand, a CGA text fill, a sieve of Eratosthenes, an insertion sort, CRC16
+and an 8x8 matrix multiply** -- and **writes its own report file**,
+`B<yymmdd>.TXT` (`B261128.TXT` for 28 Nov 2026), created from the DOS date and
+appended to, so the native probes land in the same file.  `TOOLS\BENCH64.EXE`
+(`sdk/examples/bench.c`, started with `RUN64`) does the same natively in 64 bits
+with RDTSC timing: ALU, MUL, DIV, copy, fill, a double FPU chain, Newton sqrt,
+sieve to 65536, insertion sort 1024, CRC32 and a 32x32 matrix multiply.
+`TOOLS\BENCH32.EXE` is the 32-bit twin -- a 64-bit kernel runs only 64-bit
+images, so it needs `BOOTIA32.EFI`.  `TYPE B*.TXT` prints the result (TYPE now
+accepts wildcards, because a batch file cannot know today's date).
+
+Version **1.10.0**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
 single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU +
 OVMF boot smoke tests for x86_64 and IA32, the release image booting to a live

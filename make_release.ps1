@@ -39,7 +39,7 @@ if (-not $SkipBuild) {
 }
 foreach ($f in 'BOOTX64.EFI','BOOTIA32.EFI','INFO.COM','CAL.COM','SUM.COM','HEX.COM','CLOCK.COM',
                'HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM','UPCALL.COM',
-               'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM','CGATEST.COM','MOUSETST.COM','HELLO64.EXE','HELLO32.EXE','FILET64.EXE','FILET32.EXE') {
+               'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM','CGATEST.COM','MOUSETST.COM','HELLO64.EXE','HELLO32.EXE','FILET64.EXE','FILET32.EXE','BENCH64.EXE','BENCH32.EXE') {
     if (-not (Test-Path (Join-Path $Build $f))) { throw "missing build artifact: $f (run build.ps1)" }
 }
 
@@ -57,7 +57,7 @@ $makeArgs = @($img, '--size-mb', "$SizeMB",
     '--text',      'README.TXT=UEFI-DOS release image. Type HELP for commands, AUTOBANC for a benchmark.')
 foreach ($p in 'HELLO.COM','TELETYPE.COM','MZEXE.EXE','RUNNER.COM','VRAM.COM','UPCALL.COM',
                'INFO.COM','CAL.COM','SUM.COM','HEX.COM','CLOCK.COM',
-               'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM','CGATEST.COM','MOUSETST.COM','HELLO64.EXE','HELLO32.EXE','FILET64.EXE','FILET32.EXE') {
+               'GFXTEST.COM','VESATEST.COM','DOS4TEST.COM','CGATEST.COM','MOUSETST.COM','HELLO64.EXE','HELLO32.EXE','FILET64.EXE','FILET32.EXE','BENCH64.EXE','BENCH32.EXE') {
     $makeArgs += @('--file', "$Build/$p=$p")
 }
 if (Test-Path (Join-Path $Build 'AUTOBANC.COM')) {
