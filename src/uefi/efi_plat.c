@@ -25,7 +25,11 @@ int g_plat_shutdown_requested = 0;
 /* pointing device (INT 33h backing store)                             */
 /* ------------------------------------------------------------------ */
 static EFI_SIMPLE_POINTER_PROTOCOL *g_mouse;
+static EFI_ABSOLUTE_POINTER_PROTOCOL *g_abs;
 static int g_mouse_tried;
+static int g_mouse_n_simple, g_mouse_n_abs;
+static UINT64 g_abs_last_x, g_abs_last_y;
+static int g_abs_have_last;
 
 void plat_serial_puts(const char *s);
 
@@ -33,10 +37,58 @@ int plat_mouse_present(void)
 {
     if (!g_mouse_tried) {
         g_mouse_tried = 1;
-        if (gBS && gBS->LocateProtocol)
+        EFI_HANDLE *handles = NULL;
+        UINTN n = 0;
+        /* Count every handle that carries the protocol, not just the first one:
+         * a laptop can publish the built-in touchpad and a USB mouse at the
+         * same time, and the old LocateProtocol call always took whichever
+         * handle happened to come first. */
+        if (gBS && gBS->LocateHandleBuffer) {
+            if (!EFI_ERROR(gBS->LocateHandleBuffer(2 /* ByProtocol */,
+                                                  &gEfiSimplePointerProtocolGuid,
+                                                  NULL, &n, &handles))) {
+                g_mouse_n_simple = (int)n;
+                for (UINTN i = 0; i < n && !g_mouse; i++) {
+                    void *p = NULL;
+                    if (!EFI_ERROR(gBS->HandleProtocol(handles[i], &gEfiSimplePointerProtocolGuid, &p)) && p)
+                        g_mouse = (EFI_SIMPLE_POINTER_PROTOCOL *)p;
+                }
+            }
+            n = 0;
+            handles = NULL;
+            if (!EFI_ERROR(gBS->LocateHandleBuffer(2 /* ByProtocol */,
+                                                  &gEfiAbsolutePointerProtocolGuid,
+                                                  NULL, &n, &handles))) {
+                g_mouse_n_abs = (int)n;
+                for (UINTN i = 0; i < n && !g_abs; i++) {
+                    void *p = NULL;
+                    if (!EFI_ERROR(gBS->HandleProtocol(handles[i], &gEfiAbsolutePointerProtocolGuid, &p)) && p)
+                        g_abs = (EFI_ABSOLUTE_POINTER_PROTOCOL *)p;
+                }
+            }
+        }
+        if (!g_mouse && gBS && gBS->LocateProtocol)
             gBS->LocateProtocol(&gEfiSimplePointerProtocolGuid, NULL, (void **)&g_mouse);
+        if (g_mouse && g_mouse->Reset) g_mouse->Reset(g_mouse, 0);
+        if (g_abs && g_abs->Reset) g_abs->Reset(g_abs, 0);
     }
-    return g_mouse != NULL;
+    return g_mouse != NULL || g_abs != NULL;
+}
+
+/* One line, printed once, that says what the firmware actually offered.  On a
+ * machine whose pointer does not work this is the whole diagnosis: no handle at
+ * all is a firmware/driver question, whereas a handle that never reports a
+ * state is the case the i8042 fallback exists for. */
+void plat_mouse_report(void)
+{
+    (void)plat_mouse_present();
+    plat_puts("mouse: simple-pointer=");
+    plat_putc((char)('0' + (g_mouse_n_simple > 9 ? 9 : g_mouse_n_simple)));
+    plat_puts(g_mouse ? " (in use)" : " (none)");
+    plat_puts("  absolute-pointer=");
+    plat_putc((char)('0' + (g_mouse_n_abs > 9 ? 9 : g_mouse_n_abs)));
+    plat_puts(g_abs ? " (in use)" : " (none)");
+    plat_puts("\n");
 }
 
 /* device counts -> DOS mickeys: two counts make one pixel, but a single count
@@ -157,15 +209,45 @@ static int ps2_mouse_read(int *dx, int *dy, int *buttons)
 int plat_mouse_poll(int *dx, int *dy, int *buttons)
 {
     EFI_SIMPLE_POINTER_STATE st;
+    EFI_ABSOLUTE_POINTER_STATE ast;
     static int ps2_buttons;
     int b;
     if (!dx || !dy || !buttons) return 0;
     if (plat_mouse_present()) {
-        if (g_mouse->GetState(g_mouse, &st) == EFI_SUCCESS) {
+        if (g_mouse && g_mouse->GetState(g_mouse, &st) == EFI_SUCCESS) {
             *dx = half_count(st.RelativeMovementX);
             *dy = half_count(st.RelativeMovementY);
             *buttons = (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
             if (*dx || *dy || *buttons) return 1;
+        }
+        /* A touchpad published in absolute coordinates: turn the new position
+         * into a delta and scale it so the guest's 640-pixel width maps onto
+         * the pad's own range.  The first sample only records the origin -- the
+         * finger is already somewhere when the program starts, and reporting
+         * that as a movement would slam the pointer into a corner. */
+        if (g_abs && g_abs->GetState(g_abs, &ast) == EFI_SUCCESS) {
+            UINT64 minx = 0, maxx = 1, miny = 0, maxy = 1;
+            if (g_abs->Mode) {
+                minx = g_abs->Mode->MinimumX; maxx = g_abs->Mode->MaximumX;
+                miny = g_abs->Mode->MinimumY; maxy = g_abs->Mode->MaximumY;
+            }
+            UINT64 spanx = (maxx > minx) ? (maxx - minx + 1) : 1;
+            UINT64 spany = (maxy > miny) ? (maxy - miny + 1) : 1;
+            if (!g_abs_have_last) {
+                g_abs_have_last = 1;
+                g_abs_last_x = ast.CurrentX;
+                g_abs_last_y = ast.CurrentY;
+            } else {
+                INT64 ax = (INT64)ast.CurrentX - (INT64)g_abs_last_x;
+                INT64 ay = (INT64)ast.CurrentY - (INT64)g_abs_last_y;
+                g_abs_last_x = ast.CurrentX;
+                g_abs_last_y = ast.CurrentY;
+                /* half_count() below halves again, so ask for twice the pixels */
+                *dx = (int)((ax * 1280) / (INT64)spanx);
+                *dy = (int)((ay * 1280) / (INT64)spany);
+                *buttons = (int)(ast.ActiveButtons & 3u);
+                if (*dx || *dy || *buttons) return 1;
+            }
         }
     }
     /* Nothing from the firmware protocol (some builds expose it and never

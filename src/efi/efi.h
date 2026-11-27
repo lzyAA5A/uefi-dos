@@ -406,6 +406,37 @@ typedef struct _EFI_SIMPLE_POINTER_PROTOCOL {
 
 extern EFI_GUID gEfiSimplePointerProtocolGuid;
 
+/* ---- EFI_ABSOLUTE_POINTER_PROTOCOL: touchpads, tablets, touch screens ----
+ * Laptops whose pointing device is not routed to the i8042 (an I2C HID
+ * touchpad, for instance) sometimes still publish it here, in absolute
+ * coordinates.  Everything about it is a protocol of its own, so the loader
+ * polls it next to SimplePointer and turns the absolute position into deltas. */
+typedef struct {
+    UINT64 CurrentX;
+    UINT64 CurrentY;
+    UINT64 CurrentZ;
+    UINT32 ActiveButtons;
+} EFI_ABSOLUTE_POINTER_STATE;
+
+typedef struct {
+    UINT64 MinimumX;
+    UINT64 MinimumY;
+    UINT64 MaximumX;
+    UINT64 MaximumY;
+    UINT32 ActiveButtons;
+} EFI_ABSOLUTE_POINTER_MODE;
+
+typedef struct _EFI_ABSOLUTE_POINTER_PROTOCOL {
+    EFI_STATUS (EFIAPI *Reset)(struct _EFI_ABSOLUTE_POINTER_PROTOCOL *This,
+                               BOOLEAN ExtendedVerification);
+    EFI_STATUS (EFIAPI *GetState)(struct _EFI_ABSOLUTE_POINTER_PROTOCOL *This,
+                                  EFI_ABSOLUTE_POINTER_STATE *State);
+    void      *WaitForInput;
+    EFI_ABSOLUTE_POINTER_MODE *Mode;
+} EFI_ABSOLUTE_POINTER_PROTOCOL;
+
+extern EFI_GUID gEfiAbsolutePointerProtocolGuid;
+
 extern EFI_GUID gEfiSerialIoProtocolGuid;
 extern EFI_GUID gEfiDevicePathProtocolGuid;
 

@@ -23,6 +23,11 @@ EFI_GUID gEfiUefiDosApiGuid              = UEFIDOS_API_GUID;
 EFI_GUID gEfiSimplePointerProtocolGuid = {
     0x31878C87, 0x0B75, 0x11D5, { 0x9A, 0x4F, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D }
 };
+/* EFI_ABSOLUTE_POINTER_PROTOCOL_GUID (UEFI 2.x 12.7): touchpads and tablets
+ * that the firmware publishes in absolute coordinates instead of as a mouse */
+EFI_GUID gEfiAbsolutePointerProtocolGuid = {
+    0x8D59D32B, 0xC655, 0x4AE9, { 0x9B, 0x15, 0xF2, 0x59, 0x04, 0x99, 0x2A, 0x43 }
+};
 
 EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
 {
@@ -31,6 +36,9 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *system_table)
     plat_puts("UEFI-DOS v");
     plat_puts(UEFIDOS_VERSION);
     plat_puts(" -- UEFI-native DOS shell (boot OK)\n");
+    /* One line about the pointing device, printed before any program can take
+     * the screen: a machine whose mouse does not move is diagnosed by this. */
+    plat_mouse_report();
 
     /* ABI smoke test: gBS->Stall and gRT->GetTime both go through the
      * Microsoft x64 convention, so this catches a wrong EFIAPI early. */

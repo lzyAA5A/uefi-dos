@@ -4755,3 +4755,53 @@ step in Setup Mode is a project of its own), but enrolling a key and turning the
 policy off amount to the same trust decision, so the switch is the honest path.
 One caveat for a modern laptop: if Windows uses BitLocker / device encryption,
 have the recovery key at hand before changing Secure Boot settings.
+
+## Round 41 -- the second real machine: Secure Boot solved, the touchpad is not a mouse (1.9.0)
+
+The same ASUS TUF Gaming F16 (i9-14900HX, 16 GB DDR5) came back with **Secure
+Boot disabled** and the stick booted: UEFI-DOS reached its `C:\>` prompt,
+Windows 1.01 came up with its MS-DOS Executive, the picture filled the panel --
+and **the pointer did not move**.  So the red `Secure Boot Violation` panel of
+the previous round was never a content problem, exactly as the error string
+said, and with the policy off everything else on the stick works on real
+silicon.
+
+That leaves the pointing device, and one line of new code answers it.  At boot
+the loader now prints what the firmware actually published:
+
+    mouse: simple-pointer=1 (in use)  absolute-pointer=1 (in use)
+
+on QEMU + OVMF (which offers a USB mouse as both protocols), and
+
+    mouse: simple-pointer=0 (none)  absolute-pointer=0 (none)
+
+on a laptop whose touchpad the firmware never exposed -- which is the usual
+answer for an **I2C HID touchpad**: it is not routed to the i8042, and firmware
+rarely publishes it as `EFI_SIMPLE_POINTER_PROTOCOL` for anyone else to use.
+Nothing in the loader can invent a pointer that the firmware does not hand it;
+a USB mouse plugged into the machine does appear there (the firmware has to make
+it usable for its own setup screens), and that is the case `MOUSETST` and
+Windows' bus-mouse driver have always worked with.
+
+What this round changed, so that "no mouse" turns into a diagnosis instead of a
+guess:
+
+* `plat_mouse_present()` used `LocateProtocol()`, which takes whichever handle
+  the firmware lists first.  It now walks **every** handle with
+  `LocateHandleBuffer(ByProtocol)` for both pointer protocols, resets the ones
+  it finds, and remembers how many there were.
+* **`EFI_ABSOLUTE_POINTER_PROTOCOL` support** (`src/efi/efi.h` gains the GUID,
+  the mode and state structures, `src/uefi/main.c` defines the GUID): a touchpad
+  or tablet published in absolute coordinates is polled next to SimplePointer,
+  and the position is turned into deltas scaled so the pad's own range spans the
+  guest's 640-pixel width.  The first sample only records the origin -- the
+  finger is already somewhere when a program starts, and reporting that as a
+  movement would slam the pointer into a corner.
+* `plat_mouse_report()` prints the one-line summary before any program can take
+  the screen (`mouse:` above), so a machine without a pointer now says so at
+  boot instead of looking like a broken driver.
+
+The i8042 fallback from earlier rounds is unchanged: if a protocol exists but
+never reports a state, the loader arms the 8046 [sic] controller by hand and
+reads 3-byte packets itself.  That path only helps when the firmware *does*
+route the device to the controller.

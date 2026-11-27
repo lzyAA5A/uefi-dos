@@ -36,6 +36,8 @@ int  plat_kbd_scan(void);        /* last scan code seen (0 if none) */
 int  plat_mouse_poll(int *dx, int *dy, int *buttons);
 /* 1 when the firmware/host actually has a pointing device. */
 int  plat_mouse_present(void);
+/* one line naming the pointing-device protocols the firmware published */
+void plat_mouse_report(void);
 void plat_shutdown(void);
 u64  plat_ticks_ms(void);
 void plat_sleep_ms(u32 ms);
