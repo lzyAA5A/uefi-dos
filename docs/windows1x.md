@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.10.3).** The machine UEFI-DOS pretends to be
+**Where this line of work stands (1.10.4).** The machine UEFI-DOS pretends to be
 is now consistent with the machine it emulates: an **80286 AT**, not an 8088 XT
 (Round 42).  Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
@@ -5462,3 +5462,72 @@ message.
 - A real laptop cannot be reached from here, so the remaining confirmation is one
   command on the machine: run `MOUSE`, hold the left button during the ten second
   probe, and read the `buttons seen during the probe:` line.
+
+## Round 48 -- the first real benchmark, and four lines that said "no clock" (1.10.4)
+
+The stick from Round 47 was booted on the laptop and `BENCH` was run.  The
+numbers are the first ones this project has from real hardware, and they also
+exposed a bug in the benchmark itself.
+
+### The figures (ASUS TUF Gaming F16, i9-14900HX, 16 GB DDR5)
+
+16-bit real mode, one-second windows:
+
+```
+ALU chain (8 ops) ... 17664000 /s      MUL r/m16 x2 ........ 6869120 /s
+DIV r/m16 ........... 3435648 /s       REP MOVSW copy KB ... 126292 /s
+REP STOSW fill KB ... 228184 /s        REP LODSW read KB ... 352204 /s
+INT 21h call ........ 2637912 /s       Disk read KB ........ 14720 /s
+640x200 frame ....... 728 /s           Insertion sort 256 .. 162 /s
+CRC16 over 1 KB ..... 540 /s           8x8 matmul .......... 2115 /s
+```
+
+Native 64-bit (`BENCH64.EXE`, TSC-timed): TSC 2409328576 Hz, ALU
+6704232448 /s, MUL 2518245888, DIV 849068800, copy 84687744 KB/s, fill
+74592896 KB/s, FPU double chain 874349568, DSQRT (Newton) 11534720, sieve to
+65536 21648, insertion sort 1024 16277, CRC32 154272 KB/s, matmul 32x32
+5648711680 MACs/s.
+
+Against the same figures from the host harness on the same laptop (ALU 6.7M/s),
+the **EFI build interprets the guest 2.6x faster than the host harness does** --
+the harness carries a heap of host-side plumbing per step that the freestanding
+EFI build simply does not have.  Disk is the opposite story: 14720 KB/s on the
+stick versus 144512 KB/s through the harness, because the harness reads the
+image as a file while the real machine goes through `EFI_BLOCK_IO` 512 bytes at
+a time on a USB stick.
+
+### The bug: four tests reported `<no usable PIT clock>`
+
+x87 chain, FSQRT, CGA text fill and sieve produced no figure while the other
+twelve did -- and they are not a contiguous block (9, 10, 12, 13 failed; 11 and
+14-16 passed), and the same binary reports all sixteen in the host harness.  The
+timeout branch is reached only from `BENCHDONE`, i.e. after the inner loop has
+run at least once, so this is not a hung test: the elapsed-count accumulator
+never reached 1193182 counts inside the 200-tick (11 s) watchdog.
+
+Two mechanisms can do that, and they need different fixes:
+
+1. **The polls are too far apart.** `el_poll` reads a 16-bit down-counter and
+   adds `(prev - now) mod 65536`; a single unit that takes longer than 54925
+   counts (54.9 ms) loses whole wraps and the accumulator runs slow for ever.
+2. **The watchdog fires too early.** It counts BIOS ticks (`0040:006C`), which
+   the pacer regenerates from the wall clock and re-learns every 125 ms; if the
+   tick counter bursts during a particular instruction mix, 200 ticks can go by
+   long before 1.25 s of real time.
+
+The timeout line now carries the evidence for both, and printing it costs
+nothing when a test passes:
+
+```
+<no PIT clock> units=<outer iterations> maxgap=<largest single poll delta> el=<accumulated counts>
+```
+
+`units` small means the watchdog fired early (mechanism 2); `units` large with
+`maxgap` near 65536 means the delta wrapped (mechanism 1); `units` large with
+`maxgap` small and `el` growing means something reset the accumulator.  The
+strings are shortened to `<no PIT clock>` so the line still fits in 80 columns.
+Verified: the harness run of the same binary still reports all sixteen figures,
+the mode-13h test included.
+
+One command on the machine settles which mechanism it is -- run `BENCH` and read
+the four diagnostic lines.

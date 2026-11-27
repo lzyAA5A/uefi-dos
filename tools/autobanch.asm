@@ -35,6 +35,8 @@
         mov     byte ptr [g_timeout], 0
         mov     word ptr [g_clo], 0
         mov     word ptr [g_chi], 0
+        mov     word ptr [g_units], 0
+        mov     word ptr [g_gapmax], 0
         call    get_ticks
         mov     [g_t0], ax
 .Lloop\id:
@@ -48,6 +50,7 @@
         jnz     .Lin\id
         add     word ptr [g_clo], \unit
         adc     word ptr [g_chi], 0
+        inc     word ptr [g_units]
         call    el_poll
         call    el_ge_window
         jc      .Ldone\id
@@ -459,6 +462,10 @@ el_poll:
         mov     bx, [g_prev]
         mov     [g_prev], ax
         sub     bx, ax
+        cmp     bx, [g_gapmax]
+        jbe     .poll_nogap
+        mov     [g_gapmax], bx
+.poll_nogap:
         add     [g_el_lo], bx
         adc     word ptr [g_el_hi], 0
         cmp     byte ptr [g_armed], 0
@@ -510,6 +517,21 @@ report:
         cmp     byte ptr [g_timeout], 0
         je      .r_ok
         mov     dx, offset msg_timeout
+        call    puts
+        mov     dx, offset msg_diag_units
+        call    puts
+        mov     ax, [g_units]
+        call    put_u16
+        mov     dx, offset msg_diag_gap
+        call    puts
+        mov     ax, [g_gapmax]
+        call    put_u16
+        mov     dx, offset msg_diag_el
+        call    puts
+        mov     ax, [g_el_lo]
+        mov     dx, [g_el_hi]
+        call    put_u32
+        mov     dx, offset msg_diag_end
         call    puts
         call    crlf
         ret
@@ -1046,7 +1068,11 @@ msg_t_sort:     .ascii "Insertion sort 256 .. $"
 msg_t_crc:      .ascii "CRC16 over 1 KB ..... $"
 msg_t_mat:      .ascii "8x8 matmul (512 mul)  $"
 msg_per_s:      .ascii " /s$"
-msg_timeout:    .ascii "<no usable PIT clock>$"
+msg_timeout:    .ascii "<no PIT clock>$"
+msg_diag_units: .ascii " units=$"
+msg_diag_gap:   .ascii " maxgap=$"
+msg_diag_el:    .ascii " el=$"
+msg_diag_end:   .ascii ">"
 msg_total:      .ascii "TOTAL SUMMED RATE ... $"
 msg_footer:     .ascii "Bigger figures = faster host. Run this on two machines and\r\ncompare line by line; TOTAL is a rough single-figure index.\r\n$"
 fn_bench:       .asciz "BENCH.TMP"
@@ -1058,6 +1084,8 @@ g_chi:          .word 0
 g_sum_lo:       .word 0
 g_sum_hi:       .word 0
 g_prev:         .word 0
+g_units:        .word 0
+g_gapmax:       .word 0
 g_el_lo:        .word 0
 g_el_hi:        .word 0
 g_ticklast:     .word 0

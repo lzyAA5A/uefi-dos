@@ -29,6 +29,22 @@ before our halving and clamping), the device table printed both before and after
 the ten-second probe, a `ps/2 aux:` line, and a verdict that says "counts arrive
 on one axis only" out loud.
 
+1.10.4 brings the first benchmark figures from real hardware -- and fixes the
+lines that produced none.  On an ASUS TUF Gaming F16 (i9-14900HX) the 16-bit
+suite reports 17,664,000 ALU ops/s, 126 MB/s `rep movsw`, 2.6M `INT 21h` calls/s
+and 14.7 MB/s of disk read off the stick, while the native 64-bit probe measures
+a 2.41 GHz TSC and 6.7G ALU ops/s: the freestanding EFI build interprets the
+guest **2.6x faster** than the host harness does, because the harness carries
+host plumbing the EFI build does not.  Four tests (x87 chain, FSQRT, CGA text
+fill, sieve) came back as `<no usable PIT clock>` there while the same binary
+reports all sixteen in the harness.  The timeout branch is only reachable after
+the loop has run, so those tests are not hung -- the elapsed-count accumulator
+simply never reached one second inside the 200-tick watchdog.  Two mechanisms
+can do that: polls spaced further apart than the 54.9 ms the 16-bit PIT
+counter can measure in one wrap, or a BIOS tick counter that bursts under a
+particular instruction mix and trips the watchdog early.  The timeout line now
+prints `units=`, `maxgap=` and `el=`, which tells the two apart in one run.
+
 1.10.3 is the same click, one layer further out: the host harness could
 double-click the Calculator open, but the laptop still could not click with the
 wired mouse **or** the touchpad, while the pointer travelled perfectly.  Movement
@@ -94,7 +110,7 @@ sieve to 65536, insertion sort 1024, CRC32 and a 32x32 matrix multiply.
 images, so it needs `BOOTIA32.EFI`.  `TYPE B*.TXT` prints the result (TYPE now
 accepts wildcards, because a batch file cannot know today's date).
 
-Version **1.10.3**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+Version **1.10.4**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
 single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU +
 OVMF boot smoke tests for x86_64 and IA32, the release image booting to a live
