@@ -1093,7 +1093,6 @@ void int21_handler(Emu *e)
         }
         u32 total = 0;
         char tmp[512];
-        u32 start_pos = (h < DOS_HANDLE_MAX) ? g_dos.handles[h].pos : 0;
         while (total < want) {
             u32 chunk = want - total;
             if (chunk > sizeof(tmp)) chunk = sizeof(tmp);
@@ -1109,6 +1108,9 @@ void int21_handler(Emu *e)
            file position and the first bytes, so a seek/read mismatch is
            visible instead of being inferred from a program's error. */
         {
+            /* Only the trace needs the position the read started at; keeping it
+               here (and not above) is what makes the EFI build warning-free. */
+            u32 start_pos = (h < DOS_HANDLE_MAX) ? g_dos.handles[h].pos : 0;
             static int rd_trace = -1;
             static int rd_handle = -99;
             if (rd_trace < 0) {

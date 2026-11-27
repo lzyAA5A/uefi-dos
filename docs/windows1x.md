@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.8.0).** Windows **1.01** runs its MS-DOS
+**Where this line of work stands (1.8.1).** Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
 its desktop, and since 1.5.1 its **mouse works**: the pointer appears, follows
 the host and a double-click on a CALENDAR.EXE entry starts the application
@@ -4596,3 +4596,132 @@ command.
 Windows 1.04 and 1.01 were re-run with the FPU announced: both still reach their
 desktops (1.04: `build/fpu104b.ppm.00012.ppm` shows the Executive with the
 pointer), so claiming a coprocessor costs the 1.x line nothing.
+
+## Round 40 -- the stick gets all three Windows, and Windows 2.03's fault moves (1.8.1)
+
+### The USB stick
+
+`build/stage_usb.ps1` now stages a tree with **three** Windows installations side
+by side and `build/write_usb.ps1` writes it to the stick (label `1401`, FAT32,
+15.99 GB, `Removable`, the old OpenCore/Hackintosh content is gone):
+
+    EFI\BOOT\BOOTX64.EFI   259303 B   1.8.1, 64-bit firmware
+    EFI\BOOT\BOOTIA32.EFI  251100 B   1.8.1, 32-bit firmware
+    W101\  Windows 1.01    desktop + pointer
+    W104\  Windows 1.04    desktop + pointer (SETVER 3.30 already in AUTOEXEC)
+    W203\  Windows 2.03    the 286 build, still stops in its loader
+    TOOLS\ AUTOBANC.COM + MOUSETST/CGATEST/CGATEXT/VRAM/VESATEST/GFXTEST/...
+    CONFIG.SYS   FILES=40 / LASTDRIVE=D / EXECHIGH=ON / MOUSESPEED=2
+    AUTOEXEC.BAT banner, then SETVER WIN.COM, WIN100.BIN, MSDOS.EXE = 3.30
+    WIN101.BAT / WIN104.BAT / WIN203.BAT / BENCH.BAT / README.TXT
+
+312 files, 6.41 MB, verified size-for-size after the copy.  The `.BAT` files are
+straight-line (`CD \W101` then `WIN`) on purpose: the shell's batch runner has no
+`IF` and skips `GOTO` lines (see `run_batch_text` in `src/shell/shell.c`), so a
+conditional version of these would print "Bad command" for every line of it.
+
+Verified in the harness on the same tree the stick carries (so this is the
+stick's own content, not a copy of it):
+
+    python tools\make_tree_image.py build\usbtest.img build\usb --size-mb 256
+    hosttest.exe --shell build\usbtest.img "SETVER WIN.COM 3.30" ... "WIN101"
+
+1.01 comes up on its Executive and then sits in its idle loop -- the log ends in
+a repeating `i21 AH=4F` / `AH=1A` pair from `91DD:0971` / `91DD:096D`, which is
+the desktop polling, not a fault.  Without the three `SETVER` lines the same
+tree prints `Incorrect DOS version` and quits, which is why they are in
+`AUTOEXEC.BAT` rather than in each `.BAT`.
+
+### Why a firmware may not offer the stick
+
+Nothing in the stick's content is ambiguous: the same tree booted as a *real USB
+device* under QEMU+OVMF (`-device qemu-xhci` + `usb-storage`, no other disk) in
+the previous round, and the harness runs it above.  So a machine that will not
+boot it is a firmware-setting problem, and `README.TXT` on the stick lists the
+six that actually happen, in order of likelihood: **Secure Boot** (an unsigned
+`BOOTX64.EFI` is simply refused), **CSM/Legacy-only** (there is no boot sector
+to run), picking the legacy entry instead of the `UEFI: 1401` one, Fast Boot
+skipping USB enumeration, a front-panel USB3 port, and finally the rare firmware
+that insists the partition type byte is `EFh` (EFI System) instead of `0Ch`
+(FAT32 LBA).  The MBR could not be inspected from here -- `\\.\PhysicalDriveN`
+is denied in this sandbox -- so that last one is left as the "if everything else
+fails" step.
+
+### Windows 2.03: the earlier reading of the fault was wrong
+
+The previous round recorded the stop as `mov es,ax` with `AX=0` followed by a
+`rep movsb` of the NE header into segment 0.  That disassembly was misaligned.
+`WIN200.BIN` is `MZ`, `cblp=0100 cp=01BA hdr_paras=0020 minalloc=0 maxalloc=0
+ss=000B sp=0080 cs=0000 ip=0000 lfarlc=0040` with `crlc=0040` (64 relocations)
+and an image of 225536 bytes, and the module **relocates itself in 0x6D-byte
+blocks** between `cs:0x0034` and `cs:0x9848` (`rep movsb` at ip 0x8436 and
+0x8444), so a captured `CS:IP` does not map onto the file as `512 + ip`.
+
+The real instructions at the stop are
+
+    8731  2e 8e 06 c4 7c     mov es, cs:[7CC4]      ; not "mov es, ax"
+    8736  26 83 3e 0a 00 00  cmpw $0x0000, es:[0x000A]
+    873E  26 8b 1e 08 00     mov  bx, es:[0x0008]
+    8748  2e 2b 06 c8 7c     sub  ax, cs:[7CC8]
+
+i.e. a **module/PSP-style traversal** through a segment the kernel computed
+itself a few dozen instructions earlier:
+
+    845E  8c d0              mov ax, ss
+    8460  03 c3              add ax, bx          ; bx = sp >> 4
+    8462  2e a3 c4 7c        mov cs:[7CC4], ax   ; segment just above its stack
+
+So the fault is not "DOS handed Windows a zero".  `cs:[7CC4]` is derived from
+`SS:SP` alone.
+
+### ... and it is not deterministic
+
+The same image stops at 2824, 3938 or 3950 steps depending on the run, and with
+**any** tracing enabled (`UEFIDOS_TRACE_STEPS`, `UEFIDOS_WATCH_LOWMEM`,
+`UEFIDOS_TRACE_INTS`/`MEM`/`EXEC`/`READ`) it does not stop at all: it runs on
+into the splash-logo drawing loop (segment `0E07`, `ES=B800`, `DS=0E07`, the
+bit-expansion loop at `0E07:0035`-`0E07:0045`) until the step limit:
+
+    [halt] instruction limit reached at 0E07:0035 ss:sp=0D00:103C ax=FFFF exit=00FF
+
+`UEFIDOS_TICK_STEPS=1000000` (no guest timer tick before a million steps) does
+not prevent the earlier stop either, so it is not the timer interrupt.  What is
+left is a wall-clock-dependent path -- the emulator paces its timer against
+`plat_ticks_ms()`, and Windows 2.x branches on how much time its own init took.
+That is the next thing to measure: a knob that freezes the guest-visible clock
+(a fixed tick count per instruction) and a run with the mouse/keyboard status
+reads pinned, so the same 2.03 image takes the same path twice.
+
+### The picture got bigger: a real bug in the GOP mode choice
+
+`plat_video_gfx_begin()` in `src/uefi/efi_plat.c` searched the firmware's mode
+list for the best mode for the guest's picture -- and then **threw the result
+away**: the chosen index sat in a local `best` that nothing read (the compiler
+said so: `variable 'best' set but not used`), so the guest was painted in
+whatever mode the firmware happened to be in for its boot logo.  The search also
+ranked modes by pixel count, which is the wrong question.
+
+It now ranks by **how many whole guest pixels fit across the panel** (capped at
+4x, because past that the picture gains nothing and the fill rate falls), takes
+the smallest mode at that scale, and actually calls `SetMode()`, refreshing the
+cached `Mode->Info` afterwards.  Measured on the same QEMU + OVMF USB boot with
+Windows 1.01's CGA driver (`guest=640x200`):
+
+    1.8.0:  gfx: linear framebuffer BGR guest=00000280000000c8 panel=0000050000000320
+            1280x800 -- the firmware's own mode, 640x200 picture stretched 1x wide
+    1.8.1:  gfx: linear framebuffer BGR guest=00000280000000c8 panel=00000a00000005a0
+            2560x1440 -- 4x horizontal, the full panel width
+
+`build/gfx_shot1.png` is the 1.01 Executive at that size: File/View/Special menu
+bar, drives A/C/D, the C:\W101 listing in two columns, the pointer.  On a
+1920-wide panel the same rule lands 640x200 at 1920x1080 (3x); it never picks a
+mode smaller than the guest picture, and a 320x200 game stops at 4x instead of
+being blown up to 6x.
+
+Two more build-quality fixes came with it, because the firmware build had
+started printing warnings: the unused `wait_ms`/`guard_key` in the keyboard
+guard, a pointer-to-`unsigned long long` cast in `src/api/native.c` that is
+wrong on IA32 (`uintptr_t` now), a sign-compare in the console 80x25 setup loop,
+a stray `/*` inside a comment, and the `ring_dump` stub.  `build/build_efi.ps1`
+and the host build are both **warning-free** now, and `--itest` still reports
+96 passed / 0 failed.

@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.8.0**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+Version **1.8.1**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
 single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU +
 OVMF boot smoke tests for x86_64 and IA32, the release image booting to a live
@@ -22,6 +22,19 @@ coprocessor announced**, and Windows 1.01 booting from a **USB stick** under
 QEMU + OVMF with a working pointer ([`docs/windows1x.md`](docs/windows1x.md),
 Rounds 38 and 39).  Two checks still skip unless real MS-DOS 2.11 / MS-DOS 5
 floppy images are supplied (`UEFIDOS_DOS211`, `UEFIDOS_DOS5`).
+
+1.8.1 is the stick round.  The USB-stick tree now carries **all three**
+Windows installations side by side (`W101`, `W104`, `W203`) plus `TOOLS\` and a
+`README.TXT` that also answers "the firmware will not offer the stick" --
+Secure Boot, CSM-only mode, the legacy boot entry, Fast Boot, a front-panel
+USB3 port, and the firmware that insists on partition type `EFh`.  The batch
+files on the stick are straight-line because the shell's batch runner has no
+`IF` and skips `GOTO`.  For Windows **2.03** this round corrected its own
+diagnosis: the stop is not "DOS returned a zero segment" but a module traversal
+through `cs:[7CC4]`, a segment the kernel computes from `SS:SP` itself, and it
+is **nondeterministic** (2824 / 3938 / 3950 steps, and it does not stop at all
+when tracing is on), so the remaining lead is the wall-clock-paced timer, not an
+instruction.  Details: [`docs/windows1x.md`](docs/windows1x.md), Round 40.
 
 1.8.0 is the floating-point round: `D8h..DFh` used to be decoded and discarded
 ("an 8086 without a coprocessor"); the emulator now carries a complete software

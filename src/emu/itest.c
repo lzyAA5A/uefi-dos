@@ -703,7 +703,7 @@ int ifuzz_run(int verbose)
                     if (!g_bad_first[op]) {
                         g_bad_first[op] = 1;
                         if (verbose) {
-                            char line[32];
+                            char line[64];
                             snprintf(line, sizeof(line), "  rejected 8086 op %02X (prefix %02X)\n",
                                      (unsigned)op, (unsigned)prefixes[pre]);
                             plat_puts(line);

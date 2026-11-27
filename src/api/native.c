@@ -113,7 +113,10 @@ int native_run_image(const u8 *img, u32 size, const char *args, int *exit_code)
      * `base`.  64-bit images only ever carry DIR64 for data (RIP-relative code
      * needs none), 32-bit ones carry HIGHLOW. */
     if (reloc_rva && reloc_size && reloc_rva < size_of_image) {
-        u64 delta = (u64)(unsigned long long)base - image_base;
+        /* uintptr_t, not "unsigned long long": the IA32 build has 4-byte
+           pointers, and casting one straight to a 64-bit integer is the
+           -Wpointer-to-int-cast warning this used to raise. */
+        u64 delta = (u64)(uintptr_t)base - image_base;
         u32 off = 0;
         while (off + 8 <= reloc_size) {
             const u8 *blk = base + reloc_rva + off;

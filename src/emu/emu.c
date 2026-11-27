@@ -758,6 +758,10 @@ int emu_kbd_get_full(Emu *e, int *scan, int *ascii)
 #else
     const u32 wait_ms = 3000u;
     const int guard_key = 0x1B;
+    /* Both are only read by the host-only block below; on the firmware build
+       they exist just to keep this function's shape identical. */
+    (void)wait_ms;
+    (void)guard_key;
 #endif
     /* repaint before blocking: a program that has just finished drawing and
      * then waits for a key would otherwise leave a half-painted frame on
@@ -769,7 +773,7 @@ int emu_kbd_get_full(Emu *e, int *scan, int *ascii)
     while (!kbd_pop(e, scan, ascii)) {
         emu_kbd_pump(e);
 #ifdef UEFIDOS_HOST
-        if ((u32)(plat_ticks_ms() - start) > wait_ms) {
+        if ((u32)(plat_ticks_ms() - start) > (u32)wait_ms) {
             int k = guard_key;
             if (k & 0x100) { *scan = k & 0xFF; *ascii = 0; }
             else { *ascii = k & 0xFF; *scan = kbd_scan_of(*ascii); }
@@ -5505,6 +5509,7 @@ static void ring_dump(Emu *e, FILE *f)
     }
 }
 #else
+static void ring_dump(Emu *e, void *fp) __attribute__((unused));
 static void ring_dump(Emu *e, void *fp) { (void)e; (void)fp; }
 #endif
 

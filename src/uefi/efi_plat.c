@@ -118,8 +118,8 @@ static void ps2_mouse_arm(void)
 }
 
 /* Collect whole 3-byte packets.  Returns 1 when at least one packet was
- * consumed; the accumulated delta goes into *dx/*dy and the button state into
- * *buttons (bit0 left, bit1 right, bit2 middle). */
+ * consumed; the accumulated delta goes into *dx and *dy and the button state
+ * into *buttons (bit0 left, bit1 right, bit2 middle). */
 static int ps2_mouse_read(int *dx, int *dy, int *buttons)
 {
     int got = 0, rx = 0, ry = 0, btn = -1;
@@ -297,10 +297,10 @@ int plat_init(void *sys_table, void *image_handle)
      * 80x50) leaves the guest screen floating above a separate console region. */
     if (gOut && gOut->Mode) {
         UINTN best = (UINTN)-1;
-        for (UINTN i = 0; i < gOut->Mode->MaxMode; i++) {
+        for (INT32 i = 0; i < gOut->Mode->MaxMode; i++) {
             UINTN cols = 0, rows = 0;
-            if (gOut->QueryMode(gOut, i, &cols, &rows) != EFI_SUCCESS) continue;
-            if (cols == 80 && rows == 25) { best = i; break; }
+            if (gOut->QueryMode(gOut, (UINTN)i, &cols, &rows) != EFI_SUCCESS) continue;
+            if (cols == 80 && rows == 25) { best = (UINTN)i; break; }
         }
         if (best != (UINTN)-1) gOut->SetMode(gOut, best);
         else if (gOut->Mode->CursorRow >= 25) gOut->SetCursorPosition(gOut, 0, 0);
@@ -684,6 +684,7 @@ int plat_video_gfx_begin(int w, int h)
 
     UINT32 best = 0xFFFFFFFFu;
     UINT32 best_px = 0xFFFFFFFFu;
+    UINT32 best_sc = 0;
     for (UINT32 m = 0; m < g_gop->Mode->MaxMode; m++) {
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
         UINTN size = 0;
@@ -691,7 +692,29 @@ int plat_video_gfx_begin(int w, int h)
         if (info->PixelFormat == PixelBltOnly) continue;
         if (info->HorizontalResolution < (UINT32)w || info->VerticalResolution < (UINT32)h) continue;
         UINT32 px = info->HorizontalResolution * info->VerticalResolution;
-        if (px < best_px) { best_px = px; best = m; }
+        /* Rank by how many whole guest pixels fit across the panel (capped at
+           4x: past that the picture gains nothing and the fill rate falls), and
+           among equal scales take the smallest mode.  A 640x200 CGA screen is
+           therefore 2x on a 1280-wide panel and 3x on a 1920-wide one instead of
+           sitting in the boot logo's mode at 1x. */
+        UINT32 sc = info->HorizontalResolution / (UINT32)w;
+        if (sc > 4) sc = 4;
+        if (sc > best_sc || (sc == best_sc && px < best_px)) { best_sc = sc; best_px = px; best = m; }
+    }
+    /* The search above used to be thrown away: the picture stayed in whatever
+     * mode the firmware had set for its own boot logo.  Switch to the mode that
+     * was chosen, then refresh the cached mode information (SetMode leaves
+     * Mode->Info pointing at firmware-owned memory that some implementations
+     * rewrite). */
+    if (best != 0xFFFFFFFFu && g_gop->Mode->Mode != best) {
+        if (!EFI_ERROR(g_gop->SetMode(g_gop, best))) {
+            UINTN size = 0;
+            EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
+            if (!EFI_ERROR(g_gop->QueryMode(g_gop, best, &size, &info)) && info) {
+                g_gop->Mode->Info = info;
+                g_gop->Mode->Mode = best;
+            }
+        }
     }
     if (!g_gop->Mode->Info) return 1;
 
