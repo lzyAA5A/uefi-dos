@@ -158,6 +158,66 @@ static int fpu_reported(void)
     }
     return cached;
 }
+
+/* Which machine the ROM claims to be.  Two places describe it and they have to
+ * agree: the model byte at F000:FFFE (FFh PC, FEh XT, FBh XT-286, FCh AT) plus
+ * the ROM date at F000:FFF5, and bits 14-15 of the BIOS equipment word (00b
+ * "8086/8088 based", 01b "80286 based", 10b "80386 based").
+ *
+ * The old code published an IBM XT identity -- but this emulator runs 80286
+ * protected mode, the 386 instruction set and DPMI, so a program that trusts
+ * those bytes is being told about hardware it is not running on.  Windows 2.x
+ * reads them during its real-mode init.  Default is a 286 AT; UEFIDOS_MACHINE
+ * (host only) picks another identity for A/B runs. */
+#define MACHINE_KIND_XT   0
+#define MACHINE_KIND_AT   1
+#define MACHINE_KIND_386  2
+
+static int machine_kind(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        cached = MACHINE_KIND_AT;
+#ifdef UEFIDOS_HOST
+        {
+            const char *s = getenv("UEFIDOS_MACHINE");
+            if (s && *s) {
+                if (s[0] == 'x' || s[0] == 'X' || s[0] == '8') cached = MACHINE_KIND_XT;
+                else if (s[0] == '3') cached = MACHINE_KIND_386;
+                else cached = MACHINE_KIND_AT;
+            }
+        }
+#endif
+    }
+    return cached;
+}
+
+static const char *machine_rom_date(void)
+{
+    /* IBM PC 11/08/82, IBM PC/AT 11/15/85 (a 386 box reports the AT date too,
+     * which is what every clone BIOS did). */
+    return machine_kind() == MACHINE_KIND_XT ? "11/08/82" : "11/15/85";
+}
+
+static u8 machine_model_byte(void)
+{
+    switch (machine_kind()) {
+    case MACHINE_KIND_XT:  return 0xFE;   /* IBM PC/XT */
+    case MACHINE_KIND_386: return 0xF8;   /* PS/2 model 80 style 386 */
+    default:               return 0xFC;   /* IBM PC/AT (80286) */
+    }
+}
+
+/* bits 14-15 of the equipment word: the CPU family the machine is built on */
+static u16 machine_equip_model_bits(void)
+{
+    switch (machine_kind()) {
+    case MACHINE_KIND_XT:  return 0x0000;  /* 8086/8088 based */
+    case MACHINE_KIND_386: return 0x8000;  /* 80386 based   */
+    default:               return 0x4000;  /* 80286 based   */
+    }
+}
+
 static u8 g_bus_read;       /* 23Eh: value the next read of it returns */
 static u8 g_bus_ctrl;       /* 23Fh: config register (nonzero = enabled) */
 static int g_bus_dx, g_bus_dy;  /* motion counters the card reports (signed 8 bit) */
@@ -4941,10 +5001,15 @@ static void install_ivt(Emu *e)
      * rest of our ROM area (trampolines at F000:E000+, the IRET stub at FFE0,
      * the magic marker at FFF0) is left alone. */
     {
-        static const char rom_date[8] = {'1', '1', '/', '0', '8', '/', '8', '2'};
+        /* Which machine we claim to be.  The emulator executes 80286 protected
+         * mode and the 386 instruction set, so claiming an 8088 XT (what the
+         * first of those two bytes described) is a lie that a 286-only program
+         * can act on: Windows 2.x reads this byte and the ROM date to decide
+         * what it is running on.  MACHINE_KIND_AT is a real 80286 AT. */
+        const char *rd = machine_rom_date();
         for (int i = 0; i < 8; i++)
-            emu_wb(e, MAGIC_SEG, (u16)(0xFFF5 + i), (u8)rom_date[i]);
-        emu_wb(e, MAGIC_SEG, 0xFFFE, 0xFE);   /* model byte: IBM XT */
+            emu_wb(e, MAGIC_SEG, (u16)(0xFFF5 + i), (u8)rd[i]);
+        emu_wb(e, MAGIC_SEG, 0xFFFE, (u8)machine_model_byte());
         emu_wb(e, MAGIC_SEG, 0xFFFF, 0x00);
     }
     /* ---- BIOS data area --------------------------------------------- */
@@ -4954,10 +5019,12 @@ static void install_ivt(Emu *e)
      * the mono buffer at B000h.  Fill in what a POST leaves behind on a VGA
      * machine, so mode 3 / 13h look like a real card. */
     /* equipment word: bit 0 floppy, bit 1 math coprocessor (the x87 is
-     * emulated, see step_fpu), bits 4-5 = 10b (80x25 colour).  A machine
+     * emulated, see step_fpu), bits 4-5 = 10b (80x25 colour), bits 14-15 = the
+     * CPU family the machine claims (see machine_kind: 01b = 80286).  A machine
      * with UEFIDOS_NOFPU set claims no coprocessor, which is how Windows
      * 2.x and other "is there an 8087?" probes are tested. */
-    emu_ww(e, 0x40, 0x10, fpu_reported() ? 0x0023 : 0x0021);
+    emu_ww(e, 0x40, 0x10, (u16)(machine_equip_model_bits() |
+                                (fpu_reported() ? 0x0023 : 0x0021)));
     emu_wb(e, 0x40, 0x12, 0x00);     /* equipment byte 2: no mouse/joystick */
     emu_ww(e, 0x40, 0x13, 640);      /* KB of conventional memory (word 0x13-0x14:
                                       * the old code zeroed 0x14 as "equipment byte
@@ -5637,6 +5704,16 @@ static void cs_trap(Emu *e, u64 steps)
     for (int i = -4; i < 16; i++) {
         u16 off = (u16)(e->sp + i * 2);
         fprintf(f, " %04X:%04X=%04X", e->ss, off, emu_rw(e, e->ss, off));
+    }
+    fprintf(f, "\n");
+    /* The interrupt table is the usual explanation for a wild jump: either a
+     * handler was installed with a garbage far pointer, or the table itself
+     * was overwritten by a stray write.  Both are visible here. */
+    fprintf(f, "IVT:");
+    for (int v = 0; v < 0x30; v++) {
+        u16 off = emu_rw(e, 0, (u16)(v * 4));
+        u16 seg = emu_rw(e, 0, (u16)(v * 4 + 2));
+        fprintf(f, " %02X=%04X:%04X", v, seg, off);
     }
     fprintf(f, "\n");
     ring_dump(e, f);

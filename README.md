@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.9.0**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+Version **1.9.1**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
 single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU +
 OVMF boot smoke tests for x86_64 and IA32, the release image booting to a live
@@ -22,6 +22,22 @@ coprocessor announced**, and Windows 1.01 booting from a **USB stick** under
 QEMU + OVMF with a working pointer ([`docs/windows1x.md`](docs/windows1x.md),
 Rounds 38 and 39).  Two checks still skip unless real MS-DOS 2.11 / MS-DOS 5
 floppy images are supplied (`UEFIDOS_DOS211`, `UEFIDOS_DOS5`).
+
+1.9.1 makes the machine the ROM describes match the machine the emulator runs.
+Three bytes told every old program it was on an **8088 XT** (`F000:FFFE` = `FEh`,
+ROM date `11/08/82`, equipment-word bits 14-15 = `00b`) while the emulator was
+executing 80286 protected mode, the 386 instruction set and DPMI.  They are now
+generated from one place, `machine_kind()`: a **286 AT** by default (`FCh`,
+`11/15/85`, bits 14-15 = `01b`, equipment word `4023h`), `UEFIDOS_MACHINE=xt`
+or `=386` to pick another identity.  Windows 1.01 (desktop **and pointer**) and
+1.04 still reach their desktops under the AT identity.
+
+The same round pins down Windows 2.03's first fault exactly: at `0E68:8733` the
+guest executes `mov es,ax` with `AX=0` and then `rep movsb` copies 64 bytes of
+WIN200.BIN's NE header over the interrupt vector table at `0000:0000`
+(`[lowmem-hit] IVT[0]=4E450501 after step 2831`).  Reproducible on every run,
+independent of the timer period, and now visible in one line because `cs_trap`
+dumps the IVT.
 
 1.8.1 is the stick round.  The USB-stick tree now carries **all three**
 Windows installations side by side (`W101`, `W104`, `W203`) plus `TOOLS\` and a

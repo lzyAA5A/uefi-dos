@@ -2,7 +2,9 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.8.1).** Windows **1.01** runs its MS-DOS
+**Where this line of work stands (1.9.1).** The machine UEFI-DOS pretends to be
+is now consistent with the machine it emulates: an **80286 AT**, not an 8088 XT
+(Round 42).  Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
 its desktop, and since 1.5.1 its **mouse works**: the pointer appears, follows
 the host and a double-click on a CALENDAR.EXE entry starts the application
@@ -4805,3 +4807,141 @@ The i8042 fallback from earlier rounds is unchanged: if a protocol exists but
 never reports a state, the loader arms the 8046 [sic] controller by hand and
 reads 3-byte packets itself.  That path only helps when the firmware *does*
 route the device to the controller.
+
+## Round 42 -- the machine we claim to be, and Windows 2.03's zero segment (1.9.1)
+
+Two questions ran through this round: *which machine does the ROM say it is*, and
+*what exactly happens in the 1150 instructions before Windows 2.03 dies*.
+
+### The ROM was describing an 8088 XT while the emulator ran a 286
+
+Three bytes describe the machine to a program that predates CPUID, and UEFI-DOS
+published a consistent lie:
+
+| what | where | old value | meant |
+| --- | --- | --- | --- |
+| model byte | F000:FFFE | `FEh` | IBM PC/XT |
+| ROM date | F000:FFF5 | `11/08/82` | original IBM PC BIOS |
+| equipment word bits 14-15 | 0040:0010 | `00b` | "8086/8088 based" |
+
+Meanwhile the emulator executes 80286 protected mode, the 386 instruction set,
+DPMI and a software x87.  Windows 2.x reads the model byte and the ROM date
+during its real-mode init, and DOS-era installers read them to decide whether
+286-only paths are allowed at all.
+
+`machine_kind()` (src/emu/emu.c, next to `fpu_reported()`) now picks the
+identity and the three places are generated from it, so they cannot disagree:
+an **80286 AT** by default (`FCh`, `11/15/85`, bits 14-15 = `01b`),
+`UEFIDOS_MACHINE=xt` for the old 8088 XT identity and `UEFIDOS_MACHINE=386` for a
+386 box (`F8h`, AT ROM date, bits 14-15 = `10b`).  The equipment word is now
+`0x4023` (286 based, floppy, coprocessor, 80x25 colour) instead of `0x0023`, and
+INT 11h/INT 12h read it back out of the BDA, so the reported CPU family follows
+automatically.
+
+Verified with the AT identity in place:
+
+- Windows **1.01**: MS-DOS Executive, file list, and the **pointer** drawn in the
+  middle of the client area (frame `build/at101_last.png`).
+- Windows **1.04**: full Executive desktop, `C:\WINDOWS` listing, menu bar
+  (frame `build/at104_12.png`).
+- `hosttest --itest`: 96 passed, 0 failed.
+- Windows 2.03: **unchanged** -- the fault below is not a machine-identity
+  problem, so it is not fixed by this.
+
+### Windows 2.03: the exact instruction that destroys the interrupt table
+
+The old note said the fault was nondeterministic ("2824 / 3938 / 3950 steps").
+It is not.  Nine runs -- three on their own pristine copies of `w203full.img`,
+three more fresh copies, and the same image twice in a row -- printed the same
+line every time:
+
+```
+[halt] segment trap at FF01:28C3 ss:sp=0E68:6574 ax=0C00 exit=00FE
+```
+
+and forcing a fixed timer period changes nothing (`UEFIDOS_TICK_STEPS` =
+1000000 / 200000 / 16384 all trap identically), so this is a logic difference,
+not a race.  The earlier variation came from comparing runs made with tracing and
+the low-memory watch switched on, and from images that previous runs had already
+written to.
+
+`UEFIDOS_WATCH_LOWMEM=1` names the culprit in one line:
+
+```
+[lowmem-hit] IVT[0]=4E450501 after step 2831 at 0E68:873E
+```
+
+`4E 45 05 01` is `N E 05 01` -- the first four bytes of WIN200.BIN's NE header.
+The instruction ring (`UEFIDOS_RINGLOG=1`) shows how it got to linear address
+zero:
+
+```
+0E68:8730  2B 7E FE     sub  di, [bp-2]
+0E68:8733  8E C0        mov  es, ax          ; AX = 0000
+0E68:8735  33 FF        xor  di, di
+0E68:8737  FC           cld
+0E68:8738  B9 40 00     mov  cx, 0040h
+0E68:873B  F3 A4        rep  movsb           ; DS:0E3A:0000 -> 0000:0000, 64 bytes
+```
+
+64 bytes of module header land on top of the interrupt vector table.  Everything
+after that is fallout: WIN.COM's teardown stub looks for the `LOGO` signature at
+`0E07:0000`, calls the hook at `0E07:0007`, the hook sets `ES=0`, copies the
+equipment word from `DS:0019` into `0000:0410`, then executes `int 10h` with
+`AX=0003` (restore text mode) -- and the vector it lands on is whatever the copies
+left behind.  `cs_trap` now dumps the table, which is how the fallout looks:
+
+```
+IVT: 00=0000:454E 01=0000:007B ... 10=A8D2:006E 11=A8D2:C140 ... 21=FF01:28C3 ...
+```
+
+`INT 10h` = `A8D2:006E`, `INT 21h` = `FF01:28C3`, and the "segment trap" is simply
+the first jump into that garbage.
+
+### Where the zero comes from
+
+The code at `0E68:8729` pushes three words and far-calls the routine at
+`0E68:5CB2`:
+
+```
+push ax      ; 0000
+push ax      ; 0000
+push di      ; 03D3
+push cs
+call 5CB2
+; returns to 0E68:8730 -- which immediately does "mov es, ax"
+```
+
+so the callee is expected to hand back a *segment* in AX.  Inside it
+(`UEFIDOS_TRACE_WINDOW=0E68:5CA0-5CE0`):
+
+```
+0E68:5CB9  33 D2        xor  dx, dx
+0E68:5CBB  8B 46 0A     mov  ax, [bp+0A]     ; AX = 0000, the argument itself
+0E68:5CBE  8D 5E 06     lea  bx, [bp+06]
+0E68:5CC1  E8 1E FF     call 5BE2
+0E68:5CC4  E8 D7 EE     call 4B9E
+0E68:5CC7  E8 D5 FC     call 599F            ; dec word [di+18h] -- a refcount
+0E68:5CCA  5F           pop  di
+0E68:5CCB  5E           pop  si
+0E68:5CCC  8D 66 FE     lea  sp, [bp-2]
+0E68:5CCF  1F           pop  ds
+0E68:5CD0  5D           pop  bp
+0E68:5CD1  4D           dec  bp
+0E68:5CD2  CA 06 00     retf 6
+```
+
+AX is never written on the way out, so the caller gets back the zero it passed in
+and stores the NE header at segment zero.  WIN200.BIN made only these DOS calls
+before that point (`i21` ring: `AH=30, 52, 35, 25, 25, 43, 3D, 57, 3E`, plus
+`AH=4B` from WIN.COM at `0D00:070E`), i.e. **no AH=48/4A allocation and no AH=3F
+read** -- it asked for the list of lists (AH=52) and walks the arena itself.  So
+the three remaining candidates are the list-of-lists contents we publish, the MCB
+chain the walk sees, and the 286-specific branch this routine takes; all three
+are reachable from here, and none of them is a wild jump any more.
+
+### Tooling added
+
+`cs_trap` (host builds) now writes an `IVT:` line with vectors `00`-`2F` before
+the instruction ring, so a jump into nowhere names the handler that sent it there
+instead of only the address it arrived at.
