@@ -53,6 +53,21 @@ static int g_dev_dy_now[MOUSE_MAX_DEV + MOUSE_MAX_DEV];
  * clamping.  When a machine's pointer misbehaves this is the number that says
  * whether the fault is in the firmware's report or in our scaling. */
 static int g_dev_raw_dx[MOUSE_MAX_DEV], g_dev_raw_dy[MOUSE_MAX_DEV];
+/* Per-device button state, and whether a device has ever PROVEN itself to be
+ * real input (it moved, or its own buttons changed).  Buttons used to be OR'd
+ * across every handle the firmware published, and one phantom handle -- a stub
+ * that answers "left button held" for ever, or a touchpad whose buttons never
+ * change -- then froze that OR at a constant value: the guest never saw a button
+ * event at all, while movement kept working because movement takes the
+ * winner-take-one path.  "The pointer moves but clicking does nothing" is
+ * exactly what that looks like.  A device is believed only once it has moved or
+ * changed a button; -1 means "no sample yet", so the first all-up sample is not
+ * mistaken for a change. */
+static int g_dev_btn[MOUSE_MAX_DEV + MOUSE_MAX_DEV];
+static int g_dev_btn_live[MOUSE_MAX_DEV + MOUSE_MAX_DEV];
+static int g_dev_btn_changes[MOUSE_MAX_DEV + MOUSE_MAX_DEV];
+static int g_dev_btn_started;
+static int live_buttons(int *live_count);
 static int g_ps2_packets;        /* packets the i8042 fallback decoded */
 static int g_ps2_armed;          /* forward: defined again next to PS/2 code */
 #define DEV_STUCK_REPEATS 128    /* identical reports in a row -> ignore */
@@ -124,7 +139,11 @@ static void mouse_reset_all(void)
         g_dev_moves[i] = 0;
         g_dev_dx_now[i] = 0;
         g_dev_dy_now[i] = 0;
+        g_dev_btn[i] = -1;
+        g_dev_btn_live[i] = 0;
+        g_dev_btn_changes[i] = 0;
     }
+    g_dev_btn_started = 1;
     g_mouse_last_buttons = -1;
 }
 
@@ -235,6 +254,11 @@ void plat_mouse_detail(void)
         plat_puts(",");
         put_int(g_dev_raw_dy[i]);
         if (g_dev_same[i] >= DEV_STUCK_REPEATS) plat_puts("  [stuck, ignored]");
+        plat_puts("  btn=");
+        put_int(g_dev_btn[i]);
+        plat_puts(" chg=");
+        put_int(g_dev_btn_changes[i]);
+        plat_puts(g_dev_btn_live[i] ? " [live]" : " [not proven]");
         plat_puts("\n");
     }
     for (i = 0; i < g_abs_used; i++) {
@@ -246,6 +270,11 @@ void plat_mouse_detail(void)
         put_int(g_dev_dx_now[MOUSE_MAX_DEV + i]);
         plat_puts(",");
         put_int(g_dev_dy_now[MOUSE_MAX_DEV + i]);
+        plat_puts("  btn=");
+        put_int(g_dev_btn[MOUSE_MAX_DEV + i]);
+        plat_puts(" chg=");
+        put_int(g_dev_btn_changes[MOUSE_MAX_DEV + i]);
+        plat_puts(g_dev_btn_live[MOUSE_MAX_DEV + i] ? " [live]" : " [not proven]");
         if (g_abs_list[i] && g_abs_list[i]->Mode) {
             plat_puts("  range ");
             put_int((int)g_abs_list[i]->Mode->MinimumX);
@@ -259,6 +288,16 @@ void plat_mouse_detail(void)
         plat_puts("\n");
     }
     if (!g_mouse_used && !g_abs_used) plat_puts("  (no device)\n");
+    {
+        int live = 0, v = live_buttons(&live);
+        plat_puts("  buttons: reported=");
+        put_int(v);
+        plat_puts(" from ");
+        put_int(live);
+        plat_puts(" proven device(s)");
+        if (!live) plat_puts(" -- no device has ever moved or changed a button");
+        plat_puts("\n");
+    }
     plat_puts("  ps/2 aux: ");
     if (!g_ps2_armed) plat_puts("not armed");
     else if (!g_ps2_packets) plat_puts("armed, no packet yet");
@@ -377,6 +416,50 @@ static int ps2_mouse_read(int *dx, int *dy, int *buttons)
     return 1;
 }
 
+/* Record one sample of a device's buttons.  A change is only a change against
+ * the same device's own previous sample, so a handle that starts out reporting
+ * "left held" and keeps saying so never looks like an edge -- and it never
+ * becomes "live", so it cannot mask the device the user is actually holding. */
+static void dev_buttons(int slot, int b)
+{
+    if (slot < 0 || slot >= MOUSE_MAX_DEV + MOUSE_MAX_DEV) return;
+    if (!g_dev_btn_started) {
+        g_dev_btn_started = 1;
+        for (int i = 0; i < MOUSE_MAX_DEV + MOUSE_MAX_DEV; i++) g_dev_btn[i] = -1;
+    }
+    if (g_dev_btn[slot] < 0) {
+        g_dev_btn[slot] = b;
+        return;
+    }
+    if (g_dev_btn[slot] != b) {
+        g_dev_btn[slot] = b;
+        g_dev_btn_changes[slot]++;
+        g_dev_btn_live[slot] = 1;
+    }
+}
+
+/* The buttons the guest is told about: only devices that have proven themselves
+ * real input may speak.  With nothing proven yet the answer is "no buttons",
+ * which is what an unplugged (or phantom) device deserves. */
+static int live_buttons(int *live_count)
+{
+    int i, v = 0, n = 0;
+    if (!g_dev_btn_started) return 0;
+    for (i = 0; i < g_mouse_used; i++) {
+        if (!g_dev_btn_live[i]) continue;
+        v |= g_dev_btn[i] < 0 ? 0 : g_dev_btn[i];
+        n++;
+    }
+    for (i = 0; i < g_abs_used; i++) {
+        int s = MOUSE_MAX_DEV + i;
+        if (!g_dev_btn_live[s]) continue;
+        v |= g_dev_btn[s] < 0 ? 0 : g_dev_btn[s];
+        n++;
+    }
+    if (live_count) *live_count = n;
+    return v;
+}
+
 int plat_mouse_poll(int *dx, int *dy, int *buttons)
 {
     EFI_SIMPLE_POINTER_STATE st;
@@ -386,7 +469,7 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
     int b, i;
     if (!dx || !dy || !buttons) return 0;
     if (plat_mouse_present()) {
-        int btns = g_mouse_last_buttons < 0 ? 0 : g_mouse_last_buttons;
+        int btns;
         int changed;
         int best = -1, bestmag = 0;
         int rdx = 0, rdy = 0;
@@ -408,7 +491,7 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
         for (i = 0; i < g_mouse_used; i++) {
             int vx, vy, mag;
             if (g_mouse_list[i]->GetState(g_mouse_list[i], &st) != EFI_SUCCESS) continue;
-            btns |= (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
+            dev_buttons(i, (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0));
             if (!st.RelativeMovementX && !st.RelativeMovementY) {
                 g_dev_same[i] = 0;
                 g_dev_dx_now[i] = 0;
@@ -417,6 +500,7 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
             }
             g_dev_raw_dx[i] = st.RelativeMovementX;
             g_dev_raw_dy[i] = st.RelativeMovementY;
+            g_dev_btn_live[i] = 1;      /* it moved: this handle is real input */
             vx = half_count(st.RelativeMovementX);
             vy = half_count(st.RelativeMovementY);
             /* A handle that answers with the very same counts for a third of a
@@ -487,7 +571,7 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
                 spanx = maxx - minx + 1;
                 spany = maxy - miny + 1;
                 if (spanx < 64 || spany < 64) continue;
-                btns |= (int)(ast.ActiveButtons & 3u);
+                dev_buttons(MOUSE_MAX_DEV + i, (int)(ast.ActiveButtons & 3u));
                 if (!g_abs_have_last[i]) {
                     g_abs_have_last[i] = 1;
                     g_abs_last_x[i] = ast.CurrentX;
@@ -534,6 +618,7 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
         /* -1 means "no sample yet": compare against 0 so that the first poll
          * with the buttons up is not reported as a button change (that phantom
          * event made a silent device look like "the buttons answer"). */
+        btns = live_buttons(NULL);
         changed = (btns != (g_mouse_last_buttons < 0 ? 0 : g_mouse_last_buttons));
         g_mouse_last_buttons = btns;
         *buttons = btns;

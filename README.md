@@ -29,6 +29,23 @@ before our halving and clamping), the device table printed both before and after
 the ten-second probe, a `ps/2 aux:` line, and a verdict that says "counts arrive
 on one axis only" out loud.
 
+1.10.3 is the same click, one layer further out: the host harness could
+double-click the Calculator open, but the laptop still could not click with the
+wired mouse **or** the touchpad, while the pointer travelled perfectly.  Movement
+working is what a button-only fault looks like from the outside, and the guest
+half was already proven good, so the loss was at the firmware boundary.  Buttons
+used to be OR'd across every pointing handle the firmware publishes, and a laptop
+publishes several -- the USB mouse, the I2C touchpad, and often a stub that
+answers for ever with the same content.  One such handle reporting "left button
+held" froze that OR at a constant value, so the guest never again saw a button
+*change* from any device, while motion kept working because motion takes the
+winner-take-one path and never looks at `btns`.  A device may now speak about
+buttons only once it has proven itself real input -- it moved, or its own buttons
+changed against its own previous sample -- and `MOUSE` ends with a verdict you can
+read off the screen: `mouse: buttons seen during the probe: N change(s)`.  Zero
+there means the firmware is hiding the buttons from every application, and no
+guest can fix that.
+
 1.10.2 is the click.  With movement fixed the pointer travelled normally but
 a button did nothing at all: no selection, no menu, no double-click.  The
 emulated bus-mouse card was putting the button in the packet's button bits and
@@ -77,7 +94,7 @@ sieve to 65536, insertion sort 1024, CRC32 and a 32x32 matrix multiply.
 images, so it needs `BOOTIA32.EFI`.  `TYPE B*.TXT` prints the result (TYPE now
 accepts wildcards, because a batch file cannot know today's date).
 
-Version **1.10.2**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+Version **1.10.3**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
 single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU +
 OVMF boot smoke tests for x86_64 and IA32, the release image booting to a live

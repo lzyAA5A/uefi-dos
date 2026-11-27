@@ -805,6 +805,7 @@ static int cmd_mouse(const char *rest)
     u64 t0, next;
     int samples = 0, ev = 0, moved = 0, b = 0, secs = 10, tot_ev = 0;
     int sx = 0, sy = 0, tot_moved = 0, saw_x = 0, saw_y = 0;
+    int btn_seen = 0, btn_changes = 0, btn_last = -1;
     (void)rest;
     plat_mouse_report();
     plat_mouse_detail();
@@ -830,6 +831,12 @@ static int cmd_mouse(const char *rest)
             sx += dx;
             sy += dy;
             b = btn;
+            if (btn_last < 0) btn_last = btn;
+            else if (btn != btn_last) {
+                btn_last = btn;
+                btn_changes++;
+            }
+            if (btn) btn_seen = 1;
         }
         if (plat_ticks_ms() >= next) {
             plat_puts("  ");
@@ -856,12 +863,33 @@ static int cmd_mouse(const char *rest)
     /* The table again, now that the probe has run: moves/last/raw per device
      * say which handle actually carried the hand, and in which axes. */
     plat_mouse_detail();
+    /* Buttons get their own verdict: a pointer that travels perfectly while
+     * clicks do nothing is the failure this line exists for, and it is decided
+     * here, at the firmware boundary, rather than somewhere inside the guest. */
+    plat_puts("mouse: buttons seen during the probe: ");
+    api_put_num((u16)btn_changes);
+    plat_puts(" change(s)");
+    if (btn_seen) plat_puts(", at least one press");
+    plat_puts("\n");
+    if (!btn_changes) {
+        say("mouse: NO button event was ever reported by the firmware, so no");
+        say("mouse: guest can see a click.  Press the left button while this");
+        say("mouse: probe runs and look for a non-zero count on this line; if it");
+        say("mouse: stays 0, the firmware is hiding the buttons (Fast Boot off,");
+        say("mouse: plug the mouse in before power-on, and avoid hubs/docks).");
+    } else {
+        say("mouse: the buttons do reach UEFI-DOS -- a click missing in a guest");
+        say("mouse: is then the guest side, not the firmware side.");
+    }
     if (!tot_ev) {
         say("mouse: silence -- no counts at all.  Try another USB port; a");
         say("mouse: hub or a port behind a USB-C dock may never reach us.");
-    } else if (!tot_moved) {
+    } else if (!tot_moved && btn_seen) {
         say("mouse: the buttons answer but no counts ever arrive -- the device");
         say("mouse: reports presses only, so the pointer has nowhere to go.");
+    } else if (!tot_moved) {
+        say("mouse: events arrive but carry neither motion nor a button -- the");
+        say("mouse: handle is answering with an empty state, not with input.");
     } else if (!saw_x || !saw_y) {
         say("mouse: counts arrive on one axis only; the device (or the firmware");
         say("mouse: behind it) is not reporting the other one.");

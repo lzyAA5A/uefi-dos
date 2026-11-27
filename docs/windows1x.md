@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.10.2).** The machine UEFI-DOS pretends to be
+**Where this line of work stands (1.10.3).** The machine UEFI-DOS pretends to be
 is now consistent with the machine it emulates: an **80286 AT**, not an 8088 XT
 (Round 42).  Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
@@ -5368,3 +5368,97 @@ machine ~100x and the run then spends its whole budget inside the driver's
 Measuring is cheap instead: the new `UEFIDOS_TRACE_MOUSE` summary at exit prints
 `in=<23C>/<23D>/<23E>/<23F> out=... irq5 delivered=...` for the whole run, which
 is what proved the four reads per packet in one line.
+
+## Round 47 -- the click that never left the firmware (1.10.3)
+
+Round 46 fixed clicking **inside the machine**: Windows throws away a bus-mouse
+packet whose "moved" bit is clear, so a press with no travel had to be smuggled
+in as one count of movement.  The host harness then double-clicked CALC.EXE into
+Calculator and press-dragged the File menu into the Run dialog, and the stick was
+rewritten with that loader.
+
+The laptop still could not click -- the wired mouse and the touchpad alike --
+while the pointer travelled perfectly.  Movement working is exactly what a
+*button-only* fault looks like from the outside, and the guest half is provably
+good (the harness proves it), so the loss had to be at the firmware boundary, in
+`plat_mouse_poll()` in `src/uefi/efi_plat.c`.
+
+### The bug: an OR that a phantom device owns
+
+Buttons were accumulated across every handle the firmware publishes:
+
+```c
+        int btns = g_mouse_last_buttons < 0 ? 0 : g_mouse_last_buttons;
+...
+            btns |= (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
+...
+        changed = (btns != (g_mouse_last_buttons < 0 ? 0 : g_mouse_last_buttons));
+```
+
+A laptop publishes several pointing handles: the USB mouse, the I2C-HID
+touchpad, and often a stub that answers `GetState` for ever with the same
+content.  If any one of them reports "left button held" -- and a stub has no
+reason not to -- that bit is OR'd in on every poll, `btns` stops changing, and
+`changed` never fires again.  The guest then receives no button event at all for
+the rest of the session, from *any* device, while motion keeps working because
+motion takes the winner-take-one path and never looks at `btns`.  One phantom
+handle silently owns the whole machine's click.
+
+### The fix: a device has to prove itself
+
+Buttons are now tracked per device, and a device may only speak once it has
+proven it is real input -- it moved, or its own buttons changed:
+
+```c
+static void dev_buttons(int slot, int b)          /* per-device edge detection */
+static int  live_buttons(int *live_count)         /* OR over proven devices only */
+```
+
+- `g_dev_btn[]`, `g_dev_btn_live[]`, `g_dev_btn_changes[]`, indexed
+  `0..MOUSE_MAX_DEV-1` for simple pointers and `MOUSE_MAX_DEV+0..` for absolute
+  ones, reset by `mouse_reset_all()`.
+- `-1` means "no sample yet", so the first all-up sample is not counted as a
+  change -- the same trick `g_mouse_last_buttons` already used.
+- A change is only a change against *the same device's own* previous sample.  A
+  handle that starts out reporting "left held" and keeps saying so therefore
+  never produces an edge and never becomes live; the device the user is actually
+  holding becomes live on its first real edge, or the moment it moves.
+- `live_buttons()` returns the OR **over proven devices only**, and 0 when
+  nothing is proven -- which is exactly what an unplugged or phantom handle
+  deserves.  A mouse that is moved and then clicked is live by then, so the click
+  is reported; a mouse whose *first* action is a click still works, because the
+  edge is measured per device.
+
+Nothing on the guest side changed: the card protocol, the IRQ5 path, the +-1
+nudge from Round 46 and the 1.04 `MOUSE.DRV` mapping are untouched, so this round
+cannot regress the machines that already work.
+
+### A verdict on the screen instead of in a log
+
+`MOUSE` (the shell probe from 1.9.2) now answers the only question that matters
+at this boundary.  `plat_mouse_detail()` prints per device
+
+```
+  dev 0: simple-pointer  moves=37 last=3,-1 raw=6,-2  btn=0 chg=4 [live]
+  dev 1: absolute-pointer moves=0 last=0,0 raw=0,0 btn=1 chg=0 [not proven]  range 0..0 x 0..65536
+  buttons: reported=0 from 1 proven device(s)
+```
+
+and the probe ends with `mouse: buttons seen during the probe: N change(s)` plus
+one verdict: *the buttons do reach UEFI-DOS* (a click missing in a guest is then
+the guest side) or *NO button event was ever reported by the firmware* (with the
+Fast-Boot-without-a-hub advice).  The misleading "the buttons answer but no
+counts ever arrive" line is now gated on a button actually having been seen
+during the probe, and a handle that answers with an empty state gets its own
+message.
+
+### Verified
+
+- EFI build clean, `BOOTX64.EFI` 271616 B / `BOOTIA32.EFI` 262333 B containing
+  `1.10.3`, `proven device`, `not proven`, `carry neither`; host build clean.
+- `--itest` 96 passed / 0 failed.
+- Host harness `MOUSE` run prints the new table and verdict (`0 change(s)` with
+  no scripted click, and the empty-state message rather than the button one).
+- A real laptop cannot be reached from here, so the remaining confirmation is one
+  command on the machine: run `MOUSE`, hold the left button during the ten second
+  probe, and read the `buttons seen during the probe:` line.

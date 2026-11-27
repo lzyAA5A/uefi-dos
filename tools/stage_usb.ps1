@@ -4,7 +4,7 @@
 
 # Stage the USB stick content in build\usb (what gets copied to the stick).
 #
-# Contents: UEFI-DOS 1.8.0 loaders, three Windows trees (1.01, 1.04, 2.03), the
+# Contents: UEFI-DOS loaders, three Windows trees (1.01, 1.04, 2.03), the
 # tools directory (autobanch + the test programs), and a README that also covers
 # the "the BIOS will not boot it" cases (Secure Boot, CSM, boot-menu entry).
 $ErrorActionPreference = 'Stop'
@@ -58,7 +58,7 @@ WriteLf "$stage\CONFIG.SYS" @(
 
 WriteLf "$stage\AUTOEXEC.BAT" @(
     'ECHO.',
-    'ECHO   UEFI-DOS 1.10.2 on real hardware -- booted from this USB stick',
+    'ECHO   UEFI-DOS 1.10.3 on real hardware -- booted from this USB stick',
     'ECHO   ==========================================================',
     'ECHO.',
     'ECHO   BENCH    autobanch: 16 tests in 16/64-bit, saved to B+date.TXT',
@@ -221,15 +221,32 @@ $readme = @(
     '  one axis only      every count arrives on X and Y stays 0: that was a',
     '                     wrong structure layout in 1.10.0 and is fixed here',
     '  clicks dead        the pointer moves but a button does nothing: that',
-    '                     was the whole 1.10.x story.  1.10.1 fixed the',
-    '                     structure that made the pointer travel one line,',
-    '                     and 1.10.2 fixed the clicks themselves -- Windows',
-    '                     only reads a packet that also reports movement, so',
-    '                     the card now sends one count with the button,',
-    '                     signed by the transition (press +1, release -1),',
-    '                     which cancels out and leaves the pointer still.',
-    '                     If a button still does nothing, try MOUSE and look',
-    '                     for a button event count in the ten-second probe.',
+    '                     was the whole 1.10.x story, and it had TWO causes.',
+    '                     1.10.1 fixed the structure that made the pointer',
+    '                     travel on one line; 1.10.2 fixed the guest side --',
+    '                     Windows only reads a packet that also reports',
+    '                     movement, so the card sends one count with the',
+    '                     button, signed by the transition (press +1,',
+    '                     release -1), which cancels out and leaves the',
+    '                     pointer still; 1.10.3 fixed the firmware side --',
+    '                     one phantom pointing handle that kept reporting',
+    '                     "left held" froze the button value for the whole',
+    '                     machine, because the buttons of every handle were',
+    '                     OR-ed together.  A device may now only speak about',
+    '                     buttons once it has proven itself (it moved, or its',
+    '                     own buttons changed), and the MOUSE probe ends with',
+    '                     a verdict line:',
+    '',
+    '                       mouse: buttons seen during the probe: N change(s)',
+    '',
+    '                     Press and hold the left button WHILE the probe runs.',
+    '                     N > 0 means the firmware does deliver buttons and a',
+    '                     click missing in a guest is a guest-side bug -- send',
+    '                     me that line.  N = 0 means the firmware never gives',
+    '                     any application a button, which no emulator can fix:',
+    '                     then try Fast Boot off and the mouse plugged in',
+    '                     before power-on, and read the device table the probe',
+    '                     prints (btn= / chg= / [live] / [not proven]).',
     '',    '  no protocol (0)    the firmware never initialised the mouse: Fast Boot',
     '                     off, plug the mouse in before powering on, and avoid',
     '                     hubs and USB-C docks for the test',
