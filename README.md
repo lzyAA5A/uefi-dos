@@ -13,7 +13,7 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
-Version **1.9.1**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+Version **1.9.2**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
 single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU +
 OVMF boot smoke tests for x86_64 and IA32, the release image booting to a live
@@ -22,6 +22,21 @@ coprocessor announced**, and Windows 1.01 booting from a **USB stick** under
 QEMU + OVMF with a working pointer ([`docs/windows1x.md`](docs/windows1x.md),
 Rounds 38 and 39).  Two checks still skip unless real MS-DOS 2.11 / MS-DOS 5
 floppy images are supplied (`UEFIDOS_DOS211`, `UEFIDOS_DOS5`).
+
+1.9.2 is the round that makes a real machine **explain its own pointer**.
+The first laptop this stick booted on (Secure Boot off, Windows 1.01 up and
+running) had no working pointer with either its touchpad or a wired USB mouse,
+and from inside the application both cases look the same: no protocol.  So the
+firmware layer now (a) runs driver binding over every handle once, via
+`ConnectController(..., TRUE)` -- what `connect -r` does in the UEFI shell --
+when the pointer enumeration comes back empty, which is what makes a mouse
+plugged in after POST appear on a Fast-Boot firmware; (b) reports **button
+releases**, not just presses, so a guest cannot leave a button stuck; and
+(c) adds a built-in `MOUSE` command that enumerates the protocols and then
+prints one line per second of what the firmware really reports, with the
+emulated machine out of the way.  Ten seconds of that output names the failing
+side.  Honest limit: an I2C touchpad that the firmware never publishes is not
+reachable from a UEFI application, and the PS/2 fallback cannot see it either.
 
 1.9.1 makes the machine the ROM describes match the machine the emulator runs.
 Three bytes told every old program it was on an **8088 XT** (`F000:FFFE` = `FEh`,

@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.9.1).** The machine UEFI-DOS pretends to be
+**Where this line of work stands (1.9.2).** The machine UEFI-DOS pretends to be
 is now consistent with the machine it emulates: an **80286 AT**, not an 8088 XT
 (Round 42).  Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
@@ -4945,3 +4945,97 @@ are reachable from here, and none of them is a wild jump any more.
 `cs_trap` (host builds) now writes an `IVT:` line with vectors `00`-`2F` before
 the instruction ring, so a jump into nowhere names the handler that sent it there
 instead of only the address it arrived at.
+
+## Round 43 -- the pointer on a real laptop, and a command that answers the question (1.9.2)
+
+Round 42 ended with a report from the first real machine (ASUS TUF Gaming F16,
+i9-14900HX): Secure Boot off, the stick boots, Windows 1.01 reaches its MS
+-DOS Executive -- and **the pointer does not move**, with the built-in
+touchpad *and* with a wired USB mouse.  Everything below is what 1.9.2 does
+about that, and what it now asks the firmware to prove.
+
+### What was already known, and why it was not enough
+
+1.9.0 published two protocols (`EFI_SIMPLE_POINTER_PROTOCOL` and
+`EFI_ABSOLUTE_POINTER_PROTOCOL`) and printed a single line naming them, and it
+added an i8042 fallback (`ps2_mouse_arm` / `ps2_mouse_read`) for a firmware
+that exposes the protocol and never reports a state.  That covers the two
+common failures.  It does not cover the third one, which is what a laptop
+actually does:
+
+* an **I2C HID touchpad** is not routed through the PS/2 controller at all, so
+  `ps2_mouse_arm` finds nothing no matter how long it polls, and the firmware
+  usually does not publish it as a pointer either -- the handle is simply not
+  there;
+* a **USB mouse plugged in after POST** has no driver bound to it on a firmware
+  with Fast Boot on, because BDS skips the full USB scan.  No handle again.
+
+Both look identical from inside the application: no protocol.  The difference
+matters, because one is "get a USB mouse in before power-on" and the other is
+"this machine will never work this way".
+
+### 1.9.2: the sweep, the button edge, and the MOUSE command
+
+**A driver sweep, once, only when nothing was found.**  `plat_mouse_present()`
+now calls `mouse_connect_sweep()` when the protocol enumeration comes back
+empty: `LocateHandleBuffer(AllHandles)` then `ConnectController(h, NULL, NULL,
+TRUE)` for up to 512 handles.  That is exactly what `connect -r` does in the
+UEFI shell, and on a firmware that never bound `UsbMouseDxe` during BDS it is
+what makes a plugged-in mouse appear.  It runs **only** while the protocol list
+is empty, before any graphics mode exists -- re-binding every controller in a
+system that is already painting a framebuffer could reset the display.
+
+**Button transitions are reported.**  The old `plat_mouse_poll()` returned 1
+only when something moved or a button was *held*, so a **release was never
+delivered**: a guest that had seen the press kept the button down for ever, and
+in the Windows 1.x world a stuck left button turns every later movement into a
+drag.  The poll path now remembers the previous button state and returns on any
+transition, release included.
+
+**`MOUSE`, a built-in that asks the firmware directly.**  This is the answer to
+"is the machine or the guest at fault".  It prints the enumeration line, then
+polls `plat_mouse_poll()` **without** the emulated machine in between for ten
+seconds (ESC stops early), one line per second:
+
+```
+C:\>MOUSE
+mouse: simple-pointer=1 (in use)  absolute-pointer=0 (none)
+mouse: move the mouse and click for 10 seconds (ESC stops early).
+  143 events / 141 moving, total 812,-96 buttons 0
+  ...
+mouse: 4200 polls
+```
+
+Reading it:
+
+| What it prints | What it means |
+| --- | --- |
+| counts appear | the firmware side works; the guest side (INT 33h, the display driver) is where to look |
+| `simple-pointer=0 absolute-pointer=0` | the firmware published nothing: Fast Boot off, mouse plugged in before power-on, no hub/dock |
+| protocol present, **0 events** | a driver is bound to something that is not the mouse, typically the built-in touchpad; a USB mouse plus a reboot is the fix |
+
+The command is reachable from the boot banner as well: `AUTOEXEC.BAT` on the
+stick lists it, and `README.TXT` gained a whole section on it, because a
+photograph of those four lines is a complete bug report.
+
+### Verified
+
+* host harness: `MOUSE` in a scripted run prints `5 events / 3 moving, total
+  18,8 buttons 0` for the script `12,0;0,12;0,0,1;0,0,0;6,-4` -- two moves,
+  a press, a release, one more move -- which is the button-edge fix working;
+* `--itest` 96 passed / 0 failed (no instruction-set change this round);
+* QEMU + OVMF, the stick booted as a real USB device with `-device usb-mouse`:
+  `mouse: simple-pointer=1 (in use)  absolute-pointer=1 (in use)`, Windows 1.01
+  reaches its desktop and the pointer follows the injected motion
+  (`build/gfx_shot2.png`, 2560x1440 panel, 4x integer upscale of the 640x200
+  picture);
+* the stick itself: 312 files / 6.42 MB, `verify: 0 problem(s)`,
+  `EFI\BOOT\BOOTX64.EFI` 264026 bytes containing the string `1.9.2`.
+
+### What this does not promise
+
+A machine whose only pointing device is an I2C touchpad and whose firmware
+publishes no pointer protocol still has no pointer: the sweep cannot invent a
+device, and the PS/2 fallback cannot see an I2C bus.  What 1.9.2 promises is
+that the machine *says which of those cases it is in*, in one command, instead
+of showing an arrow that never moves.

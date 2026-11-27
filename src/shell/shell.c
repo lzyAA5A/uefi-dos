@@ -749,6 +749,75 @@ static int cmd_apitest(const char *rest)
     return FAT_OK;
 }
 
+/* MOUSE: ask the firmware for the pointing device and show what it actually
+ * says.  This is the diagnostic for "the pointer does not move on the real
+ * machine": it drives plat_mouse_poll() directly, without the emulated machine
+ * in between, so every count it prints is a count the firmware really handed
+ * over.  No protocol at all is a firmware/driver question; a protocol that
+ * stays silent is the case the i8042 fallback exists for; counts arriving here
+ * mean the guest side (INT 33h / the display driver) is at fault. */
+static void put_signed(int v)
+{
+    if (v < 0) { plat_putc('-'); v = -v; }
+    api_put_num((u16)(v > 65535 ? 65535 : v));
+}
+
+static int cmd_mouse(const char *rest)
+{
+    u64 t0, next;
+    int samples = 0, ev = 0, moved = 0, b = 0, secs = 10, tot_ev = 0;
+    int sx = 0, sy = 0;
+    (void)rest;
+    plat_mouse_report();
+    if (!plat_mouse_present()) {
+        say("mouse: the firmware publishes no pointing device -- nothing to poll.");
+        say("mouse: a mouse plugged in after the firmware's own scan needs a");
+        say("mouse: reboot, and Fast Boot must be off for USB HID to be ready.");
+        return FAT_OK;
+    }
+    say("mouse: move the mouse and click for 10 seconds (ESC stops early).");
+    t0 = plat_ticks_ms();
+    next = t0 + 1000u;
+    for (;;) {
+        int dx = 0, dy = 0, btn = 0;
+        plat_pump_events();
+        samples++;
+        if (plat_mouse_poll(&dx, &dy, &btn)) {
+            ev++;
+            tot_ev++;
+            if (dx || dy) moved++;
+            sx += dx;
+            sy += dy;
+            b = btn;
+        }
+        if (plat_ticks_ms() >= next) {
+            plat_puts("  ");
+            api_put_num((u16)ev);
+            plat_puts(" events / ");
+            api_put_num((u16)moved);
+            plat_puts(" moving, total ");
+            put_signed(sx);
+            plat_putc(',');
+            put_signed(sy);
+            plat_puts(" buttons ");
+            api_put_num((u16)b);
+            plat_puts("\n");
+            ev = 0; moved = 0; sx = 0; sy = 0;
+            next += 1000u;
+            if (--secs <= 0) break;
+        }
+        if (plat_kbd_poll() == 27) { say("  stopped"); break; }
+        plat_sleep_ms(2);
+    }
+    plat_puts("mouse: ");
+    api_put_num((u16)(samples > 65535 ? 65535 : samples));
+    plat_puts(" polls\n");
+    if (!tot_ev) {
+        say("mouse: silence -- no counts at all.  Try another USB port; a");
+        say("mouse: hub or a port behind a USB-C dock may never reach us.");
+    }
+    return FAT_OK;
+}
 static int dispatch(char *line)
 {
     char *p = line;
@@ -773,6 +842,7 @@ static int dispatch(char *line)
         plat_puts(" compatible, FAT32)\n");
         return FAT_OK;
     }
+    if (ci_equal(cmd, "MOUSE")) return cmd_mouse(arg);
     if (ci_equal(cmd, "CLS")) {
         plat_puts("\x1b[2J\x1b[H");
         return FAT_OK;
@@ -1081,6 +1151,9 @@ static int dispatch(char *line)
         say("  DIR   CD   MD   RD   DEL   REN   TYPE   COPY");
         say("  CLS   ECHO VER  VOL   DATE  TIME  PROMPT PATH");
         say("  SET   MEM  HELP EXIT  SHUTDOWN  MOUNT  UNMOUNT  DRIVES");
+        say("  SPLIT <file> [KB]: cut a file into .001 .002 parts (default 32 MB)");
+        say("  JOIN  <base>  : put the parts back together as one file");
+        say("  MOUSE: show what the firmware's pointing device reports (10 s probe)");
         say("  SETVER [prog [x.yy]]: per-program DOS version (SETVER alone lists them)");
         say("  APITEST: native 32/64-bit DOS API demo (prints API-OK)");
         say("  RUN64 <file.exe>: run a native 32/64-bit PE program (sdk/)");

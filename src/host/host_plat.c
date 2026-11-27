@@ -215,6 +215,16 @@ static int mouse_script_next(int *dx, int *dy, int *btn)
     return 1;
 }
 
+/* The host harness always has a pointer (the real one, or UEFIDOS_MOUSE), so
+ * the report line just says which flavour is being driven. */
+void plat_mouse_report(void)
+{
+    if (!g_mouse_loaded) plat_mouse_present();
+    plat_puts("mouse: host harness (");
+    plat_puts(g_mouse_script[0] ? "UEFIDOS_MOUSE script" : "Windows cursor");
+    plat_puts(")\n");
+}
+
 int plat_mouse_poll(int *dx, int *dy, int *buttons)
 {
     if (!dx || !dy || !buttons) return 0;
