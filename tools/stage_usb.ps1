@@ -1,6 +1,7 @@
 # NOTE: this is the versioned copy of build\stage_usb.ps1 (build\ is gitignored).
 # The three Windows trees it copies are extracted install media and are NOT in
-# the repository; point $w101/$w104/$w203 at your own copies.
+# the repository; point $w101 / $w104 / $w203 at your own copies.
+
 # Stage the USB stick content in build\usb (what gets copied to the stick).
 #
 # Contents: UEFI-DOS 1.8.0 loaders, three Windows trees (1.01, 1.04, 2.03), the
@@ -114,6 +115,32 @@ $readme = @(
     '          VRAM.COM       video RAM / mode dump',
     '          VESATEST.COM   VESA BIOS extension report',
     '          BENCH.BAT / WIN101.BAT / WIN104.BAT / WIN203.BAT',
+    '',
+    'IF YOU SEE "Secure Boot Violation / Invalid signature detected"',
+    '---------------------------------------------------------------',
+    'That is the firmware refusing this loader because it is not signed by',
+    'Microsoft -- and it is good news about everything else: the firmware found',
+    'EFI\BOOT\BOOTX64.EFI on this stick and tried to start it, so the filesystem,',
+    'the partition and the boot entry are all fine.  Only the signature failed.',
+    '',
+    'ASUS TUF / ROG laptop (TUF Gaming F16, "TianXuan 6 Pro"):',
+    '  power on and tap F2, press F7 for Advanced Mode, then',
+    '    Security -> Secure Boot -> Secure Boot Control = Disabled',
+    '  and F10 to save and exit.  Plug the stick in again and pick',
+    '  "UEFI: 1401" in the boot menu (F8 on ASUS).',
+    '',
+    'If "Secure Boot Control" is greyed out, in this order:',
+    '  a) Boot menu -> Fast Boot = Disabled, save, back to Security.',
+    '  b) Security -> Secure Boot -> Key Management -> "Delete all Secure Boot',
+    '     Keys" (this puts the firmware in Setup Mode, where unsigned loaders',
+    '     run), save, then try the stick again.',
+    '  c) Security -> Secure Boot -> "Secure Boot Mode" = Custom, then back to',
+    '     Standard with Control = Disabled.',
+    '',
+    'Windows is otherwise unaffected; re-enabling Secure Boot later restores the',
+    'old behaviour ("Restore Factory Keys").  If this laptop uses BitLocker or',
+    'Windows device encryption, have the recovery key at hand before changing',
+    'Secure Boot settings.',
     '',
     'IF THE BIOS DOES NOT OFFER THE STICK',
     '------------------------------------',

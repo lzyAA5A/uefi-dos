@@ -4725,3 +4725,33 @@ wrong on IA32 (`uintptr_t` now), a sign-compare in the console 80x25 setup loop,
 a stray `/*` inside a comment, and the `ring_dump` stub.  `build/build_efi.ps1`
 and the host build are both **warning-free** now, and `--itest` still reports
 96 passed / 0 failed.
+
+### The first real machine: a Secure Boot rejection (1.8.2)
+
+The stick was tried on an ASUS TUF Gaming F16 ("TianXuan 6 Pro", i9-14900HX,
+16 GB DDR5, firmware in UEFI mode) and the machine answered with a red panel:
+
+    Secure Boot Violation
+    Invalid signature detected. Check Secure Boot Policy in Setup
+
+That is a *completed* boot attempt, not a failure to find the loader: the
+firmware read `\EFI\BOOT\BOOTX64.EFI` off the stick, accepted the FAT32 volume
+and the boot entry, and then refused to execute the image because it carries no
+Microsoft signature.  In other words the six firmware causes listed above are
+resolved for this machine -- filesystem, partition, path, `UEFI:` entry and mode
+are all correct -- and what is left is one policy switch.
+
+So the answer for this laptop is: F2 on power-up, F7 for Advanced Mode,
+`Security -> Secure Boot -> Secure Boot Control = Disabled`, F10, then `UEFI:
+1401` in the F8 boot menu.  If that switch is greyed out, disable Fast Boot
+first, or `Key Management -> Delete all Secure Boot Keys`, which drops the
+firmware into Setup Mode where unsigned loaders run.  `README.TXT` on the stick
+now carries exactly this text, with the error string it answers, so the stick
+explains its own refusal on a machine that has no other way to read it.
+
+Signing the loader instead is possible in principle (`openssl` is on the build
+machine, `sbsign` is not, and the Authenticode/PKCS#7 blob plus the enrollment
+step in Setup Mode is a project of its own), but enrolling a key and turning the
+policy off amount to the same trust decision, so the switch is the honest path.
+One caveat for a modern laptop: if Windows uses BitLocker / device encryption,
+have the recovery key at hand before changing Secure Boot settings.
