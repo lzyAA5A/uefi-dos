@@ -13,6 +13,22 @@ It boots as one `.EFI` file, and what a DOS program sees is **MS-DOS 4.0**
 never had: FAT32, 64-bit UEFI boot, FAT16 large volumes, a native 32/64-bit DOS
 API, and 386 protected mode with a DPMI 0.9 host.
 
+1.10.1 is a one-line bug in a structure definition, and it explains three
+reports in a row.  On the laptop the pointer stopped flying around (1.10.0) but
+could then only move **along one line**, and **clicking did nothing**:
+`EFI_SIMPLE_POINTER_STATE` was declared with `INT64` fields while every firmware
+fills EDK2's 32-bit definition, so our `X` read `X | Y<<32` (the original
+flailing), our `Y` read EDK2's Z field, which is always 0 (one-line travel) and
+our button flags sat two fields past the 14 bytes the firmware had written
+(clicks lost).  The fields are now `INT32` + two flags, and two compile-time
+asserts fail the build if the layout ever drifts from 16/32 bytes again.  The
+winner-take-one rule from 1.10.0 now applies **per axis**: a device that reports
+only X can no longer freeze Y.  `MOUSE` grew the diagnostics that would have
+found this in one run -- a `raw=` column (what the firmware itself reported,
+before our halving and clamping), the device table printed both before and after
+the ten-second probe, a `ps/2 aux:` line, and a verdict that says "counts arrive
+on one axis only" out loud.
+
 1.10.0 is the benchmarking round, and it starts with the pointer.  On the real
 laptop the mouse was recognised but **flew across the screen** the moment it
 moved: 1.9.3 polled every pointer handle the firmware published and added their
@@ -42,7 +58,7 @@ sieve to 65536, insertion sort 1024, CRC32 and a 32x32 matrix multiply.
 images, so it needs `BOOTIA32.EFI`.  `TYPE B*.TXT` prints the result (TYPE now
 accepts wildcards, because a batch file cannot know today's date).
 
-Version **1.10.0**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+Version **1.10.1**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
 single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU +
 OVMF boot smoke tests for x86_64 and IA32, the release image booting to a live

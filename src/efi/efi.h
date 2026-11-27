@@ -378,11 +378,19 @@ extern EFI_GUID gEfiSimpleFileSystemProtocolGuid;
 extern EFI_GUID gEfiBlockIoProtocolGuid;
 extern EFI_GUID gEfiGraphicsOutputProtocolGuid;
 
-/* ---- EFI_SIMPLE_POINTER_PROTOCOL: PS/2 and USB mice ---- */
+/* ---- EFI_SIMPLE_POINTER_PROTOCOL: PS/2 and USB mice ----
+ * The field widths are not a style choice.  The firmware fills this structure
+ * with the EDK2 definition, which uses 32-bit INTs.  Declaring them INT64 --
+ * which this header did until 1.10.1 -- made the firmware's 12 bytes arrive at
+ * the wrong offsets inside our larger struct: our X picked up X | Y<<32 (the
+ * "pointer flies across the screen" of 1.9.x), our Y landed on EDK2's Z field
+ * (always 0, so the pointer could only move along one line) and our
+ * Left/RightButton landed past the end of what the firmware wrote (stale stack,
+ * so clicks never registered).  Layout: 3 x INT32 + 2 x UINT8, sizeof == 16. */
 typedef struct {
-    INT64   RelativeMovementX;
-    INT64   RelativeMovementY;
-    INT64   RelativeMovementZ;
+    INT32   RelativeMovementX;
+    INT32   RelativeMovementY;
+    INT32   RelativeMovementZ;
     BOOLEAN LeftButton;
     BOOLEAN RightButton;
 } EFI_SIMPLE_POINTER_STATE;

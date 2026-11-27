@@ -804,7 +804,7 @@ static int cmd_mouse(const char *rest)
 {
     u64 t0, next;
     int samples = 0, ev = 0, moved = 0, b = 0, secs = 10, tot_ev = 0;
-    int sx = 0, sy = 0;
+    int sx = 0, sy = 0, tot_moved = 0, saw_x = 0, saw_y = 0;
     (void)rest;
     plat_mouse_report();
     plat_mouse_detail();
@@ -824,7 +824,9 @@ static int cmd_mouse(const char *rest)
         if (plat_mouse_poll(&dx, &dy, &btn)) {
             ev++;
             tot_ev++;
-            if (dx || dy) moved++;
+            if (dx || dy) { moved++; tot_moved++; }
+            if (dx) saw_x = 1;
+            if (dy) saw_y = 1;
             sx += dx;
             sy += dy;
             b = btn;
@@ -851,9 +853,18 @@ static int cmd_mouse(const char *rest)
     plat_puts("mouse: ");
     api_put_num((u16)(samples > 65535 ? 65535 : samples));
     plat_puts(" polls\n");
+    /* The table again, now that the probe has run: moves/last/raw per device
+     * say which handle actually carried the hand, and in which axes. */
+    plat_mouse_detail();
     if (!tot_ev) {
         say("mouse: silence -- no counts at all.  Try another USB port; a");
         say("mouse: hub or a port behind a USB-C dock may never reach us.");
+    } else if (!tot_moved) {
+        say("mouse: the buttons answer but no counts ever arrive -- the device");
+        say("mouse: reports presses only, so the pointer has nowhere to go.");
+    } else if (!saw_x || !saw_y) {
+        say("mouse: counts arrive on one axis only; the device (or the firmware");
+        say("mouse: behind it) is not reporting the other one.");
     }
     return FAT_OK;
 }

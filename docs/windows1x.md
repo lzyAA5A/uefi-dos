@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.10.0).** The machine UEFI-DOS pretends to be
+**Where this line of work stands (1.10.1).** The machine UEFI-DOS pretends to be
 is now consistent with the machine it emulates: an **80286 AT**, not an 8088 XT
 (Round 42).  Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
@@ -5168,3 +5168,92 @@ ALU 6.7 M/s, MUL 0.93 M/s, DIV 0.48 M/s, copy 19 MB/s, x87 chain 47 k/s,
 FSQRT 252 k/s, 640x200 frame 715 frames/s, sieve 57/s, sort 28/s, matmul 308/s
 for the 16-bit side, and ALU 6.8 G/s, copy 12.5 GB/s, DSQRT 2.5 M/s,
 sieve 3.4 k/s, CRC32 28 MB/s, matmul 0.97 G MAC/s for the native 64-bit side.
+## Round 45 -- one line, no clicks: a structure the firmware fills (1.10.1)
+
+The report from the machine was precise and, read carefully, diagnostic:
+
+> 现在鼠标没有乱飘了，但是只能在同一行移动，也点击不了
+
+No flailing any more (Round 44's winner-take-one did its job), but the pointer
+only travels along one horizontal line, and clicking does nothing at all.  Those
+two symptoms together are not a scaling problem; they are what happens when the
+buffer we hand the firmware is not the buffer the firmware thinks it is.
+
+`src/efi/efi.h` declared
+
+```c
+typedef struct {
+    INT64   RelativeMovementX;
+    INT64   RelativeMovementY;
+    INT64   RelativeMovementZ;
+    BOOLEAN LeftButton;
+    BOOLEAN RightButton;
+} EFI_SIMPLE_POINTER_STATE;
+```
+
+but EDK2's definition -- the one every firmware actually fills -- uses **32-bit**
+fields: `INT32 RelativeMovementX, RelativeMovementY, RelativeMovementZ` followed
+by two `UINT8` flags, 14 bytes of payload in a 16-byte struct.  `GetState()`
+memcpy's that into our buffer without knowing its size, so with `INT64` fields
+every reading landed at the wrong offset:
+
+| what we read | what the firmware had written there | result |
+|---|---|---|
+| `RelativeMovementX` (offset 0, 8 bytes) | X (4 bytes) + Y (4 bytes) | `X \| Y<<32` -- the 1.9.x "pointer flies across the screen" |
+| `RelativeMovementY` (offset 8) | Z, which is always 0 | **0 for ever -- the pointer can only move along one line** |
+| `LeftButton` (offset 24) | nothing: the firmware stopped at byte 14 | stale stack, normally 0 -- **clicks never arrive** |
+
+One wrong field width explained all three reports in sequence: Round 44's
+flailing (garbage X), Round 45's single-axis travel (Y stuck at Z), and the dead
+buttons (flags read past the end).  A type declaration is not a detail.
+
+The fix is the definition itself, plus a guard so it cannot come back:
+
+```c
+/* 3 x INT32 + 2 x UINT8, sizeof == 16 */
+typedef char mouse_simple_state_layout_ok[(sizeof(EFI_SIMPLE_POINTER_STATE) == 16) ? 1 : -1];
+typedef char mouse_abs_state_layout_ok[(sizeof(EFI_ABSOLUTE_POINTER_STATE) == 32) ? 1 : -1];
+```
+
+A wrong width now fails the build instead of quietly misplacing every reading.
+
+Two smaller things went in with it:
+
+* **Per-axis fill.**  The winner-take-one rule of Round 44 is still right (adding
+  devices up doubles the motion), but it is now applied per axis: if the winning
+  device reports nothing on one axis, that axis is taken from whichever device
+  does report it.  A handle that speaks only X can no longer freeze Y.
+* **Diagnostics that answer the question.**  `plat_mouse_detail()` prints, per
+  device, `moves=`, `last=` (what we hand the guest after halving and clamping)
+  and now also `raw=` -- the last numbers the *firmware* reported, before any of
+  our arithmetic.  `MOUSE` prints that table **both** before and after its ten
+  seconds, adds a `ps/2 aux:` line (whether the i8042 fallback decoded any
+  packet), and ends with a verdict: silence, "buttons answer but no counts", or
+  "counts arrive on one axis only".  The last one is exactly this round's bug,
+  named in the output so the next report needs no guesswork.
+
+### What could and could not be verified from here
+
+The QEMU/OVMF rig cannot stand in for this bug, and it is worth recording why.
+With OVMF, `MOUSE` reports `simple-pointer=1 (polling)  absolute-pointer=1
+(polling)` and then ten seconds of `0 events / 0 moving` no matter how much
+motion is injected, and the Windows 1.01 desktop's pointer stays on exactly the
+same pixel before and after a `rel(+120,+50)` injection.  Measured, not guessed:
+`build\ppmdiff.py` on the two screenshots reports 1728 differing pixels in
+`(20,316)-(447,323)`, which is the Executive's blinking caret -- the pointer did
+not move.  OVMF's USB mouse driver delivers nothing to a UEFI application that
+never idles, so the *real* firmware path is the only place this can be tested,
+and there the user's firmware does deliver counts (the pointer moved, just on one
+axis).
+
+What could be tested here is the guest half: the host harness drives
+`plat_mouse_poll()` from a script instead of from firmware, and with the script
+`-500,-300` x4 (slam to a corner), then `40,18` x3, then a click, the MS-DOS
+Executive's selection moved from column 1 row 1 to **column 2 row 5** in the
+frame dump (`build\wm.ppm.*.ppm`, diff bbox `(4,36)-(223,69)`) -- both axes and
+a click, through the emulated bus-mouse card.  `--itest` still 96 passed /
+0 failed.
+
+The stick was rewritten with this build (316 files, `verify: 0 problem(s)`,
+`D:\EFI\BOOT\BOOTX64.EFI` = 268748 bytes containing `1.10.1`), and the stick's
+README now explains the `raw=` column and the "one axis only" verdict.

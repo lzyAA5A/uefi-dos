@@ -49,8 +49,21 @@ static int g_dev_same[MOUSE_MAX_DEV];
 static int g_dev_moves[MOUSE_MAX_DEV + MOUSE_MAX_DEV];  /* diagnostics */
 static int g_dev_dx_now[MOUSE_MAX_DEV + MOUSE_MAX_DEV];
 static int g_dev_dy_now[MOUSE_MAX_DEV + MOUSE_MAX_DEV];
+/* The last NON-ZERO counts the firmware itself reported, before any halving or
+ * clamping.  When a machine's pointer misbehaves this is the number that says
+ * whether the fault is in the firmware's report or in our scaling. */
+static int g_dev_raw_dx[MOUSE_MAX_DEV], g_dev_raw_dy[MOUSE_MAX_DEV];
+static int g_ps2_packets;        /* packets the i8042 fallback decoded */
+static int g_ps2_armed;          /* forward: defined again next to PS/2 code */
 #define DEV_STUCK_REPEATS 128    /* identical reports in a row -> ignore */
 #define MOUSE_POLL_CLAMP 96      /* counts we are willing to believe per poll */
+
+/* The firmware writes these structures with the EDK2 layout.  A wrong field
+ * width compiles happily and then misplaces EVERY reading (see the note in
+ * src/efi/efi.h: INT64 fields here produced "flies across the screen", then
+ * "only moves on one line", then "clicks do nothing").  Fail the build instead. */
+typedef char mouse_simple_state_layout_ok[(sizeof(EFI_SIMPLE_POINTER_STATE) == 16) ? 1 : -1];
+typedef char mouse_abs_state_layout_ok[(sizeof(EFI_ABSOLUTE_POINTER_STATE) == 32) ? 1 : -1];
 
 void plat_serial_puts(const char *s);
 
@@ -217,6 +230,10 @@ void plat_mouse_detail(void)
         put_int(g_dev_dx_now[i]);
         plat_puts(",");
         put_int(g_dev_dy_now[i]);
+        plat_puts(" raw=");
+        put_int(g_dev_raw_dx[i]);
+        plat_puts(",");
+        put_int(g_dev_raw_dy[i]);
         if (g_dev_same[i] >= DEV_STUCK_REPEATS) plat_puts("  [stuck, ignored]");
         plat_puts("\n");
     }
@@ -242,6 +259,15 @@ void plat_mouse_detail(void)
         plat_puts("\n");
     }
     if (!g_mouse_used && !g_abs_used) plat_puts("  (no device)\n");
+    plat_puts("  ps/2 aux: ");
+    if (!g_ps2_armed) plat_puts("not armed");
+    else if (!g_ps2_packets) plat_puts("armed, no packet yet");
+    else plat_puts("packets");
+    if (g_ps2_armed && g_ps2_packets) {
+        plat_puts("=");
+        put_int(g_ps2_packets);
+    }
+    plat_puts("\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -340,6 +366,7 @@ static int ps2_mouse_read(int *dx, int *dy, int *buttons)
             /* the controller counts Y upward, our card (and Windows) downward */
             ry += -my;
             btn = (f & 0x01 ? 1 : 0) | (f & 0x02 ? 2 : 0) | (f & 0x04 ? 4 : 0);
+            g_ps2_packets++;
             got = 1;
         }
     }
@@ -371,15 +398,25 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
          * mouse -- or a touchpad handle that keeps repeating stale counts -- as
          * several handles, and the guest then sees two or three times the motion
          * the user made, which is exactly "the pointer flies across the screen".
-         * The device that moved most this poll wins outright. */
+         * The device that moved most this poll wins outright.
+         *
+         * One axis at a time, though: a handle that reports X but never Y must
+         * not be able to freeze the Y axis of the whole machine, so if the
+         * winner says nothing about one axis, that axis is taken from whichever
+         * device does report it.  Nothing is counted twice: the winner reported
+         * zero on that axis. */
         for (i = 0; i < g_mouse_used; i++) {
             int vx, vy, mag;
             if (g_mouse_list[i]->GetState(g_mouse_list[i], &st) != EFI_SUCCESS) continue;
             btns |= (st.LeftButton ? 1 : 0) | (st.RightButton ? 2 : 0);
             if (!st.RelativeMovementX && !st.RelativeMovementY) {
                 g_dev_same[i] = 0;
+                g_dev_dx_now[i] = 0;
+                g_dev_dy_now[i] = 0;
                 continue;
             }
+            g_dev_raw_dx[i] = st.RelativeMovementX;
+            g_dev_raw_dy[i] = st.RelativeMovementY;
             vx = half_count(st.RelativeMovementX);
             vy = half_count(st.RelativeMovementY);
             /* A handle that answers with the very same counts for a third of a
@@ -402,7 +439,30 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
                 rdy = vy;
             }
         }
-        if (best >= 0) g_dev_moves[best]++;
+        if (best >= 0) {
+            int k, ax = rdx, ay = rdy;
+            g_dev_moves[best]++;
+            if (!ax) {
+                int mag = 0;
+                for (k = 0; k < g_mouse_used; k++) {
+                    int v = g_dev_dx_now[k], m;
+                    if (g_dev_same[k] >= DEV_STUCK_REPEATS) continue;
+                    m = (v < 0 ? -v : v);
+                    if (m > mag) { mag = m; ax = v; }
+                }
+            }
+            if (!ay) {
+                int mag = 0;
+                for (k = 0; k < g_mouse_used; k++) {
+                    int v = g_dev_dy_now[k], m;
+                    if (g_dev_same[k] >= DEV_STUCK_REPEATS) continue;
+                    m = (v < 0 ? -v : v);
+                    if (m > mag) { mag = m; ay = v; }
+                }
+            }
+            rdx = ax;
+            rdy = ay;
+        }
         /* A device published in absolute coordinates (tablet, some touchpads):
          * turn the new position into a delta and scale it so the guest's
          * 640-pixel width maps onto the device's own range.  It only speaks when
@@ -471,7 +531,10 @@ int plat_mouse_poll(int *dx, int *dy, int *buttons)
         /* A button *release* carries no movement, so reporting only "something
          * moved or some button is held" swallowed every release and left the
          * guest holding a button down. */
-        changed = (btns != g_mouse_last_buttons);
+        /* -1 means "no sample yet": compare against 0 so that the first poll
+         * with the buttons up is not reported as a button change (that phantom
+         * event made a silent device look like "the buttons answer"). */
+        changed = (btns != (g_mouse_last_buttons < 0 ? 0 : g_mouse_last_buttons));
         g_mouse_last_buttons = btns;
         *buttons = btns;
         if (*dx || *dy || changed) return 1;
