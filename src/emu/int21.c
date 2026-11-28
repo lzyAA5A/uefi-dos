@@ -2309,9 +2309,13 @@ void int1a_handler(Emu *e)
          * fall back to the firmware RTC, one-second granularity, while the tick
          * counter stays step-paced), so a program that mixed INT 1Ah with a
          * direct read of 0040:006C saw time jump forwards and backwards.  Every
-         * clock a guest can see is derived from that one counter now. */
-        u32 ticks = e->bios_ticks;
-        emu_wd(e, 0x40, 0x6C, ticks);
+         * clock a guest can see is derived from that one counter now.
+         *
+         * And like a real BIOS this only READS it: the counter is maintained by
+         * the timer interrupt (our INT 8 stub increments it, Windows 1.x keeps
+         * its own base there).  Writing it here -- which this used to do --
+         * made every INT 1Ah AH=00 clobber whatever the guest had set. */
+        u32 ticks = emu_rd(e, 0x40, 0x6C);
         e->cx = (u16)(ticks >> 16);
         e->dx = (u16)ticks;
         e->ax = (u16)(e->ax & 0xFF00);

@@ -1401,11 +1401,31 @@ static void trace_vw(Emu *e, u32 rel, u8 v)
 #define trace_vw(e, rel, v) ((void)0)
 #endif
 
+#ifdef UEFIDOS_HOST
+/* UEFIDOS_TRACE_TICKW=1: report every guest write to the BIOS tick counter at
+ * 0040:006C.  The emulator owns that location (it rewrites it every 4096 steps
+ * from e->bios_ticks), so a guest that maintains its own count there gets its
+ * value overwritten a few thousand instructions later.  Windows 1.x decides when
+ * a second has passed from this variable, so "the clock applet never advances"
+ * is exactly what that fight looks like from the outside. */
+static int trace_tickw(void)
+{
+    static int on = -1;
+    if (on < 0) on = getenv("UEFIDOS_TRACE_TICKW") ? 1 : 0;
+    return on;
+}
+#endif
+
 void emu_wb(Emu *e, u16 seg, u16 off, u8 v)
 {
     u32 a = lin_of(e, seg, off, 1);
     if (e->pm_fault) return;
     if (noram_lin(e, a)) return;             /* ROM / absent RAM: write dropped */
+#ifdef UEFIDOS_HOST
+    if ((a & 0xFFFFCu) == 0x46Cu && trace_tickw())
+        fprintf(stderr, "[tickw] guest wrote %02X to 0040:%04X at %04X:%04X\n",
+                (unsigned)v, (unsigned)off, e->cs, e->ip);
+#endif
     watch_write(e, a, v);
     e->mem[a] = v;
     if (e->gfx_w) video_mark_addr(e, a);
@@ -6468,10 +6488,21 @@ int emu_run(Emu *e)
          * handlers when it installed some; interrupts stay masked while the
          * guest keeps IF clear, exactly like the hardware would */
         if ((steps & 0xFFFull) == 0 && !(e->cr0 & CR0_PE)) {
-            /* BIOS tick counter (40:6C): real hardware bumps it from the timer
-             * interrupt, so programs that poll the variable directly (Windows'
-             * idle loop does) see time move even without INT 1Ah */
-            emu_wd(e, 0x40, 0x6C, e->bios_ticks);
+            /* The BIOS tick counter at 0040:006C belongs to the GUEST.  Our
+             * INT 8 stub (MAGIC_SEG:BIOS_IRQ8_OFF) increments it on every tick
+             * exactly like a real BIOS, and Windows 1.x additionally keeps its
+             * own time base in that same dword -- its kernel writes all four
+             * bytes from its timer code.
+             *
+             * The emulator used to rewrite the dword from e->bios_ticks every
+             * 4096 steps as well.  Three writers, one location, and ours was by
+             * far the most frequent: Windows set its time base, and a few
+             * thousand instructions later it read back a smaller number, took it
+             * for time running backwards and restarted its one-second window.
+             * Timer messages therefore never became due, and the Clock applet
+             * drew its face once and then sat there with the hands wherever they
+             * were -- which on real hardware looks exactly like a freeze.  The
+             * emulator only reads this location now (INT 1Ah AH=00). */
             if (e->irq_depth && e->cs == e->irq_cs && (u16)e->eip == e->irq_ip &&
                 e->ss == e->irq_ss && (u16)e->esp == e->irq_sp)
                 e->irq_depth = 0;
@@ -6585,6 +6616,31 @@ int emu_run(Emu *e)
         if (g_input_seq != input_seen) { input_seen = g_input_seq; steps = 0; }
         if (steps > limit || (hard && total > hard)) {
             trace_regs(e, steps);
+            /* UEFIDOS_HALT_BYTES=n (host only): dump n bytes around CS:IP when
+             * the step budget runs out.  A guest that spins forever leaves
+             * nothing else behind, and a spin is exactly what "the clock stops"
+             * looks like from outside -- this is how the loop gets found without
+             * a debugger.  File offset 64 is CS:IP. */
+#ifdef UEFIDOS_HOST
+            {
+                const char *bs = getenv("UEFIDOS_HALT_BYTES");
+                if (bs && *bs) {
+                    long n = atol(bs);
+                    FILE *fp = fopen("build/halt_bytes.bin", "wb");
+                    if (fp) {
+                        u32 at = lin_of(e, e->cs, e->ip, 1) & MEM_MASK;
+                        u32 start = (at > 64u) ? at - 64u : 0u;
+                        long i;
+                        fprintf(stderr, "[halt] %ld bytes from linear %05X (file 64 = CS:IP) "
+                                        "cs=%04X ip=%04X ss=%04X sp=%04X ax=%04X bx=%04X\n",
+                                n, start, e->cs, e->ip, e->ss, e->sp, e->ax, e->bx);
+                        for (i = 0; i < n && start + (u32)i < e->ram_size; i++)
+                            fputc(e->mem[start + (u32)i], fp);
+                        fclose(fp);
+                    }
+                }
+            }
+#endif
             plat_puts("\nUEFI-DOS: program exceeded instruction limit; terminating\n");
             e->halted = 1;
             e->exit_code = 0xFF;

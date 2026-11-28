@@ -29,6 +29,21 @@ before our halving and clamping), the device table printed both before and after
 the ten-second probe, a `ps/2 aux:` line, and a verdict that says "counts arrive
 on one axis only" out loud.
 
+1.11.1 fixes the Clock applet freezing (and, with it, every Windows timer):
+the BIOS tick counter at `0040:006C` had three owners.  Our `INT 8` stub
+increments it, Windows 1.x keeps its own time base in the same dword -- a probe
+counted 12,882 kernel writes to it in one run -- and the emulator also rewrote it
+from its own counter every 4096 steps.  Windows read back a smaller number a few
+thousand instructions after setting it, concluded that time had gone backwards
+and restarted its one-second window, so `WM_TIMER` never became due and the Clock
+kept whatever hands it had drawn at start-up.  The guest owns the location now
+(the periodic rewrite is gone and `INT 1Ah AH=00` reads instead of writes); the
+clock face in the harness changes thirteen times over a run instead of never, and
+the six overlapping ghost second hands the old fight left behind are gone.  Two
+new host diagnostics came out of it: `UEFIDOS_TRACE_TICKW=1` (who writes
+`0040:006C`) and `UEFIDOS_HALT_BYTES=n` (dump the bytes around `CS:IP` when the
+step budget runs out).
+
 1.11.0 is about time, modes and memory.  A guest could read two clocks -- the
 BIOS tick at `0040:006C` and `INT 1Ah AH=00` -- and they were computed from
 different sources, so on the real machine they drifted apart by a factor of
@@ -138,7 +153,7 @@ is the extended-memory probe: version, free block, allocate, move in, move back,
 compare, 32-bit offset, free -- the XMS ABI exercised from inside DOS.  `TYPE B*.TXT` prints the result (TYPE now
 accepts wildcards, because a batch file cannot know today's date).
 
-Version **1.11.0**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+Version **1.11.1**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
 single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the 8 GB
 extended-memory pool (claimed, 64 MB written and verified, the last 64 KB past

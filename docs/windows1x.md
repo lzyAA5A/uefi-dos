@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.11.0).** The machine UEFI-DOS pretends to be
+**Where this line of work stands (1.11.1).** The machine UEFI-DOS pretends to be
 is now consistent with the machine it emulates: an **80286 AT**, not an 8088 XT
 (Round 42).  Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
@@ -5642,3 +5642,68 @@ scripted double-click at (60,103), time advancing normally).
 * **An XMS 3.0 answer can be 32-bit** (`EAX`/`EDX` of function 88h).  A 16-bit
   program asking with function 08h gets a 16-bit field that saturates at 65535
   KB; that is the API, not the pool.
+
+## Round 50 -- the tick counter has three owners (1.11.1)
+
+The report was "opening the Clock applet freezes everything: the hands move for a
+moment and then stop".  The harness showed the same thing, which is the useful
+part: the picture did not change *at all* afterwards -- the sixty-odd frames
+dumped over the run were byte-identical, and the CPU sat in the Windows idle loop
+(`0DBD:350C`, `cmpw $0, [0006]` -> `jz` back to the poll) with no pending
+message.  So the guest was not hung; it was waiting for a timer message that
+never came.
+
+### Three writers, one dword
+
+`0040:006C` is the BIOS tick counter.  Our `INT 8` stub
+(`MAGIC_SEG:BIOS_IRQ8_OFF`) increments it on every tick, chains `INT 1Ch` and
+EOIs, exactly like a real BIOS.  Windows 1.x additionally keeps its own time base
+in the same dword -- its kernel writes all four bytes from its timer code.  And
+the emulator **also** rewrote the dword from `e->bios_ticks` every 4096 steps, as
+a convenience for programs that poll the variable without a timer ISR.
+
+Three writers is one too many, and ours was by far the most frequent.  A probe on
+the write path (`UEFIDOS_TRACE_TICKW=1`, new) counted **12,882 guest writes to
+`0040:006C`/`6D`/`6E`/`6F` in one run** -- the last ones from `1B05:1EBA`, i.e.
+the Windows kernel.  Every 4096 steps we then replaced that dword with our own
+(also increasing, but a different series).  Windows reads it back a few thousand
+instructions after setting it, sees a smaller number, takes it for time running
+backwards and restarts its one-second window.  `SetTimer` therefore never became
+due, no `WM_TIMER` was ever posted, and the Clock -- which repaints only when its
+timer fires -- kept the hands it drew at start-up.
+
+### The fix
+
+The guest owns the location now:
+
+* the periodic rewrite in `emu_run()` is gone (`src/emu/emu.c`, the
+  `(steps & 0xFFFull) == 0` block only resets the interrupt guard now),
+* `INT 1Ah AH=00` **reads** `0040:006C` instead of writing its own value into it
+  (`src/emu/int21.c`) -- which is what a real BIOS does,
+* `e->bios_ticks` stays as the emulator's internal tick count, which is what the
+  delivery logic uses.
+
+Measured afterwards in the harness, with the Clock open (`build/tk4.ppm.*`,
+600M steps): the clock face changes **13 times** over the run instead of never,
+and the drawn face is clean -- one second hand instead of the five-or-six
+overlapping ghosts the old fight left behind, because the app now gets its
+repaints and erases the previous hand properly.  The BIOS tick rate is still
+`BIOS ticks 18 /s` in AUTOBANCH, so the counter really is advancing at 18.2 Hz
+from the stub.
+
+### Two more diagnostics from this round
+
+* `UEFIDOS_TRACE_TICKW=1` (host): every guest write to `0040:006C`..`006F`, with
+  the writer's `CS:IP`.  This is how the fight was found.
+* `UEFIDOS_HALT_BYTES=n` (host): on the step-limit halt, dump `n` bytes around
+  `CS:IP` to `build/halt_bytes.bin` (file offset 64 = `CS:IP`).  A guest that
+  spins forever leaves nothing else behind, and `build/frameseq.py` (compare a
+  dumped frame sequence) says whether the picture is moving at all.
+
+### About the double-click in scripted runs
+
+The 200 ms gap used in earlier rounds started failing once the machine got busy:
+the emulator's guest time runs slower than the wall clock, so 200 ms of host time
+can be more than `DoubleClickSpeed=500` of guest time and the two clicks arrive as
+two separate selections.  60 ms works reliably (that is what `build/click101.ps1`
+should be given for Windows 1.01/1.04 now).
