@@ -3,7 +3,7 @@
 #define UEFIDOS_CONFIG_H
 
 #define UEFIDOS_NAME       "UEFI-DOS"
-#define UEFIDOS_VERSION    "1.10.4"
+#define UEFIDOS_VERSION    "1.11.0"
 /* DOS API level.  The kernel implements MS-DOS 4.0 semantics (SHARE modes,
  * FCB calls, FILES=, extended error reporting, AH=6Ch extended open), and
  * INT 21h AH=30h now reports that level: AL=major, AH=minor -> AX=0x0004
@@ -21,6 +21,12 @@
 
 /* conventional memory emulated for 16-bit programs */
 #define EMU_RAM_SIZE (16u * 1024u * 1024u) /* 16 MiB: 1 MiB real mode + room for 32-bit clients */
+
+/* Extended memory the XMS driver (INT 2Fh AX=4310h) and the window API can hand
+ * out, in megabytes.  8 GB of address space costs one 1 MB page-pointer table;
+ * pages are committed from the firmware on first write, so a program that
+ * allocates 8 GB and touches 40 MB pays for 40 MB.  0 disables the pool. */
+#define UEFIDOS_XMS_MB 8192u
 
 /* DOS 4.0/5.0 default is FILES=8 (handles 0..4 are the predefined devices), but
  * that leaves a program only three file handles and ambitious 1990s software

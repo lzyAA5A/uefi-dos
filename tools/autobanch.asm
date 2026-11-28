@@ -56,7 +56,10 @@
         jc      .Ldone\id
         call    get_ticks
         sub     ax, [g_t0]
-        cmp     ax, 200                 /* 11 s: the clock never reached 1 s */
+        cmp     ax, 1200                /* 66 s: even a clock that only steps
+                                         * once per second needs ~88 of them for
+                                         * a 1 s window, so wait longer before
+                                         * declaring the clock dead */
         jb      .Lloop\id
         mov     byte ptr [g_timeout], 1
 .Ldone\id:

@@ -2302,7 +2302,15 @@ void int1a_handler(Emu *e)
     u8 ah = (u8)(e->ax >> 8);
     switch (ah) {
     case 0x00: {   /* read tick count -> CX:DX, AL=midnight flag */
-        u32 ticks = (u32)(plat_ticks_ms() / 55u);
+        /* The guest has exactly ONE clock: e->bios_ticks, the counter the
+         * emulator bumps at 18.2 Hz and mirrors into 0040:006C.  This used to
+         * answer with plat_ticks_ms()/55 -- a second, independent clock -- and
+         * the two promptly disagreed on real hardware (the platform clock can
+         * fall back to the firmware RTC, one-second granularity, while the tick
+         * counter stays step-paced), so a program that mixed INT 1Ah with a
+         * direct read of 0040:006C saw time jump forwards and backwards.  Every
+         * clock a guest can see is derived from that one counter now. */
+        u32 ticks = e->bios_ticks;
         emu_wd(e, 0x40, 0x6C, ticks);
         e->cx = (u16)(ticks >> 16);
         e->dx = (u16)ticks;
@@ -2536,7 +2544,8 @@ void int_e0_handler(Emu *e)
         set_ok(e);
         e->ax = 0x5941;                         /* presence signature */
         e->bx = 0x4455;                         /* 'U' 'D' */
-        e->cx = 0x0003;                         /* bit0 64-bit, bit1 parts */
+        e->cx = 0x0007;                         /* bit0 64-bit files, bit1
+                                                 * parts, bit2 huge memory */
         e->dx = 0x0107;                         /* version 1.7 */
         return;
     }
@@ -2626,6 +2635,65 @@ void int_e0_handler(Emu *e)
             emu_wd(e, seg, (u16)(off + BFR_SIZE_HI), (u32)(size >> 32));
             emu_wd(e, seg, (u16)(off + BFR_PARTS), (u32)dos_big_parts((int)h));
         }
+        break;
+    }
+    case 0x10: {                                /* HUGEMEM OPEN (BX = KB low,
+                                                 * CX = KB high) -> handle+base */
+        u32 kb = ((u32)e->cx << 16) | (u32)e->bx;
+        int hh;
+        if (!emu_xms_alloc(kb, &e->bx)) { rc = FAT_ENOSPC; break; }
+        hh = (int)e->bx;
+        {
+            u64 base = 0;
+            u32 size = 0;
+            emu_xms_block((u16)hh, &base, &size);
+            bfr_put64(e, seg, (u16)(off + BFR_OFFSET), base);
+            emu_wd(e, seg, (u16)(off + BFR_SIZE_LO), size);
+            emu_wd(e, seg, (u16)(off + BFR_SIZE_HI), 0);
+            emu_ww(e, seg, (u16)(off + BFR_HANDLE), (u16)hh);
+        }
+        break;
+    }
+    case 0x11: {                                /* HUGEMEM MAP: handle + 32-bit
+                                                 * offset -> 64 KB guest window */
+        u16 h = emu_rw(e, seg, (u16)(off + BFR_HANDLE));
+        u32 want = emu_rd(e, seg, (u16)(off + BFR_OFFSET));
+        u64 base = 0;
+        u32 size = 0;
+        if (!emu_xms_block(h, &base, &size)) { rc = FAT_EINVAL; break; }
+        if (want >= size) { rc = FAT_EINVAL; break; }
+        want &= ~0xFFFFu;                       /* window is 64 KB aligned */
+        if (!emu_xms_window(e, e->si, base + want)) { rc = FAT_EINVAL; break; }
+        emu_wd(e, seg, (u16)(off + BFR_OFFSET), base + want);
+        break;
+    }
+    case 0x12: {                                /* HUGEMEM COPY: count bytes
+                                                 * between the request block's
+                                                 * buffer and the pool offset */
+        u16 h = emu_rw(e, seg, (u16)(off + BFR_HANDLE));
+        u32 want = emu_rd(e, seg, (u16)(off + BFR_OFFSET));
+        u32 len = emu_rd(e, seg, (u16)(off + BFR_COUNT));
+        u16 bseg = emu_rw(e, seg, (u16)(off + BFR_BUF_SEG));
+        u32 boff = emu_rd(e, seg, (u16)(off + BFR_BUF_OFF));
+        u64 base = 0;
+        u32 size = 0;
+        int to_conv = (int)(emu_rw(e, seg, (u16)(off + BFR_FLAGS)) & 1u);
+        if (!emu_xms_block(h, &base, &size)) { rc = FAT_EINVAL; break; }
+        if (want >= size || len > size - want) { rc = FAT_EINVAL; break; }
+        if (to_conv)
+            emu_xms_copy(e, 0u, bseg, boff, 0, base + want, 0, 0, 1, len);
+        else
+            emu_xms_copy(e, base + want, 0, 0, 1, 0u, bseg, boff, 0, len);
+        break;
+    }
+    case 0x13:                                  /* HUGEMEM CLOSE */
+        emu_xms_window_close(e);
+        if (!emu_xms_free(emu_rw(e, seg, (u16)(off + BFR_HANDLE)))) { rc = FAT_EINVAL; break; }
+        break;
+    case 0x14: {                                /* HUGEMEM STATS */
+        emu_wd(e, seg, (u16)(off + BFR_SIZE_LO), emu_xms_total_kb());
+        emu_wd(e, seg, (u16)(off + BFR_SIZE_HI), emu_xms_committed_kb());
+        emu_wd(e, seg, (u16)(off + BFR_COUNT), emu_xms_free_kb());
         break;
     }
     default:

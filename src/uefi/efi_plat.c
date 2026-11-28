@@ -15,6 +15,14 @@ EFI_RUNTIME_SERVICES *gRT;
 EFI_LOADED_IMAGE_PROTOCOL *gLoadedImage;
 
 static EFI_SIMPLE_TEXT_OUTPUT *gOut;
+/* The 80x25 console mode chosen at boot.  Leaving a graphics mode has to put
+ * the firmware back into it: while a guest draws (Windows 1.x runs 640x200 CGA
+ * for its whole life) plat_video_gfx_begin() switches the GOP to the mode that
+ * upscales that picture 3-4x, and the firmware stays there afterwards.  ConOut
+ * then paints 80x25 characters into a 2560x1440 framebuffer -- tiny text in the
+ * middle of a black screen, which is what "after Windows exits the picture
+ * shrinks to a little box" looked like on a real laptop. */
+static UINTN g_out_text_mode = (UINTN)-1;
 static EFI_SIMPLE_TEXT_INPUT *gIn;
 static EFI_BLOCK_IO *gBlk;
 static int g_last_scan;
@@ -774,6 +782,7 @@ int plat_init(void *sys_table, void *image_handle)
         }
         if (best != (UINTN)-1) gOut->SetMode(gOut, best);
         else if (gOut->Mode->CursorRow >= 25) gOut->SetCursorPosition(gOut, 0, 0);
+        g_out_text_mode = gOut->Mode->Mode;   /* restored by plat_video_text() */
     }
     /* Turn off the boot watchdog.  Firmware arms it before starting a boot
      * option (5 minutes is the usual value, MdeModulePkg BdsDxe does exactly
@@ -879,27 +888,50 @@ static UINT64 wall_ms(void)
     return g_wall_day + ms;
 }
 
+static UINT64 g_mono_last = 0;          /* monotonic guard for plat_ticks_ms */
+static int    g_tsc_fail = 0;           /* failed calibration attempts */
+
 static void tsc_calibrate(void)
 {
     UINT64 a, b, per;
     if (g_tsc_tried) return;
-    g_tsc_tried = 1;
+    /* Before plat_init() there are no boot services, so there is nothing to
+     * calibrate Stall() against: return and try again on the next call.  (This
+     * used to latch g_tsc_tried here, which permanently fixed the clock on the
+     * RTC fallback if anything asked for the time early.) */
     if (!gBS || !gBS->Stall) return;
     a = tsc_read();
     gBS->Stall(50000);                  /* 50 ms reference interval */
     b = tsc_read();
-    if (b <= a) { g_mono_per_ms = 0; return; }
+    if (b <= a) {
+        g_mono_per_ms = 0;
+        if (++g_tsc_fail >= 8) g_tsc_tried = 1;   /* give up, stay on the RTC */
+        return;
+    }
     per = (b - a + 25u) / 50u;
     g_mono_per_ms = per ? per : 0;
     g_mono_base = b;
+    g_tsc_fail = 0;
+    g_mono_last = 0;                    /* new origin: restart the guard */
+    g_tsc_tried = 1;
 }
 
 u64 plat_ticks_ms(void)
 {
+    UINT64 v;
     if (!g_tsc_tried) tsc_calibrate();
-    if (g_mono_per_ms) return (tsc_read() - g_mono_base) / g_mono_per_ms;
-    return wall_ms();
+    v = g_mono_per_ms ? (tsc_read() - g_mono_base) / g_mono_per_ms : wall_ms();
+    /* A clock that steps backwards wrecks every consumer (the PIT counter, the
+     * tick pacer, DOS time).  The RTC fallback genuinely can -- it is built from
+     * whole seconds -- so clamp. */
+    if (v < g_mono_last) v = g_mono_last;
+    g_mono_last = v;
+    return v;
 }
+
+/* Which clock the platform ended up with, for the shell's CLOCK command. */
+int plat_clock_source(void) { return g_mono_per_ms ? 1 : 0; }         /* 1 = TSC */
+u64 plat_clock_units_per_ms(void) { return g_mono_per_ms; }
 
 u64 plat_timer_units_per_ms(void) { return g_mono_per_ms; }
 
@@ -1144,9 +1176,21 @@ static int gop_find(void)
     return g_gop ? 0 : 1;
 }
 
-int plat_video_gfx_begin(int w, int h)
+/* Re-read the cached mode information.  SetMode() leaves g_gop->Mode->Info
+ * pointing at firmware-owned memory that some implementations rewrite, and
+ * ConOut->SetMode() changes the GOP mode underneath us, so every mode change
+ * goes through here before anything reads the geometry again. */
+static void gop_refresh_info(void)
 {
-    /* locate the GOP on the first graphics mode: without this call g_gop is
+    UINTN size = 0;
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
+    if (!g_gop || !g_gop->Mode) return;
+    if (!EFI_ERROR(g_gop->QueryMode(g_gop, g_gop->Mode->Mode, &size, &info)) && info)
+        g_gop->Mode->Info = info;
+}
+
+int plat_video_gfx_begin(int w, int h)
+{    /* locate the GOP on the first graphics mode: without this call g_gop is
      * provably NULL and the compiler drops every graphics path (the symptom was
      * a #UD inside the firmware the moment a game set a video mode) */
     if (gop_find() != 0) return 1;
@@ -1177,14 +1221,8 @@ int plat_video_gfx_begin(int w, int h)
      * Mode->Info pointing at firmware-owned memory that some implementations
      * rewrite). */
     if (best != 0xFFFFFFFFu && g_gop->Mode->Mode != best) {
-        if (!EFI_ERROR(g_gop->SetMode(g_gop, best))) {
-            UINTN size = 0;
-            EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
-            if (!EFI_ERROR(g_gop->QueryMode(g_gop, best, &size, &info)) && info) {
-                g_gop->Mode->Info = info;
-                g_gop->Mode->Mode = best;
-            }
-        }
+        if (!EFI_ERROR(g_gop->SetMode(g_gop, best)))
+            gop_refresh_info();
     }
     if (!g_gop->Mode->Info) return 1;
 
@@ -1347,6 +1385,15 @@ void plat_video_text(void)
     plat_serial_puts("[app] plat_video_text\n");
     if (!g_gfx_on) return;
     g_gfx_on = 0;
+    /* Back to the boot console mode FIRST: the graphics mode the guest left
+     * behind is the upscaled one (up to 4x, e.g. 2560x1440), and text drawn
+     * into that is unreadably small.  SetMode() re-binds the console to its own
+     * 80x25 text mode and switches the GOP with it. */
+    if (gOut && gOut->Mode && g_out_text_mode != (UINTN)-1 &&
+        (UINTN)gOut->Mode->Mode != g_out_text_mode) {
+        gOut->SetMode(gOut, g_out_text_mode);
+        gop_refresh_info();
+    }
     gfx_clear();
     /* Blank the console grid as well.  The text mirror only sends rows that are
      * not blank, so the firmware kept its previous characters in the empty ones

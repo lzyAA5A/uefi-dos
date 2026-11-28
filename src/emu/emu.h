@@ -243,6 +243,33 @@ void emu_video_flush(Emu *e);          /* repaint now (text mirror or framebuffe
 void emu_cga_palette(Emu *e);          /* rebuild DAC entries 0..3 for CGA modes */
 void emu_mouse_pump(Emu *e);           /* poll the host pointer, queue events */
 int  emu_mouse_available(void);
+
+/* ---- extended memory pool (XMS + the INT E0h window API) ---------------- *
+ * Address space is UEFIDOS_XMS_MB megabytes (8 GB by default), committed one
+ * 64 KB page at a time, so an untouched pool costs a pointer table.  The
+ * window API maps 64 KB of it at a guest segment; block moves copy between the
+ * pool (32-bit offsets) and conventional memory. */
+u32  emu_xms_total_kb(void);
+u32  emu_xms_free_kb(void);
+u32  emu_xms_committed_kb(void);
+u8   emu_xms_rb(u64 off);
+void emu_xms_wb(u64 off, u8 v);
+u32  emu_xms_write(u64 off, const void *src, u32 len);
+u32  emu_xms_read(u64 off, void *dst, u32 len);
+u32  emu_xms_copy(Emu *e, u64 dst_pool, u16 dst_seg, u32 dst_off, int dst_ext,
+                  u64 src_pool, u16 src_seg, u32 src_off, int src_ext, u32 len);
+int  emu_xms_alloc(u32 kb, u16 *handle);
+int  emu_xms_free(u16 handle);
+int  emu_xms_block(u16 handle, u64 *base, u32 *size);
+int  emu_xms_window(Emu *e, u16 seg, u64 pool_off);
+void emu_xms_window_close(Emu *e);
+u16  emu_xms_window_seg(void);
+u32  emu_xms_window_off(void);
+u8   emu_xms_free_handles(void);
+int  emu_xms_hma_claim(void);
+int  emu_xms_hma_release(void);
+int  emu_xms_hma_claimed(void);
+void int_e1_handler(Emu *e);            /* XMS driver entry (INT E1h) */
 void emu_seg_cache_sync(Emu *e);
 void emu_set_seg(Emu *e, int idx, u16 sel);
 void emu_push16(Emu *e, u16 v);

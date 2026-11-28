@@ -29,6 +29,32 @@ before our halving and clamping), the device table printed both before and after
 the ten-second probe, a `ps/2 aux:` line, and a verdict that says "counts arrive
 on one axis only" out loud.
 
+1.11.0 is about time, modes and memory.  A guest could read two clocks -- the
+BIOS tick at `0040:006C` and `INT 1Ah AH=00` -- and they were computed from
+different sources, so on the real machine they drifted apart by a factor of
+hundreds; the benchmark's own diagnostics said `units=2 maxgap=4773 el=7159`,
+i.e. no wraparound, the PIT simply had not moved.  Every clock a guest sees now
+comes from the one counter the emulator bumps at 18.2 Hz, the platform clock can
+no longer latch itself onto the firmware RTC fallback (whole seconds) when it was
+asked for the time before the boot services existed, and a new `CLOCK` command
+measures that platform clock against the firmware's own `Stall()` -- the number
+that is wrong, when the emulator's clock is the problem.  Second fix: after
+Windows exits, the screen comes back **at the right size** -- leaving a graphics
+mode used to keep the 4x-upscaled GOP mode, so 80x25 text was painted into a
+2560x1440 framebuffer as a postage stamp; `plat_video_text()` now restores the
+80x25 console mode first.  Third: **8 GB of extended memory**.  A 16-bit machine
+cannot address 8 GB and never will, but it can reach 8 GB through XMS and a
+window, so UEFI-DOS now has a sparse pool (8 GB of address space, committed in
+64 KB pages on first write), a full XMS driver (`INT 2Fh AX=4310h`, version
+3.00, alloc/free/move/lock/HMA/A20), a native window API (`INT E0h AH=FDh`
+`AL=10h..14h`) and a real high memory area: `FFFF:0010`..`10FFEF` is readable
+once XMS hands the HMA out.  `MEM8` walks the pool from the shell (8 GB claimed,
+64 MB written and verified in 47 ms, the **last 64 KB** -- past 4 GB -- verified
+too) and `XMSTEST.COM` does the same from inside DOS through the standard ABI.
+Windows 2.03 got further (kernel loaded, graphics mode set, its exchange file
+created) before its own init gave up; see Round 49 in
+[`docs/windows1x.md`](docs/windows1x.md) and [`docs/hugemem.md`](docs/hugemem.md).
+
 1.10.4 brings the first benchmark figures from real hardware -- and fixes the
 lines that produced none.  On an ASUS TUF Gaming F16 (i9-14900HX) the 16-bit
 suite reports 17,664,000 ALU ops/s, 126 MB/s `rep movsw`, 2.6M `INT 21h` calls/s
@@ -107,18 +133,22 @@ appended to, so the native probes land in the same file.  `TOOLS\BENCH64.EXE`
 with RDTSC timing: ALU, MUL, DIV, copy, fill, a double FPU chain, Newton sqrt,
 sieve to 65536, insertion sort 1024, CRC32 and a 32x32 matrix multiply.
 `TOOLS\BENCH32.EXE` is the 32-bit twin -- a 64-bit kernel runs only 64-bit
-images, so it needs `BOOTIA32.EFI`.  `TYPE B*.TXT` prints the result (TYPE now
+images, so it needs `BOOTIA32.EFI`.  `TOOLS\XMSTEST.COM` (`tools/xmstest.asm`)
+is the extended-memory probe: version, free block, allocate, move in, move back,
+compare, 32-bit offset, free -- the XMS ABI exercised from inside DOS.  `TYPE B*.TXT` prints the result (TYPE now
 accepts wildcards, because a batch file cannot know today's date).
 
-Version **1.10.4**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+Version **1.11.0**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
-single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the QEMU +
-OVMF boot smoke tests for x86_64 and IA32, the release image booting to a live
-`C:\>` prompt, Windows 1.01 and 1.04 reaching their desktops **with the
-coprocessor announced**, and Windows 1.01 booting from a **USB stick** under
-QEMU + OVMF with a working pointer ([`docs/windows1x.md`](docs/windows1x.md),
-Rounds 38 and 39).  Two checks still skip unless real MS-DOS 2.11 / MS-DOS 5
-floppy images are supplied (`UEFIDOS_DOS211`, `UEFIDOS_DOS5`).
+single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the 8 GB
+extended-memory pool (claimed, 64 MB written and verified, the last 64 KB past
+4 GB verified, two 4 GB-64 KB blocks), `XMSTEST.COM` passing all eight XMS steps
+inside the emulated CPU, the QEMU + OVMF boot smoke tests for x86_64 and IA32, the
+release image booting to a live `C:\>` prompt, Windows 1.01 and 1.04 reaching
+their desktops with a working pointer, and Windows 1.01 booting from a **USB
+stick** under QEMU + OVMF ([`docs/windows1x.md`](docs/windows1x.md),
+[`docs/hugemem.md`](docs/hugemem.md)).  Two checks still skip unless real MS-DOS
+2.11 / MS-DOS 5 floppy images are supplied (`UEFIDOS_DOS211`, `UEFIDOS_DOS5`).
 
 1.9.3 is the round that makes a real machine **explain its own pointer**.
 The first laptop this stick booted on (Secure Boot off, Windows 1.01 up and

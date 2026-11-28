@@ -128,6 +128,21 @@ try {
             & $Oc '-O' 'binary' '--only-section=.text' $bpe $bcom
             if ($LASTEXITCODE -ne 0) { throw 'autobanch objcopy failed' }
             Write-Host "built: $bcom"
+
+            # XMSTEST.COM -- the XMS / extended-memory probe, same recipe
+            $xmSrc = Join-Path $Root 'tools/xmstest.asm'
+            if (Test-Path $xmSrc) {
+                $xo   = Join-Path $Build 'xmstest.o'
+                $xpe  = Join-Path $Build 'xmstest.pe'
+                $xcom = Join-Path $Build 'XMSTEST.COM'
+                & $As '--32' '-o' $xo $xmSrc
+                if ($LASTEXITCODE -ne 0) { throw 'xmstest assemble failed' }
+                & $Ld '-m' 'i386pe' '-Ttext' '0x100' '--image-base' '0' '-nostdlib' '-o' $xpe $xo
+                if ($LASTEXITCODE -ne 0) { throw 'xmstest link failed' }
+                & $Oc '-O' 'binary' '--only-section=.text' $xpe $xcom
+                if ($LASTEXITCODE -ne 0) { throw 'xmstest objcopy failed' }
+                Write-Host "built: $xcom"
+            }"
         }
     }
 
@@ -202,6 +217,9 @@ try {
         # autobanch is optional: it needs binutils (as/ld/objcopy) to be built
         if (Test-Path (Join-Path $Build 'AUTOBANC.COM')) {
             $extraFiles += @('--file', "$Build/AUTOBANC.COM=AUTOBANC.COM")
+        }
+        if (Test-Path (Join-Path $Build 'XMSTEST.COM')) {
+            $extraFiles += @('--file', "$Build/XMSTEST.COM=XMSTEST.COM")
         }
 
         $autoexecLines = @(

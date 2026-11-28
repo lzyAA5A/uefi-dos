@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.10.4).** The machine UEFI-DOS pretends to be
+**Where this line of work stands (1.11.0).** The machine UEFI-DOS pretends to be
 is now consistent with the machine it emulates: an **80286 AT**, not an 8088 XT
 (Round 42).  Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
@@ -5531,3 +5531,114 @@ the mode-13h test included.
 
 One command on the machine settles which mechanism it is -- run `BENCH` and read
 the four diagnostic lines.
+
+## Round 49 -- one clock, a screen that comes back, and 8 GB of extended memory (1.11.0)
+
+The 1.10.4 result file the machine wrote (`D:\B261128.TXT`, 2035 bytes) settled
+the benchmark question and opened two more: on the real laptop two of the
+sixteen tests still refused to fill their window, *after* Windows was closed the
+picture came back as a small box instead of the upscaled desktop, and opening the
+Clock applet froze the session.  All three turned out to be about time and modes.
+
+### The two clocks a guest could see disagreed
+
+`INT 1Ah AH=00` computed its tick count as `plat_ticks_ms()/55` while
+`0040:006C` was written from `e->bios_ticks` -- two counters, two sources, one
+guest.  On the machine they drifted apart by a factor of hundreds (the
+benchmark's diagnostic said `units=2 maxgap=4773 el=7159`: no wraparound, the
+PIT simply had not moved), which is exactly the shape of "a benchmark window that
+never fills" and "an applet that waits for a second that never arrives".
+
+* `int1a_handler` (src/emu/int21.c) now answers with `e->bios_ticks`, the same
+  counter the emulator bumps at 18.2 Hz and mirrors into `0040:006C`.  Every
+  clock a guest can read derives from that one counter.
+* `plat_ticks_ms()` (src/uefi/efi_plat.c) no longer latches a failed TSC
+  calibration: it used to set `g_tsc_tried` even when `gBS->Stall` was not there
+  yet, which fixed the clock permanently on the **RTC fallback** -- whole-second
+  granularity, a 1000 ms staircase where a millisecond clock is expected.  It
+  also clamps monotonic now, because the RTC fallback genuinely steps backwards.
+* New shell command **`CLOCK`** measures the platform clock against the
+  firmware's own `Stall()`: ten 100 ms sleeps, each timed with
+  `plat_ticks_ms()`, plus the source (`TSC` or `RTC fallback`) and the calibrated
+  units per millisecond.  On a healthy machine it prints `1000 ms requested,
+  ~1090 ms measured` and `clock: tracks real time`.  On a machine where the
+  emulator's clock is the problem it prints the number that is wrong, which is
+  what the guest-side symptoms cannot tell you.
+* `tools/autobanch.asm`: the watchdog went from 200 ticks (11 s) to 1200 (66 s),
+  because a clock that only steps once per second needs ~88 steps to fill the
+  one-second window -- the old watchdog declared such a clock dead *before* the
+  window could fill, which is why the two failing tests reported nothing.
+
+### After Windows exits, the screen comes back small
+
+`plat_video_text()` cleared the framebuffer and blanked the console grid but
+never put the firmware back into a text mode.  Windows 1.x runs 640x200 CGA for
+its whole life, and `plat_video_gfx_begin()` had switched the GOP to the mode
+that upscales that picture 3-4x (2560x1440 on a 15" panel).  When Windows exits
+and sets mode 3, ConOut then painted 80x25 characters into a 2560x1440
+framebuffer: tiny text in the middle of a black screen -- "the picture shrinks to
+a little box".
+
+`plat_init()` now remembers the 80x25 console mode (`g_out_text_mode`) and
+`plat_video_text()` calls `gOut->SetMode(gOut, g_out_text_mode)` before anything
+else, which re-binds the console to its own text mode and switches the GOP with
+it.  A new `gop_refresh_info()` re-reads the cached mode information after any
+mode change (SetMode leaves `Mode->Info` pointing at firmware memory that some
+implementations rewrite).
+
+### Windows 2.03
+
+Improved but not finished.  With `SETVER WIN.COM/WIN200.BIN/MSDOS.EXE 3.30` the
+installer tree now gets as far as loading `WIN200.BIN`, setting a graphics mode
+(`gfx: mode set 640x200x8`) and creating its `\xchg.$$$` exchange file -- then it
+takes its generic fatal path, the one whose message is `Incorrect DOS version:
+` (which in 2.03 is not a version check at all: it is the message the kernel
+prints when its own initialisation fails).  The instruction stream at that point
+reads the INT 22h vector back out of the IVT and compares it with what it just
+wrote; anything that disturbs the low 1 KB in between (2.03 relocates its own
+module blocks during load) makes it give up.  Real-mode Windows 2.x also wants
+XMS and a 286 with A20 -- the XMS driver now exists (see below), so the next
+thing to try is with extended memory available.
+
+### 8 GB of extended memory
+
+The full design is in `docs/hugemem.md`; the short version:
+
+* A sparse pool of `UEFIDOS_XMS_MB` = **8192 MB** in `src/emu/emu.c`, committed
+  in 64 KB pages on first write (`g_xms_tab[]`, 1 MB of pointers when untouched).
+  Offsets are 64-bit: 8 GB is 33 bits, and the first version wrapped at 4 GB.
+* **XMS driver**: `INT 2Fh AX=4300h/4310h`, entry point `F000:F000` =
+  `int E1h; retf`, handler `int_e1_handler()` in `src/emu/int2f.c` (version 3.00,
+  query/alloc/free/move/lock/handle-info, HMA, A20 control, 32-bit 88h/89h).
+* **Window API**: `INT E0h AH=FDh AL=10h..14h` (open/map/copy/close/stats) using
+  the same 40-byte request block as the 64-bit file API.
+* The high memory area became real: `noram_lin()` used to answer `FFh` for every
+  real-mode address at or above `100000h`; with the HMA claimed and A20 open the
+  first 64 KB-16 above 1 MB is now readable and writable.
+* **`INT E0h`/`INT E1h` had to be registered.**  `hooked_int()` in
+  `src/emu/emu.c` decides which vectors get an IVT trampoline; neither E0 nor E1
+  was in it, so a guest's `int E1h` landed on the do-nothing stub and every XMS
+  call silently returned whatever was in AX.  The symptom was perfect: `INT 2Fh
+  AX=4300h` said "installed", the entry point was right, and every call after it
+  did nothing.
+* `MEM8 [MB]` (shell) writes, reads back and compares a pattern across the pool
+  and also verifies the **last 64 KB** -- the "past 4 GB" proof; `XMSTEST.COM`
+  (`tools/xmstest.asm`, 9560 bytes) does the same from inside DOS through the
+  real XMS ABI.
+
+Measured in the host harness (i9-14900HX, i.e. the host's memory, not the
+emulated one): 8 GB claimed, 64 MB written and verified in 47 ms, 1361 MB/s for
+the write+verify pair, 64 MB committed.  `--itest` stayed at 32 passed 0 failed
+for the instruction set and 96 passed 0 failed for the CPU tests; Windows 1.01
+still reaches its desktop with a working pointer (Control Panel opened by a
+scripted double-click at (60,103), time advancing normally).
+
+### Two traps worth remembering
+
+* **`INT 2Fh AX=4310h` returns its answer in `ES:BX`** -- a real-mode program
+  that then uses `repe cmpsw` is comparing against `ES:DI`, i.e. against the
+  *driver's* segment.  XMSTEST failed its round-trip for exactly that reason
+  until it restored `ES` after the call.
+* **An XMS 3.0 answer can be 32-bit** (`EAX`/`EDX` of function 88h).  A 16-bit
+  program asking with function 08h gets a 16-bit field that saturates at 65535
+  KB; that is the API, not the pool.

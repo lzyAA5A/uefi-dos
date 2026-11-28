@@ -43,6 +43,10 @@ void plat_mouse_detail(void);
 void plat_shutdown(void);
 u64  plat_ticks_ms(void);
 void plat_sleep_ms(u32 ms);
+/* which clock plat_ticks_ms() ended up using: 1 = CPU timestamp counter,
+ * 0 = the firmware RTC fallback (whole seconds; see the CLOCK command) */
+int  plat_clock_source(void);
+u64  plat_clock_units_per_ms(void);
 /* Let the firmware run its own events (USB/PS2 polling, console timers) for a
  * moment.  A UEFI application that never calls back into Boot Services keeps
  * those callbacks parked, so freshly pressed keys and mouse packets stay in the

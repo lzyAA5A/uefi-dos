@@ -421,6 +421,283 @@ static void pit_sample(u32 now_ms)
     g_pit_value = (u16)((65536u - (counts & 0xFFFFu)) & 0xFFFFu);
 }
 
+/* ---- extended memory: an 8 GB pool, committed one page at a time ----- *
+ *
+ * A 16-bit machine cannot address 8 GB and never will: real-mode segment:offset
+ * tops out at 1 MB (+64 KB of high memory once the A20 gate is open), and a
+ * 286 in protected mode at 16 MB.  What a program CAN have is 8 GB of *extended
+ * memory* reached through a window and through block moves -- which is exactly
+ * what the XMS specification exists for, and what this pool is.
+ *
+ * The pool is sparse.  Claiming all 8 GB costs one pointer table (1 MB of u8*
+ * for 131072 pages of 64 KB) and nothing else: a page is handed over by the
+ * firmware the first time a guest really writes to it.  A program that allocates
+ * 8 GB and touches 40 MB pays for 40 MB, which is why the shell's MEM8 command
+ * can walk the whole pool on a 16 GB laptop without swapping.
+ *
+ * Three consumers:
+ *   - the XMS driver (INT 2Fh AX=4310h) for programs that speak the standard,
+ *   - the window API (INT E0h AH=FDh AL=10h..13h) for programs that would rather
+ *     pass a 32-bit offset than an EMB structure,
+ *   - the UEFI-DOS shell itself (MEM8), which runs outside the emulated CPU and
+ *     therefore demonstrates the pool with no emulated program at all.
+ */
+#define XMS_PAGE_SHIFT   16
+#define XMS_PAGE_SIZE    (1u << XMS_PAGE_SHIFT)
+#define XMS_MAX_PAGES    131072u            /* 8 GB of address space */
+#define XMS_MAX_HANDLES  16
+#define XMS_WIN_BYTES    65536u             /* one segment's worth */
+
+typedef struct {
+    u64 base;                               /* byte offset in the pool */
+    u32 size;                               /* bytes */
+    u16 locks;                              /* XMS lock count */
+    u8  used;
+} xms_block;
+
+static u8 **g_xms_tab;                      /* page table, NULL = uncommitted */
+static u32  g_xms_pages;                    /* address space, in 64 KB pages */
+static u64  g_xms_top;                      /* first free byte (33 bits!) */
+static u32  g_xms_commit;                   /* pages actually backed by memory */
+static xms_block g_xms_blk[XMS_MAX_HANDLES];
+static int  g_xms_hma;                      /* HMA handed out (XMS function 01h) */
+static u16  g_xms_win_seg;                  /* mapped window's guest segment */
+static u64  g_xms_win_off;                  /* pool offset visible in it */
+
+static void xms_init(u32 megabytes)
+{
+    u32 pages;
+    if (g_xms_tab) return;
+    if (megabytes < 1u) megabytes = 1u;
+    /* 8 GB of address space is 2^33 bytes, which does not fit a u32: count in
+     * pages (16 per megabyte) so nothing overflows */
+    if (megabytes > XMS_MAX_PAGES / 16u) megabytes = XMS_MAX_PAGES / 16u;
+    pages = megabytes * (1024u * 1024u / XMS_PAGE_SIZE);
+    if (!pages) return;
+    g_xms_tab = (u8 **)plat_alloc(pages * (u32)sizeof(u8 *));
+    if (!g_xms_tab) return;
+    memset(g_xms_tab, 0, (u32)pages * sizeof(u8 *));
+    g_xms_pages = pages;
+    g_xms_top = 0;
+    g_xms_commit = 0;
+    g_xms_hma = 0;
+    g_xms_win_seg = 0;
+    g_xms_win_off = 0;
+    memset(g_xms_blk, 0, sizeof(g_xms_blk));
+}
+
+/* The pool is created on first use: the shell's MEM8 command runs outside the
+ * emulated CPU and can be the very first thing to touch it. */
+static void xms_ensure(void)
+{
+    if (!g_xms_tab) xms_init(UEFIDOS_XMS_MB);
+}
+
+u32 emu_xms_total_kb(void)     { xms_ensure(); return g_xms_pages * (XMS_PAGE_SIZE / 1024u); }
+u32 emu_xms_committed_kb(void) { return g_xms_commit * (XMS_PAGE_SIZE / 1024u); }
+u32 emu_xms_free_kb(void)
+{
+    u32 total, used;
+    xms_ensure();
+    total = emu_xms_total_kb();
+    used = (u32)(g_xms_top / 1024u) + (g_xms_hma ? 64u : 0u);
+    return used <= total ? total - used : 0u;
+}
+int emu_xms_hma_claimed(void)  { return g_xms_hma; }
+
+/* Page 'idx', created (zero-filled) on demand when create != 0. */
+static u8 *xms_page(u32 idx, int create)
+{
+    if (!g_xms_tab || idx >= g_xms_pages) return NULL;
+    if (!g_xms_tab[idx] && create) {
+        g_xms_tab[idx] = (u8 *)plat_alloc(XMS_PAGE_SIZE);
+        if (!g_xms_tab[idx]) return NULL;
+        memset(g_xms_tab[idx], 0, XMS_PAGE_SIZE);
+        g_xms_commit++;
+    }
+    return g_xms_tab[idx];
+}
+
+u8 emu_xms_rb(u64 off)
+{
+    u8 *pg = xms_page((u32)(off >> XMS_PAGE_SHIFT), 0);
+    return pg ? pg[(u32)(off & (XMS_PAGE_SIZE - 1u))] : 0x00;
+}
+
+void emu_xms_wb(u64 off, u8 v)
+{
+    u8 *pg = xms_page((u32)(off >> XMS_PAGE_SHIFT), 1);
+    if (pg) pg[(u32)(off & (XMS_PAGE_SIZE - 1u))] = v;
+}
+
+/* Bulk read/write for code running outside the emulated CPU (the shell).
+ * Copies page by page straight into the backing pages, so a 4 KB chunk is one
+ * memcpy and not 4096 single-byte calls. */
+u32 emu_xms_write(u64 off, const void *src, u32 len)
+{
+    const u8 *s = (const u8 *)src;
+    u32 i = 0;
+    while (i < len) {
+        u32 page = (u32)((off + i) >> XMS_PAGE_SHIFT);
+        u32 inpage = (u32)((off + i) & (XMS_PAGE_SIZE - 1u));
+        u32 chunk = XMS_PAGE_SIZE - inpage;
+        u8 *pg;
+        if (chunk > len - i) chunk = len - i;
+        pg = xms_page(page, 1);
+        if (!pg) return i;
+        memcpy(pg + inpage, s + i, chunk);
+        i += chunk;
+    }
+    return i;
+}
+
+u32 emu_xms_read(u64 off, void *dst, u32 len)
+{
+    u8 *d = (u8 *)dst;
+    u32 i = 0;
+    while (i < len) {
+        u32 page = (u32)((off + i) >> XMS_PAGE_SHIFT);
+        u32 inpage = (u32)((off + i) & (XMS_PAGE_SIZE - 1u));
+        u32 chunk = XMS_PAGE_SIZE - inpage;
+        const u8 *pg;
+        if (chunk > len - i) chunk = len - i;
+        pg = xms_page(page, 0);
+        if (!pg) memset(d + i, 0, chunk);
+        else memcpy(d + i, pg + inpage, chunk);
+        i += chunk;
+    }
+    return i;
+}
+
+/* Copy between the pool and guest memory.  'ext' picks the pool side: pool
+ * addresses are 32-bit byte offsets, guest addresses are seg:32-bit-offset. */
+u32 emu_xms_copy(Emu *e, u64 dst_pool, u16 dst_seg, u32 dst_off, int dst_ext,
+                 u64 src_pool, u16 src_seg, u32 src_off, int src_ext, u32 len)
+{
+    u32 i;
+    for (i = 0; i < len; i++) {
+        u8 v = src_ext ? emu_xms_rb(src_pool + i)
+                       : emu_rb32(e, src_seg, src_off + i);
+        if (dst_ext) emu_xms_wb(dst_pool + i, v);
+        else emu_wb32(e, dst_seg, dst_off + i, v);
+    }
+    return len;
+}
+
+/* Allocate 'kb' kilobytes from the pool; returns a 1-based handle or 0. */
+int emu_xms_alloc(u32 kb, u16 *handle)
+{
+    u64 bytes64;
+    u32 bytes;
+    int i;
+    xms_ensure();
+    if (!g_xms_tab || !kb) return 0;
+    bytes64 = (u64)kb * 1024u;
+    /* an XMS block is at most 4 GB-64 KB (the 32-bit size field), so an 8 GB
+     * pool needs two blocks -- which is exactly what XMS 3.0 allows */
+    if (bytes64 > 0xFFFF0000ull) return 0;
+    if (bytes64 > (u64)emu_xms_free_kb() * 1024u) return 0;
+    if (g_xms_top + bytes64 > (u64)g_xms_pages * XMS_PAGE_SIZE) return 0;
+    bytes = (u32)bytes64;
+    for (i = 1; i < XMS_MAX_HANDLES; i++) {
+        if (!g_xms_blk[i].used) {
+            g_xms_blk[i].used = 1;
+            g_xms_blk[i].base = g_xms_top;
+            g_xms_blk[i].size = bytes;
+            g_xms_blk[i].locks = 0;
+            g_xms_top += bytes;
+            if (handle) *handle = (u16)i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int emu_xms_free(u16 handle)
+{
+    xms_block *b;
+    if (!handle || handle >= XMS_MAX_HANDLES) return 0;
+    b = &g_xms_blk[handle];
+    if (!b->used) return 0;
+    /* a freed block's pages are simply orphaned; reuse afterwards is first-fit
+     * from the top, which keeps an 8 GB pool cheap to manage */
+    b->used = 0;
+    b->size = 0;
+    b->locks = 0;
+    return 1;
+}
+
+int emu_xms_block(u16 handle, u64 *base, u32 *size)
+{
+    if (!handle || handle >= XMS_MAX_HANDLES || !g_xms_blk[handle].used) return 0;
+    if (base) *base = g_xms_blk[handle].base;
+    if (size) *size = g_xms_blk[handle].size;
+    return 1;
+}
+
+/* Map a 64 KB pool window at guest segment 'seg'.  The window becomes ordinary
+ * RAM in the emulated address space, so a program addresses it with its normal
+ * 16-bit offsets and no emulator hook is needed on the memory hot path. */
+int emu_xms_window(Emu *e, u16 seg, u64 pool_off)
+{
+    u8 *lin;
+    u32 i;
+    if (!e || !seg) return 0;
+    if (pool_off + XMS_WIN_BYTES > (u64)g_xms_pages * XMS_PAGE_SIZE) return 0;
+    lin = e->mem + (u32)seg * 16u;
+    if ((u32)seg * 16u + XMS_WIN_BYTES > e->ram_size) return 0;
+    /* pull the old window's contents back into the pool first */
+    if (g_xms_win_seg) {
+        u8 *old = e->mem + (u32)g_xms_win_seg * 16u;
+        for (i = 0; i < XMS_WIN_BYTES; i++) emu_xms_wb(g_xms_win_off + i, old[i]);
+    }
+    for (i = 0; i < XMS_WIN_BYTES; i++) lin[i] = emu_xms_rb(pool_off + i);
+    g_xms_win_seg = seg;
+    g_xms_win_off = pool_off;
+    return 1;
+}
+
+u16 emu_xms_window_seg(void) { return g_xms_win_seg; }
+u32 emu_xms_window_off(void) { return (u32)g_xms_win_off; }
+
+/* Flush the window back into the pool (called when the guest unmaps it). */
+void emu_xms_window_close(Emu *e)
+{
+    if (!e || !g_xms_win_seg) return;
+    {
+        u32 i;
+        u8 *lin = e->mem + (u32)g_xms_win_seg * 16u;
+        for (i = 0; i < XMS_WIN_BYTES; i++) emu_xms_wb(g_xms_win_off + i, lin[i]);
+    }
+    g_xms_win_seg = 0;
+    g_xms_win_off = 0;
+}
+
+/* HMA claim/release (XMS functions 01h / 02h).  The high memory area is the
+ * 64 KB-16 that real mode reaches at FFFF:0010 once A20 is open; it lives in the
+ * emulated RAM image, so claiming it is just permission to use addresses over
+ * 100000h. */
+int emu_xms_hma_claim(void)
+{
+    if (g_xms_hma) return 0;
+    g_xms_hma = 1;
+    return 1;
+}
+
+u8 emu_xms_free_handles(void)
+{
+    u8 n = 0;
+    for (int i = 1; i < XMS_MAX_HANDLES; i++) if (!g_xms_blk[i].used) n++;
+    return n;
+}
+
+int emu_xms_hma_release(void)
+{
+    if (!g_xms_hma) return 0;
+    g_xms_hma = 0;
+    return 1;
+}
+
 /* ---- 8259A programmable interrupt controller (master only) --------- *
  * Windows' timer ISR asks the controller WHICH interrupt is in service:
  *
@@ -1049,7 +1326,12 @@ static u32 lin_of(Emu *e, u16 sel, u32 off, u32 n)
 static int noram_lin(const Emu *e, u32 lin)
 {
     if (e->cr0 & CR0_PE) return 0;
-    if (lin >= 0x100000u) return 1;
+    /* the high memory area: 64 KB-16 above 1 MB, reachable in real mode through
+     * FFFF:0010 once the A20 gate is open and XMS has handed the HMA out */
+    if (lin >= 0x100000u) {
+        if (lin < 0x110000u && emu_xms_hma_claimed() && e->a20_on) return 0;
+        return 1;
+    }
     return lin >= 0xC0000u && lin < 0xF0000u;
 }
 
@@ -3878,6 +4160,7 @@ static void dos_service_call(Emu *e, int intn)
     else if (intn == 0x33) int33_handler(e);
     else if (intn == 0x60) int60_handler(e);
     else if (intn == 0xE0) int_e0_handler(e);
+            else if (intn == 0xE1) int_e1_handler(e);
     else if (intn == 0x20 || intn == 0x27) {
         e->halted = 1; e->exit_code = 0;
         emu_halt_note(e, intn == 0x20 ? "INT 20h terminate" : "INT 27h terminate");
@@ -3893,7 +4176,7 @@ static u8 idt_gate_type32(u8 type_attr)
 /* Install our service gates into the program's IDT (called after LIDT). */
 void pm_patch_idt(Emu *e)
 {
-    static const int serviced[] = { 0x10, 0x13, 0x16, 0x1A, 0x20, 0x21, 0x27, 0x2F, 0x31 };
+    static const int serviced[] = { 0x10, 0x13, 0x16, 0x1A, 0x20, 0x21, 0x27, 0x2F, 0x31, 0xE0, 0xE1 };
     unsigned i;
     if (!e->idt_base || e->idt_limit < 8) return;
     for (i = 0; i < sizeof(serviced) / sizeof(serviced[0]); i++) {
@@ -4840,6 +5123,7 @@ do_int: {
             else if (intn == 0x33) int33_handler(e);
             else if (intn == 0x60) int60_handler(e);
             else if (intn == 0xE0) int_e0_handler(e);
+            else if (intn == 0xE1) int_e1_handler(e);
             else {
                 /* INT 20h/27h terminate the program.  Which vector did it, and
                  * from where, is exactly what you need to find the exit path of
@@ -4948,9 +5232,13 @@ u16 emu_pop16(Emu *e) { return pop16(e); }
 /* ------------------------------------------------------------------ */
 static int hooked_int(int n)
 {
+    /* 0xE0 is UEFI-DOS's extended-file API and 0xE1 is the XMS driver entry.
+     * Both are reached from real mode through the IVT, so they have to be here
+     * or a guest's "int E1h" lands on the do-nothing stub and every XMS call
+     * silently returns whatever was in AX. */
     return n == 0x10 || n == 0x13 || n == 0x15 || n == 0x16 || n == 0x1A || n == 0x20 ||
            n == 0x21 || n == 0x27 || n == 0x2F || n == 0x31 || n == 0x33 ||
-           n == 0x60;
+           n == 0x60 || n == 0xE0 || n == 0xE1;
 }
 
 static void install_ivt(Emu *e)
@@ -5311,6 +5599,7 @@ int emu_init(Emu *e)
     if (!e->mem) return 1;
     memset(e->mem, 0, EMU_RAM_SIZE);
     e->ram_size = EMU_RAM_SIZE;
+    xms_init(UEFIDOS_XMS_MB);          /* sparse: see the pool section above */
     emu_dac_reset(e);
     e->eflags = 0x0202;
     e->video_mode = 3;

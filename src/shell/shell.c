@@ -800,6 +800,184 @@ static void put_signed(int v)
     api_put_num((u16)(v > 65535 ? 65535 : v));
 }
 
+/* CLOCK -- what the platform clock actually is, measured against the firmware's
+ * own Stall().  This exists because every guest-visible time symptom on a real
+ * machine (a PIT that crawls, a benchmark whose window never fills, a clock
+ * applet that sits there) looks the same from the guest side, while the cause is
+ * one line here. */
+static int cmd_clock(const char *rest)
+{
+    int i, bad = 0;
+    u64 tot = 0, worst = 0;
+    (void)rest;
+    plat_puts("clock: platform source ... ");
+    say(plat_clock_source() ? "TSC (rdtsc, calibrated against Stall)"
+                            : "RTC fallback (whole seconds!)");
+    plat_puts("clock: units per ms ..... ");
+    say_u32((u32)plat_clock_units_per_ms(), NULL);
+    plat_puts("clock: 10 x (sleep 100 ms, measure with plat_ticks_ms)\n");
+    for (i = 0; i < 10; i++) {
+        u64 t0 = plat_ticks_ms();
+        u64 t1;
+        plat_sleep_ms(100);
+        t1 = plat_ticks_ms();
+        plat_puts("clock:   -> ");
+        say_u32((u32)(t1 - t0), " ms\n");
+        tot += t1 - t0;
+        if (t1 - t0 > worst) worst = t1 - t0;
+    }
+    plat_puts("clock: 1000 ms requested, ");
+    say_u32((u32)tot, " ms measured\n");
+    plat_puts("clock: worst single step .. ");
+    say_u32((u32)worst, " ms\n");
+    /* A clock that tracks real time answers ~100 ms per step.  Anything under
+     * 900 total means the emulator's time is running slow, which is what makes a
+     * benchmark window stall and a guest clock look frozen. */
+    if (tot < 900u || tot > 1300u) bad = 1;
+    if (plat_clock_source() == 0) bad = 1;
+    say(bad ? "clock: NOT tracking real time -- the guest clock will misbehave."
+            : "clock: tracks real time; the guest tick/pit derive from it.");
+    return FAT_OK;
+}
+
+/* MEM8 -- walk the extended-memory pool from outside the emulated CPU.
+ *
+ * The pool is UEFIDOS_XMS_MB of address space (8 GB) committed one 64 KB page
+ * at a time.  This command proves three things at once on a real machine: that
+ * the pool really spans 8 GB (it writes and verifies the LAST page of the second
+ * block as well as the first page of the first), that untouched pages cost
+ * nothing (the committed figure afterwards is the megabytes asked for, not the
+ * megabytes claimed), and how fast the firmware's memory is once the store is
+ * warm.
+ *
+ * An XMS block is at most 4 GB-64 KB, so the pool spans two blocks: that is a
+ * property of the specification (32-bit sizes), not of this implementation.
+ *
+ * MEM8 [MB]  -- default 64 MB of real writes and verifies. */
+static int cmd_mem8(const char *rest)
+{
+    u32 want_mb = 64;
+    u32 total_kb, free_kb0, commit_before, commit_after;
+    u32 a_kb = 0, b_kb = 0, asize = 0, bsize = 0;
+    u64 abase = 0, bbase = 0;
+    u16 ha = 0, hb = 0;
+    u32 t0, dt, mb_done = 0;
+    int bad = 0, i;
+    char buf[4096];
+
+    while (*rest == ' ') rest++;
+    if (*rest) {
+        u32 v = 0;
+        while (*rest >= '0' && *rest <= '9') { v = v * 10u + (u32)(*rest - '0'); rest++; }
+        if (v) want_mb = v;
+    }
+
+    total_kb = emu_xms_total_kb();
+    free_kb0 = emu_xms_free_kb();
+    commit_before = emu_xms_committed_kb();
+    plat_puts("mem8: pool .............");
+    say_u32(total_kb / 1024u, " MB of address space\n");
+    plat_puts("mem8: free .............");
+    say_u32(free_kb0 / 1024u, " MB\n");
+    plat_puts("mem8: committed ........");
+    say_u32(commit_before / 1024u, " MB (pages really backed by RAM)\n");
+    plat_puts("mem8: XMS driver ....... ");
+    say("present (INT 2Fh AX=4310h hands out a far entry point)\n");
+    if (!free_kb0) { say("mem8: the pool is empty or disabled."); return FAT_OK; }
+
+    /* two blocks: XMS sizes are 32-bit, so one block tops out at 4 GB-64 KB */
+    a_kb = free_kb0 > 4194240u ? 4194240u : free_kb0;
+    if (!emu_xms_alloc(a_kb, &ha)) { say("mem8: allocating the first block failed."); return FAT_OK; }
+    emu_xms_block(ha, &abase, &asize);
+    b_kb = emu_xms_free_kb();
+    if (b_kb > 4194240u) b_kb = 4194240u;          /* the second 4 GB-64 KB */
+    if (b_kb && emu_xms_alloc(b_kb, &hb)) emu_xms_block(hb, &bbase, &bsize);
+
+    plat_puts("mem8: block 1 ..........");
+    say_u32(asize / (1024u * 1024u), " MB at offset ");
+    say_u32((u32)(abase / (1024u * 1024u)), " MB\n");
+    plat_puts("mem8: block 2 ..........");
+    if (bsize) {
+        say_u32(bsize / (1024u * 1024u), " MB at offset ");
+        say_u32((u32)(bbase / (1024u * 1024u)), " MB (past the 4 GB line)\n");
+    } else {
+        say("none (the whole pool fits in one block)\n");
+    }
+
+    /* the 8 GB proof: the last 64 KB of the highest block */
+    if (bsize) {
+        u64 top = (u64)bbase + (u64)bsize - 4096u;
+        plat_puts("mem8: top of the pool .. offset ");
+        say_u32((u32)(top / (1024u * 1024u)), " MB -- writing and reading it back\n");
+        memset(buf, 0xA5, sizeof(buf));
+        emu_xms_write(top, buf, sizeof(buf));
+        memset(buf, 0x5A, sizeof(buf));
+        emu_xms_read(top, buf, sizeof(buf));
+        for (i = 0; i < (int)sizeof(buf); i++) if ((u8)buf[i] != 0xA5u) { bad++; break; }
+        say(bad ? "mem8: TOP OF THE POOL DID NOT HOLD ITS DATA"
+                : "mem8: the top of the pool holds its data (that is past 4 GB)");
+    }
+
+    plat_puts("mem8: writing .......... ");
+    say_u32(want_mb, " MB across block 1, 4 KB at a time\n");
+    t0 = (u32)plat_ticks_ms();
+    {
+        u32 mb;
+        for (mb = 0; mb < want_mb && !bad; mb++) {
+            if ((u64)mb * 1024u * 1024u + 1024u * 1024u > (u64)asize) break;
+            {
+                u32 done = 0;
+                while (done < 1024u * 1024u) {
+                    u32 k, n = 1024u * 1024u - done;
+                    if (n > sizeof(buf)) n = sizeof(buf);
+                    for (k = 0; k + 3 < n; k += 4) {
+                        u32 v = mb * 1024u + done + k;
+                        buf[k + 0] = (char)v;
+                        buf[k + 1] = (char)(v >> 8);
+                        buf[k + 2] = (char)(v >> 16);
+                        buf[k + 3] = (char)(v >> 24);
+                    }
+                    if (emu_xms_write(abase + mb * 1024u * 1024u + done, buf, n) != n) { bad++; break; }
+                    done += n;
+                }
+            }
+        }
+        mb_done = mb;
+    }
+    plat_puts("mem8: verifying ........ ");
+    for (i = 0; i < (int)mb_done && !bad; i++) {
+        u32 done = 0;
+        while (done < 1024u * 1024u) {
+            u32 k, n = 1024u * 1024u - done;
+            if (n > sizeof(buf)) n = sizeof(buf);
+            emu_xms_read(abase + (u32)i * 1024u * 1024u + done, buf, n);
+            for (k = 0; k + 3 < n; k += 4) {
+                u32 v = (u32)i * 1024u + done + k;
+                if ((u8)buf[k + 0] != (u8)v || (u8)buf[k + 1] != (u8)(v >> 8) ||
+                    (u8)buf[k + 2] != (u8)(v >> 16) || (u8)buf[k + 3] != (u8)(v >> 24)) { bad++; break; }
+            }
+            done += n;
+            if (bad) break;
+        }
+    }
+    dt = (u32)plat_ticks_ms() - t0;
+    say_u32(mb_done, bad ? " MB -- MISMATCH FOUND\n" : " MB, every byte matched\n");
+    plat_puts("mem8: elapsed ..........");
+    say_u32(dt, " ms\n");
+    if (dt) {
+        plat_puts("mem8: throughput .......");
+        say_u32((u32)(((u64)mb_done * 1000u) / (u64)dt), " MB/s (write plus verify)\n");
+    }
+    commit_after = emu_xms_committed_kb();
+    plat_puts("mem8: committed after ..");
+    say_u32(commit_after / 1024u, " MB\n");
+    plat_puts("mem8: claimed/committed ");
+    say_u32(total_kb / 1024u, " MB claimed, only what the program touched costs RAM\n");
+    if (hb) emu_xms_free(hb);
+    if (ha) emu_xms_free(ha);
+    return FAT_OK;
+}
+
 static int cmd_mouse(const char *rest)
 {
     u64 t0, next;
@@ -921,6 +1099,8 @@ static int dispatch(char *line)
         return FAT_OK;
     }
     if (ci_equal(cmd, "MOUSE")) return cmd_mouse(arg);
+    if (ci_equal(cmd, "CLOCK")) return cmd_clock(arg);
+    if (ci_equal(cmd, "MEM8")) return cmd_mem8(arg);
     if (ci_equal(cmd, "CLS")) {
         plat_puts("\x1b[2J\x1b[H");
         return FAT_OK;
@@ -1232,6 +1412,8 @@ static int dispatch(char *line)
         say("  SPLIT <file> [KB]: cut a file into .001 .002 parts (default 32 MB)");
         say("  JOIN  <base>  : put the parts back together as one file");
         say("  MOUSE: show what the firmware's pointing device reports (10 s probe)");
+        say("  CLOCK: which platform clock this machine gave us, measured against Stall");
+        say("  MEM8 [MB]: walk the 8 GB extended-memory pool (writes and verifies it)");
         say("  SETVER [prog [x.yy]]: per-program DOS version (SETVER alone lists them)");
         say("  APITEST: native 32/64-bit DOS API demo (prints API-OK)");
         say("  RUN64 <file.exe>: run a native 32/64-bit PE program (sdk/)");

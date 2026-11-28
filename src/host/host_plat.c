@@ -356,6 +356,8 @@ u64 plat_ticks_ms(void)
 }
 void plat_sleep_ms(u32 ms) { Sleep(ms); }
 void plat_pump_events(void) { }   /* the host has no firmware event queue */
+int  plat_clock_source(void) { return 1; }          /* QueryPerformanceCounter */
+u64  plat_clock_units_per_ms(void) { return 0; }    /* not a TSC count */
 
 void plat_get_date(int *y, int *m, int *d)
 {

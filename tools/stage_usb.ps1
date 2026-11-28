@@ -31,9 +31,9 @@ foreach ($pair in @(@('W101', $w101), @('W104', $w104), @('W203', $w203))) {
 }
 
 # --- tools ------------------------------------------------------------------
-$tools = @('AUTOBANC.COM', 'INFO.COM', 'CAL.COM', 'SUM.COM', 'HEX.COM', 'CLOCK.COM',
-           'HELLO.COM', 'MOUSETST.COM', 'CGATEST.COM', 'CGATEXT.COM', 'VRAM.COM',
-           'VESATEST.COM', 'GFXTEST.COM', 'KEYTEST.COM', 'DOS4TEST.COM')
+$tools = @('AUTOBANC.COM', 'XMSTEST.COM', 'INFO.COM', 'CAL.COM', 'SUM.COM', 'HEX.COM',
+           'CLOCK.COM', 'HELLO.COM', 'MOUSETST.COM', 'CGATEST.COM', 'CGATEXT.COM',
+           'VRAM.COM', 'VESATEST.COM', 'GFXTEST.COM', 'KEYTEST.COM', 'DOS4TEST.COM')
 foreach ($t in $tools) {
     $src = "build\$t"
     if (Test-Path $src) { Copy-Item $src "$stage\TOOLS\$t" -Force } else { "MISSING $src" }
@@ -58,7 +58,7 @@ WriteLf "$stage\CONFIG.SYS" @(
 
 WriteLf "$stage\AUTOEXEC.BAT" @(
     'ECHO.',
-    'ECHO   UEFI-DOS 1.10.4 on real hardware -- booted from this USB stick',
+    'ECHO   UEFI-DOS 1.11.0 on real hardware -- booted from this USB stick',
     'ECHO   ==========================================================',
     'ECHO.',
     'ECHO   BENCH    autobanch: 16 tests in 16/64-bit, saved to B+date.TXT',
@@ -66,6 +66,9 @@ WriteLf "$stage\AUTOEXEC.BAT" @(
     'ECHO   WIN104   Windows 1.04  (desktop + pointer, needs SETVER 3.30)',
     'ECHO   WIN203   Windows 2.03  (286 -- still stops in its loader)',
     'ECHO   MOUSE    what the firmware says about the mouse (10 s probe)',
+    'ECHO   CLOCK    which clock this machine gave us (run it if time misbehaves)',
+    'ECHO   MEM8     walk the 8 GB extended-memory pool (writes and verifies)',
+    'ECHO   XMSTEST  XMS driver from inside DOS (extended memory, 16-bit side)',
     'ECHO   TOOLS\   test programs (MOUSETST, CGATEST, VRAM, VESATEST ...)',
     'ECHO   TYPE README.TXT',
     'ECHO.',
