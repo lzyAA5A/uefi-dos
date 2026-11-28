@@ -5668,6 +5668,7 @@ int emu_init(Emu *e)
     memset(e->mem, 0, EMU_RAM_SIZE);
     e->ram_size = EMU_RAM_SIZE;
     xms_init(UEFIDOS_XMS_MB);          /* sparse: see the pool section above */
+    int21_sft_init(e);                 /* the SFT exists before anyone asks */
     emu_dac_reset(e);
     e->eflags = 0x0202;
     e->video_mode = 3;

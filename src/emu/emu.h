@@ -270,6 +270,7 @@ int  emu_xms_hma_claim(void);
 int  emu_xms_hma_release(void);
 int  emu_xms_hma_claimed(void);
 void int_e1_handler(Emu *e);            /* XMS driver entry (INT E1h) */
+void int21_sft_init(Emu *e);            /* build the SFT at start-up */
 void emu_seg_cache_sync(Emu *e);
 void emu_set_seg(Emu *e, int idx, u16 sel);
 void emu_push16(Emu *e, u16 v);

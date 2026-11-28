@@ -219,18 +219,36 @@ static int dos_weekday(int y, int m, int d)
 /* ------------------------------------------------------------------ */
 /* DOS 4.0 data structures                                             */
 /* ------------------------------------------------------------------ */
-/* F000:C000.. is the reserved ROM window: no guest code ever runs there, so
- * it is a safe home for the structures DOS programs ask us for a pointer to. */
-#define DOS_LOL_OFF  0xC000u   /* INT 21h AH=52h: list of lists */
-#define DOS_DPB_OFF  0xC100u   /* INT 21h AH=32h: one DPB per mounted drive */
+/* The DOS data area lives in LOW memory, not in the F000 service window.
+ *
+ * A program reaches DOS's internals two ways: it asks for a pointer (INT 21h
+ * AH=52h, AH=32h, AH=5D06h) or -- for the ones written in the 1980s -- it scans
+ * conventional memory for a known pattern and derives the layout from what it
+ * finds.  Windows 2.x does the second: it looks for three equally spaced
+ * occurrences of the string "CON " and takes the spacing as the SFT entry
+ * length.  A structure parked above 512 KB (F000 is at 960 KB) is invisible to
+ * that kind of scan, and 2.x simply refuses to start.
+ *
+ * DOSDATA_SEG is 0100h: linear 1000h, far below the 2000h where program images
+ * start, and below the 512 KB a scanner will look at.  The offsets below are
+ * unchanged, so segment 0100h:0xC000 is linear 0xD000 -- still under 64 KB of
+ * low memory and clear of everything else we use. */
+#define DOSDATA_SEG  0x0100u   /* segment the whole DOS data area lives in */
+/* The offsets are compact on purpose: DOSDATA_SEG is low in memory, so a
+ * 0xC000-style offset would land at linear 0xD000 -- inside the 55 KB where a
+ * program's PSP and image can be (WIN.COM's PSP is at 0D8Ch).  Everything below
+ * fits in DOSDATA_TOP and stays clear of every program. */
+#define DOS_LOL_OFF  0x0000u   /* INT 21h AH=52h: list of lists */
+#define DOS_DPB_OFF  0x0040u   /* INT 21h AH=32h: one DPB per mounted drive */
 #define DOS_DPB_LEN  32
-#define DOS_SFT_OFF  0xC800u   /* SFT chain (list of lists +4 points here) */
+#define DOS_SFT_OFF  0x0200u   /* SFT chain (list of lists +4 points here) */
 #define DOS_SFT_STRIDE 0x3Bu   /* DOS 3.1+/4.0 SFT entry: 0x35 + name */
 #define DOS_SFT_MAX  24
 #define DOS_SFT_END  0x0000FFFFu  /* offset FFFFh / segment 0000h */
-#define DOS_SDA_OFF  0xDC00u   /* swappable data area, INT 21h AH=5D06h */
+#define DOS_SDA_OFF  0x0800u   /* swappable data area, INT 21h AH=5D06h */
 #define DOS_SDA_LEN  0x100
-#define DOS_SDA_LIST 0xDD00u   /* DOS 4.0 style SDA list, AH=5D0Bh */
+#define DOS_SDA_LIST 0x0900u   /* DOS 4.0 style SDA list, AH=5D0Bh */
+#define DOSDATA_TOP  0x0A00u   /* end of the block (linear 1000h..1A00h) */
 
 static int boot_drive(void)
 {
@@ -412,23 +430,23 @@ static u16 dpb_write(Emu *e, int slot, int drive, u16 next)
     while (shift < 8 && (u16)(1u << shift) < spc) shift++;
     u32 data_sec = v->data_lba > v->part_lba ? v->data_lba - v->part_lba : 0;
     u32 root_sec = v->root_lba > v->part_lba ? v->root_lba - v->part_lba : 0;
-    for (int i = 0; i < DOS_DPB_LEN; i++) emu_wb(e, MAGIC_SEG, (u16)(off + i), 0);
-    emu_wb(e, MAGIC_SEG, (u16)(off + 0x00), (u8)drive);         /* drive */
-    emu_wb(e, MAGIC_SEG, (u16)(off + 0x01), (u8)drive);         /* unit */
-    emu_ww(e, MAGIC_SEG, (u16)(off + 0x02), (u16)(v->bytes_per_sector ? v->bytes_per_sector : 512));
-    emu_wb(e, MAGIC_SEG, (u16)(off + 0x04), (u8)(spc - 1));
-    emu_wb(e, MAGIC_SEG, (u16)(off + 0x05), shift);
-    emu_ww(e, MAGIC_SEG, (u16)(off + 0x06), dpb16(v->reserved));
-    emu_wb(e, MAGIC_SEG, (u16)(off + 0x08), (u8)v->nfats);
-    emu_ww(e, MAGIC_SEG, (u16)(off + 0x09), dpb16(v->root_entries));
-    emu_ww(e, MAGIC_SEG, (u16)(off + 0x0B), dpb16(data_sec));   /* first data sector */
-    emu_ww(e, MAGIC_SEG, (u16)(off + 0x0D), dpb16(v->cluster_count + 1));
-    emu_ww(e, MAGIC_SEG, (u16)(off + 0x0F), dpb16(v->fat_sectors));
-    emu_ww(e, MAGIC_SEG, (u16)(off + 0x11), dpb16(root_sec));
-    emu_ww(e, MAGIC_SEG, (u16)(off + 0x13), 0xFFFF);            /* no driver */
-    emu_wb(e, MAGIC_SEG, (u16)(off + 0x15), (u8)(v->cluster_count < 4085u ? 0xF0 : 0xF8));
-    emu_wb(e, MAGIC_SEG, (u16)(off + 0x16), 0x00);              /* accessed */
-    emu_ww(e, MAGIC_SEG, (u16)(off + 0x17), next);              /* next DPB */
+    for (int i = 0; i < DOS_DPB_LEN; i++) emu_wb(e, DOSDATA_SEG, (u16)(off + i), 0);
+    emu_wb(e, DOSDATA_SEG, (u16)(off + 0x00), (u8)drive);         /* drive */
+    emu_wb(e, DOSDATA_SEG, (u16)(off + 0x01), (u8)drive);         /* unit */
+    emu_ww(e, DOSDATA_SEG, (u16)(off + 0x02), (u16)(v->bytes_per_sector ? v->bytes_per_sector : 512));
+    emu_wb(e, DOSDATA_SEG, (u16)(off + 0x04), (u8)(spc - 1));
+    emu_wb(e, DOSDATA_SEG, (u16)(off + 0x05), shift);
+    emu_ww(e, DOSDATA_SEG, (u16)(off + 0x06), dpb16(v->reserved));
+    emu_wb(e, DOSDATA_SEG, (u16)(off + 0x08), (u8)v->nfats);
+    emu_ww(e, DOSDATA_SEG, (u16)(off + 0x09), dpb16(v->root_entries));
+    emu_ww(e, DOSDATA_SEG, (u16)(off + 0x0B), dpb16(data_sec));   /* first data sector */
+    emu_ww(e, DOSDATA_SEG, (u16)(off + 0x0D), dpb16(v->cluster_count + 1));
+    emu_ww(e, DOSDATA_SEG, (u16)(off + 0x0F), dpb16(v->fat_sectors));
+    emu_ww(e, DOSDATA_SEG, (u16)(off + 0x11), dpb16(root_sec));
+    emu_ww(e, DOSDATA_SEG, (u16)(off + 0x13), 0xFFFF);            /* no driver */
+    emu_wb(e, DOSDATA_SEG, (u16)(off + 0x15), (u8)(v->cluster_count < 4085u ? 0xF0 : 0xF8));
+    emu_wb(e, DOSDATA_SEG, (u16)(off + 0x16), 0x00);              /* accessed */
+    emu_ww(e, DOSDATA_SEG, (u16)(off + 0x17), next);              /* next DPB */
     return off;
 }
 
@@ -448,18 +466,18 @@ static void ext_error(u16 code, u8 *cls, u8 *act, u8 *locus);
 
 /* The DOS-internal blocks below (SFT, swappable data area, job file table)
  * live at fixed real-mode addresses.  INT 21h can also be called from a
- * protected-mode DPMI client, where emu_wb(e, MAGIC_SEG, ...) would interpret
+ * protected-mode DPMI client, where emu_wb(e, DOSDATA_SEG, ...) would interpret
  * 0F000h as a selector and latch a protection fault, so these writes go by
  * linear address instead. */
 static void mag_wb(Emu *e, u16 off, u8 v)
 {
-    u32 lin = ((u32)MAGIC_SEG << 4) + off;
+    u32 lin = ((u32)DOSDATA_SEG << 4) + off;
     if (lin < e->ram_size) e->mem[lin] = v;
 }
 
 static u8 mag_rb(Emu *e, u16 off)
 {
-    u32 lin = ((u32)MAGIC_SEG << 4) + off;
+    u32 lin = ((u32)DOSDATA_SEG << 4) + off;
     return lin < e->ram_size ? e->mem[lin] : 0;
 }
 
@@ -512,8 +530,27 @@ static void sft_entry_write(Emu *e, int h, u16 off, u32 next)
     mag_ww(e, (u16)(off + 0x0D), used ? H->time : 0);   /* time stamp */
     mag_ww(e, (u16)(off + 0x0F), used ? H->date : 0);   /* date stamp */
     mag_wd(e, (u16)(off + 0x11), used ? H->pos : 0);
-    for (int i = 0; i < 11; i++)
-        mag_wb(e, (u16)(off + 0x2E + i), used && !H->console ? H->name11[i] : 0);
+    /* Device handles carry the DEVICE NAME here, space padded, exactly like a
+     * real DOS SFT entry; that is what a scanner matches on.  Windows 2.x opens
+     * CON five times and then looks for three equally spaced "CON " strings to
+     * derive the SFT entry length -- with zeros in this field it never finds
+     * them and gives up, which is the "Incorrect DOS version" exit it takes. */
+    {
+        /* Handles 0-4 are DOS's own: CON (stdin, stdout, stderr), AUX, PRN.  The
+         * name is derived from the handle NUMBER, because those slots are
+         * pre-installed and never went through device_alloc(). */
+        static const char *slot_name[5] = { "CON", "CON", "CON", "AUX", "PRN" };
+        const char *dev = (h < 5) ? slot_name[h]
+                        : (H->console == 1) ? "CON"
+                        : (H->console == 2) ? "AUX" : NULL;
+        for (int i = 0; i < 11; i++) {
+            u8 ch = 0;
+            if (!used) ch = 0;
+            else if (dev) ch = (i < 8) ? (u8)(dev[i] ? dev[i] : ' ') : 0;
+            else ch = H->name11[i];
+            mag_wb(e, (u16)(off + 0x2E + i), ch);
+        }
+    }
 }
 
 /* Refresh the job file table at PSP:18h.  DOS stores, for each of the 20
@@ -533,6 +570,7 @@ void dos_jft_sync(Emu *e)
     }
 }
 
+static u16 sft_build(Emu *e);
 static u16 sft_build(Emu *e)
 {
     int n = g_dos.files_limit;
@@ -543,11 +581,19 @@ static u16 sft_build(Emu *e)
     for (int i = 0; i < n; i++) {
         u16 off = (u16)(DOS_SFT_OFF + 6 + i * DOS_SFT_STRIDE);
         u32 next = (i + 1 < n)
-                 ? (((u32)MAGIC_SEG << 16) | (u16)(off + DOS_SFT_STRIDE))
+                 ? (((u32)DOSDATA_SEG << 16) | (u16)(off + DOS_SFT_STRIDE))
                  : DOS_SFT_END;
         sft_entry_write(e, i, off, next);
     }
     return DOS_SFT_OFF;
+}
+
+/* Called once at start-up: the table has to exist before a program asks for it,
+ * because a program that scans conventional memory for device names (Windows
+ * 2.x) never calls AH=52h first. */
+void int21_sft_init(Emu *e)
+{
+    sft_build(e);
 }
 
 /* ---- Swappable data area (INT 21h AH=5D06h / 5D0Bh) ----------------- *
@@ -1623,8 +1669,8 @@ void int21_handler(Emu *e)
         for (int i = 0; i < 0x40; i++) mag_wb(e, (u16)(lol + i), 0);
         mag_ww(e, (u16)(lol + 0x00), g_dos.mem_base);     /* first MCB */
         mag_ww(e, (u16)(lol + 0x02), dpbs);               /* first DPB */
-        mag_wd(e, (u16)(lol + 0x04), ((u32)MAGIC_SEG << 16) | sft); /* first SFT */
-        e->es = MAGIC_SEG;
+        mag_wd(e, (u16)(lol + 0x04), ((u32)DOSDATA_SEG << 16) | sft); /* first SFT */
+        e->es = DOSDATA_SEG;
         e->bx = lol;
         set_ok(e);
         return;
@@ -1637,7 +1683,7 @@ void int21_handler(Emu *e)
         u8 sub = (u8)(e->ax & 0xFF);
         if (sub == 0x06 || sub == 0x0B) {
             sda_build(e);
-            e->ds = MAGIC_SEG;
+            e->ds = DOSDATA_SEG;
             e->cx = (u16)DOS_SDA_LEN;      /* bytes to swap while inside DOS */
             e->dx = 0x20;                  /* bytes that must always be swapped */
             if (sub == 0x06) {
@@ -1645,7 +1691,7 @@ void int21_handler(Emu *e)
             } else {
                 mag_ww(e, (u16)DOS_SDA_LIST, 1);                  /* one area */
                 mag_wd(e, (u16)(DOS_SDA_LIST + 2),
-                       ((u32)MAGIC_SEG << 16) | (u16)DOS_SDA_OFF);
+                       ((u32)DOSDATA_SEG << 16) | (u16)DOS_SDA_OFF);
                 mag_ww(e, (u16)(DOS_SDA_LIST + 6),
                        (u16)(DOS_SDA_LEN | 0x8000));              /* swap always */
                 e->si = (u16)DOS_SDA_LIST;

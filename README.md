@@ -29,6 +29,21 @@ before our halving and clamping), the device table printed both before and after
 the ten-second probe, a `ps/2 aux:` line, and a verdict that says "counts arrive
 on one axis only" out loud.
 
+1.11.3 moves the **DOS data area into low memory** and Windows 2.03 stops
+saying `Incorrect DOS version`.  The list of lists, the DPB chain, the SFT and the
+swappable data area used to live at `F000` (linear 960 KB); they now live at
+segment `0100h` (linear `1000h`), because Windows 2.x finds DOS's internals by
+*scanning* the first 512 KB: the routine at `0E68:A3A1` looks for **three equally
+spaced occurrences of `CON `** and takes the spacing as the SFT entry length --
+which only works if the SFT is down there and its entries carry the device name
+(`CON CON CON AUX PRN` for handles 0-4, space padded, as real DOS writes them).
+With both in place 2.03 sets a graphics mode, installs interrupt vectors, opens
+files and runs for thousands of steps; it now stops on the *next* blocker -- its
+own loader copies 64 bytes of the NE header to segment 0 at step 3058 because a
+helper returns a segment it read from a table entry (`linear 40F4h`) that our
+memory has as zero.  Round 52 in [`docs/windows1x.md`](docs/windows1x.md) has the
+full disassembly and the next question to answer.
+
 1.11.2 builds the DOS **device driver chain** in low memory (`0050h`: CON, AUX,
 PRN, CLOCK$, NUL, authentic 0x12-byte headers, chained, entries pointing at a
 RETF) -- real DOS has one, UEFI-DOS intercepts devices inside the kernel and had
@@ -169,7 +184,7 @@ is the extended-memory probe: version, free block, allocate, move in, move back,
 compare, 32-bit offset, free -- the XMS ABI exercised from inside DOS.  `TYPE B*.TXT` prints the result (TYPE now
 accepts wildcards, because a batch file cannot know today's date).
 
-Version **1.11.2**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+Version **1.11.3**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
 single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the 8 GB
 extended-memory pool (claimed, 64 MB written and verified, the last 64 KB past

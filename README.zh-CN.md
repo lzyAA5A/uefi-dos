@@ -12,11 +12,13 @@ DOS 兼容运行环境：自己挂载 FAT32、自带类 `COMMAND.COM` 的命令�
 FAT32、64 位 UEFI 启动、FAT16 大容量卷、原生 32/64 位 DOS API，以及 386 保护模式
 与 DPMI 0.9 宿主。
 
-当前版本 **1.11.2**。本机验证过：8086 + 186/286 + **8087** 指令测试集 96/96、宿主测试器的 shell / FAT16-32 / 双卷检查、1.9 GB FAT16 卷上 1.5 GB 单文件的写入与读回、切割文件拼接、
+当前版本 **1.11.3**。本机验证过：8086 + 186/286 + **8087** 指令测试集 96/96、宿主测试器的 shell / FAT16-32 / 双卷检查、1.9 GB FAT16 卷上 1.5 GB 单文件的写入与读回、切割文件拼接、
 **8 GB 扩展内存池**（认领 8 GB、写入并校验 64 MB、连 4 GB 之后最末尾的 64 KB 也校验、两个 4 GB-64 KB 的块）、`XMSTEST.COM` 在**被模拟的 CPU 里**走完八步 XMS 调用、
 QEMU + OVMF 的 x86_64 与 IA32 启动测试、发行镜像能起动到可交互的 `C:\>`、Windows 1.01 与 1.04 都能跑到桌面且指针可用，
 以及 **Windows 1.01 从 U 盘启动**（见 [`docs/windows1x.md`](docs/windows1x.md) 第 49 轮与 [`docs/hugemem.md`](docs/hugemem.md)）。
 另有 2 项只有在提供真实 MS-DOS 2.11 / MS-DOS 5 软盘镜像时才运行（`UEFIDOS_DOS211`、`UEFIDOS_DOS5`），默认跳过。
+
+1.11.3 把**DOS 数据结构整体搬进低内存**，Windows 2.03 不再报 `Incorrect DOS version`。原来列表指针（list of lists）、DPB 链、SFT 和可换页数据区都在 `F000`（线性 960KB），现在搬到 `0100h` 段（线性 `1000h`）——因为 Windows 2.x 是靠**扫描前 512KB 内存**来找 DOS 内部结构的：`0E68:A3A1` 那段代码在找**三个等间距的 `CON `**，把间距当作 SFT 表项长度，所以 SFT 必须在低内存、而且表项里要有设备名（句柄 0-4 是 `CON CON CON AUX PRN`，空格补齐，和真 DOS 一样）。两处都到位后，2.03 能设图形模式、装中断向量、开关文件、跑几千步；现在卡在**下一个**问题——它自己的加载器在第 3058 步把 64 字节 NE 头盖到 0 段，因为一个辅助例程要从 `线性 40F4h` 的表项读段指针，而我们那儿是 0。[`docs/windows1x.md`](docs/windows1x.md) 第 52 轮有完整反汇编和下一个要查的问题。
 
 1.11.2 在低内存里建起了 DOS 的**设备驱动链**（`0050h`：CON、AUX、PRN、CLOCK$、NUL，真实 DOS 的 0x12 字节头长，带 next 链，入口指向一个 RETF）——真 DOS 本来就有这条链，而我们把设备全在核心里拦截，所以低内存一个设备头都没有；很多程序正是靠找到它来定位 DOS 的内部结构。Windows 2.03 就是这样：它的失败路径会在 512KB 以下扫描字符串 `"CON "`、开/关 5 次 CON，然后打印那句通用的 `Incorrect DOS version`。现在扫描能找到了（指令级 trace 验证过），Windows 1.01/1.04 不受影响，`--itest` 仍是 96/0——但 **2.03 依然进不去桌面**：追下去发现那段扫描其实是**失败后的清理/报错路径**，真正的失败在它上游。2.03 还需要的是一整套 DOS 内部结构（SFT/CDS/DPB 放进低内存）、PSP 里的程序名字段、以及 XMS——那是另一个规模的项目；[`docs/windows1x.md`](docs/windows1x.md) 第 51 轮记录了这次测到的全部细节，同时留下四个运行期工具（`UEFIDOS_TRACE_WINDOW`、`UEFIDOS_DUMP_AT`、`UEFIDOS_DUMP_MEM`、`UEFIDOS_HALT_BYTES`）。
 

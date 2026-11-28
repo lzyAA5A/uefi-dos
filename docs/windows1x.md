@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.11.2).** The machine UEFI-DOS pretends to be
+**Where this line of work stands (1.11.3).** The machine UEFI-DOS pretends to be
 is now consistent with the machine it emulates: an **80286 AT**, not an 8088 XT
 (Round 42).  Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
@@ -5809,3 +5809,93 @@ Two traps found while using them: `UEFIDOS_TRACE_WINDOW` wants `CS:LO-HI`, not
 `CS:LO-CS:HI` (the second form silently matches nothing), and a dump taken at the
 *end* of a run can capture memory the program has already exited out of -- which
 is why `UEFIDOS_DUMP_AT` exists.
+
+## Round 52 -- the DOS data area moves to low memory, and 2.03 stops saying "Incorrect DOS version" (1.11.3)
+
+Round 51 left a precise description of the scan and no way past it.  The missing
+piece was a reading of the routine that was off by a few bytes; with the
+alignment fixed the algorithm turned out to be something quite different from
+"find the device chain".
+
+### What the scan really does
+
+`0E68:A3A1` (correct disassembly, live memory, `build/scan_ok.bin`):
+
+```
+a3a1: xor di,di ; mov es,di
+a3a5: call a428                 ; find "CON " in this window
+a3a8: cmp ax,0xFFFF ; je ret    ; 512 KB ceiling reached
+a3b0: jne a3bd                  ; found -> convert, else next window
+a3bd: mov bx,ax ; and bx,0x0F   ; offset within the segment
+a3c2: shr ax,1 x4 ; add ax,es   ; segment
+a3d5: call a428                 ; find the NEXT "CON "
+a3e2: mov dx,ax ; sub dx,bx     ; gap 1
+a3e6: cmp dx,0x100 ; ja restart
+a3f0: call a428                 ; find a THIRD "CON "
+a3fd: mov cx,ax ; sub cx,dx     ; gap 2
+a401: sub bx,cx ; je success    ; gap1 == gap2 -> the spacing IS the stride
+a411: mov dx,cx ; close 5 handles ; ret (AX = the stride)
+```
+
+It looks for **three equally spaced occurrences of "CON "** and returns the
+spacing.  That is the SFT entry length: DOS puts the device name in each open
+handle's SFT entry, so with CON opened several times the names are one stride
+apart.  Windows 2.x derives the SFT entry size from them and then reads the
+table directly instead of calling DOS.
+
+### The two things that were missing
+
+1. **The DOS data area was above the ceiling.**  The list of lists, the DPB
+   chain, the SFT and the swappable data area all lived at `F000:C000..` --
+   linear 960 KB, three times higher than the 512 KB the scanner looks at.  They
+   now live at `DOSDATA_SEG` = **0100h** (`linear 1000h`), in a compact block
+   `0000h..0A00h` (`src/emu/int21.c`): list of lists at 0000h, DPB chain at 0040h,
+   SFT at 0200h, SDA at 0800h.  The F000 service window keeps what belongs there
+   (trampolines, BIOS stubs, the INT 20h stub).
+2. **The SFT entries had no device names.**  `sft_entry_write` wrote zeros into
+   the 8.3 name field for console handles.  A real DOS writes the device name,
+   space padded, and handles 0-4 are DOS's own (`CON`, `CON`, `CON`, `AUX`,
+   `PRN`), so the name is now derived from the handle number.
+
+The SFT also has to *exist* before anyone asks: it used to be built only when
+`INT 21h AH=52h` was called, and 2.03 scans memory without ever asking.
+`int21_sft_init()` now builds it once at start-up.
+
+### Result
+
+**The `Incorrect DOS version` message is gone.**  2.03 now sets a graphics mode,
+installs interrupt vectors (`AH=25h` twice), gets and sets file attributes, opens
+and closes files, and runs for thousands of steps instead of dying at once.
+
+It now stops somewhere else, and that is progress with a name:
+
+```
+[halt] segment trap at FF01:28C3 ss:sp=0E68:6574 ax=0C00 exit=00FE
+[lowmem-hit] IVT[0]=4E450501 after step 3058 at 0E68:873E
+```
+
+The IVT is overwritten by a 64-byte copy of the NE header at step 3058.  The
+code is `sub di,[bp-2] / mov es,ax / xor di,di / mov cx,0x40 / rep movsb`, and
+`AX` comes from the helper at `0E68:5CAE`, called with three arguments
+`(0, 0, 0x3D3)`:
+
+```
+5c0c: mov cx,[bp+4] ; dec cx ; mov es,cx     ; ES = arg1-1
+5c1f: cmp cx, es:[di+1]
+5c30: mov es, es:[di+1]                      ; ES = the far pointer stored there
+5c34: cmpw $0x454e, es:(di)                  ; "NE"?
+```
+
+so the helper reads a **far pointer to the module's NE header from a table entry**
+(here `0x3D2h:0x3D4h` = linear `0x40F4h`) and builds its answer out of it.  In our
+run that entry is zero, the "NE" test never matches, and the helper returns 0 in
+`AX` -- so `mov es,ax` makes the copy land on the interrupt vector table.
+
+The next question is therefore: **who is supposed to fill that table entry**?  It
+is inside WIN200.BIN's own loader, and it is the next thing to trace (the same
+`UEFIDOS_TRACE_WINDOW` / `UEFIDOS_DUMP_AT` pair will do it).
+
+### Regression check
+
+Windows 1.01 (desktop, pointer, Control Panel) and Windows 1.04 (desktop,
+Calendar launch) are unaffected by the move; `--itest` stays at 96/0.
