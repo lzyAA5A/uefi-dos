@@ -29,6 +29,22 @@ before our halving and clamping), the device table printed both before and after
 the ten-second probe, a `ps/2 aux:` line, and a verdict that says "counts arrive
 on one axis only" out loud.
 
+1.11.2 builds the DOS **device driver chain** in low memory (`0050h`: CON, AUX,
+PRN, CLOCK$, NUL, authentic 0x12-byte headers, chained, entries pointing at a
+RETF) -- real DOS has one, UEFI-DOS intercepts devices inside the kernel and had
+none, and programs find DOS's internals by locating it.  Windows 2.03 does
+exactly that: its failure path scans conventional memory below 512 KB for the
+string `"CON "`, opens and closes `CON` five times, and gives up with its generic
+`Incorrect DOS version` message.  The scan now finds the header (verified by
+instruction trace), Windows 1.01/1.04 are unaffected, `--itest` stays at 96/0 --
+but **2.03 still does not reach its desktop**: that scan turned out to be the
+*error/cleanup* path, so the failure it reports is upstream of it.  What remains
+for 2.03 is DOS's internal data structures in low memory (SFT/CDS/DPB), the PSP
+program-name field, and XMS -- a project of its own; Round 51 in
+[`docs/windows1x.md`](docs/windows1x.md) records exactly what was measured, and
+the round also added four runtime tools (`UEFIDOS_TRACE_WINDOW`,
+`UEFIDOS_DUMP_AT`, `UEFIDOS_DUMP_MEM`, `UEFIDOS_HALT_BYTES`).
+
 1.11.1 fixes the Clock applet freezing (and, with it, every Windows timer):
 the BIOS tick counter at `0040:006C` had three owners.  Our `INT 8` stub
 increments it, Windows 1.x keeps its own time base in the same dword -- a probe
@@ -153,7 +169,7 @@ is the extended-memory probe: version, free block, allocate, move in, move back,
 compare, 32-bit offset, free -- the XMS ABI exercised from inside DOS.  `TYPE B*.TXT` prints the result (TYPE now
 accepts wildcards, because a batch file cannot know today's date).
 
-Version **1.11.1**.  Verified here by: the 8086 + 186/286 + **8087** instruction
+Version **1.11.2**.  Verified here by: the 8086 + 186/286 + **8087** instruction
 suite (96 of 96), the host harness shell, FAT16/32 and dual-case checks, a 1.5 GB
 single-file write/read on a 1.9 GB FAT16 volume, split-file joining, the 8 GB
 extended-memory pool (claimed, 64 MB written and verified, the last 64 KB past

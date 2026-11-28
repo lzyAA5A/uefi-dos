@@ -2,7 +2,7 @@
 
 ## Status at a glance (hand-over summary)
 
-**Where this line of work stands (1.11.1).** The machine UEFI-DOS pretends to be
+**Where this line of work stands (1.11.2).** The machine UEFI-DOS pretends to be
 is now consistent with the machine it emulates: an **80286 AT**, not an 8088 XT
 (Round 42).  Windows **1.01** runs its MS-DOS
 Executive with a working pointer (Round 35 and earlier).  Windows **1.04** runs
@@ -5707,3 +5707,105 @@ the emulator's guest time runs slower than the wall clock, so 200 ms of host tim
 can be more than `DoubleClickSpeed=500` of guest time and the two clicks arrive as
 two separate selections.  60 ms works reliably (that is what `build/click101.ps1`
 should be given for Windows 1.01/1.04 now).
+
+## Round 51 -- what Windows 2.03 is actually asking for (1.11.2)
+
+The open item was "2.03 never reaches its desktop".  It still does not, but the
+failure is no longer a black box: it is a specific scan of a DOS structure we do
+not build, and the round produced both the tooling that found it and one real gap
+closed on the way.
+
+### The symptom, measured
+
+```
+C:\WINDOWS> WIN
+gfx: mode set 640x200x8
+Incorrect DOS version:  <binary garbage>
+```
+
+exit code 1, after `WIN.COM` opened `WINDOWS\WIN200.BIN` twice and closed eight
+handles.  Two things in that line are worth knowing: the message is 2.03's
+*generic* initialisation failure (the same text it prints when its device opens
+fail), and the **garbage after it is the program name** -- it prints
+`Incorrect DOS version: ` + the name it read from a process field our PSP does
+not fill in, so the string runs straight into executable code.
+
+### The scan
+
+With `UEFIDOS_TRACE_WINDOW=0E68:A3A0-A460` (note the format: `CS:LO-HI`, one
+segment prefix) the whole routine is visible, and
+`UEFIDOS_DUMP_AT=0E68:A3A5` snapshots memory at that instant so the code can be
+read from *runtime* memory rather than from the file (WIN200.BIN relocates
+0x6D-byte blocks while loading, so the file layout is not the memory layout).
+
+What the routine does, in order:
+
+1. opens `CON` **five times** and stores the handles in a table at `cs:0xA37A`,
+2. `xor di,di / mov es,di` and then calls a helper that scans `ES:DI` for the
+   byte `'C'` and, on a hit, compares the next three bytes against `"ON "` --
+   i.e. it searches conventional memory for the string **`"CON "`**, the name
+   field of a DOS device driver header, with
+
+   ```
+   cmp ax,0x8000 / ja -> return FFFF     ; "gave up"
+   ```
+
+   so it only looks at the first **512 KB**, and walks `ES += 0x0FFD` when a
+   window has no hit,
+3. converts the hit into `segment:offset`, then scans again from `found+3` and
+   computes the distance between the two hits, requiring it to be under `0x100`,
+4. closes the five handles again and returns.
+
+Step 4 is the interesting one: it closes the handles it opened, which means this
+is the **error/cleanup path**, not the init probe.  The real failure happens
+earlier and this routine is what reports it -- so making the scan succeed cannot
+by itself make 2.03 boot.
+
+### The real gap it exposed
+
+The scan ran off the 512 KB ceiling because UEFI-DOS intercepts devices inside
+the kernel and therefore had **no device driver chain anywhere in guest memory**.
+Real DOS keeps one in low memory, and every program that wants to find DOS's
+internal structures locates it that way.  1.11.2 builds one:
+
+* five headers at `0050h` (1.25 KB, just above the BIOS data area, comfortably
+  below the `2000h` where program images start): `CON AUX PRN CLOCK$ NUL`,
+* the authentic **0x12-byte** header layout -- `next` (offset:segment),
+  attributes (`0x8000` = character device), strategy entry, interrupt entry,
+  8-byte space-padded name,
+* `next` links chained, the last one terminated with `FFFF:FFFF`,
+* strategy and interrupt both point at a lone `RETF` at `F000:FFD0`, so a
+  program that walks the chain sees the right shape and one that calls an entry
+  gets an empty completion instead of a crash.
+
+Verified by instruction trace: the scan now finds `"CON "` at `0050:000A`
+(previously it never matched anything), and Windows 1.01 still reaches its
+desktop with a working pointer, `--itest` is still 96/0.
+
+### What 2.03 needs next
+
+Same message, same exit code -- the chain closed one gap, not the failure.  The
+remaining work is the part that makes a real DOS a real DOS:
+
+* DOS's **internal data structures in low memory** (SFT, CDS, the DPB chain),
+  because 2.03 reads them directly rather than through INT 21h,
+* the **program name** field of the PSP (the garbage in its error message),
+* **XMS**, now that the 1.11.0 driver exists (2.x real mode expects extended
+  memory, which is what `INT 2Fh AX=4310h` is for).
+
+That is a project of its own, of the same size as the Windows 1.x work was.
+
+### New debugging tools from this round
+
+| knob | what it does |
+| --- | --- |
+| `UEFIDOS_TRACE_WINDOW=CS:LO-HI` | trace every instruction executed in that range, with all registers |
+| `UEFIDOS_DUMP_AT=CS:IP` | snapshot all 640 KB of low memory the first time execution reaches that address (`UEFIDOS_DUMP_AT_FILE` names the file) |
+| `UEFIDOS_DUMP_MEM=SEG:OFF:LEN` | dump a slice of emulated RAM at the end of the run |
+| `UEFIDOS_HALT_BYTES=n` | dump `n` bytes around `CS:IP` when the step budget runs out |
+| `UEFIDOS_TRACE_TICKW=1` | every guest write to `0040:006C`..`006F` (Round 50) |
+
+Two traps found while using them: `UEFIDOS_TRACE_WINDOW` wants `CS:LO-HI`, not
+`CS:LO-CS:HI` (the second form silently matches nothing), and a dump taken at the
+*end* of a run can capture memory the program has already exited out of -- which
+is why `UEFIDOS_DUMP_AT` exists.

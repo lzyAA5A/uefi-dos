@@ -5288,6 +5288,54 @@ static void install_ivt(Emu *e)
     emu_wb(e, DPMI_ENTRY_SEG, DPMI_ENTRY_OFF, 0xCD);
     emu_wb(e, DPMI_ENTRY_SEG, (u16)(DPMI_ENTRY_OFF + 1), 0x60);
     emu_wb(e, DPMI_ENTRY_SEG, (u16)(DPMI_ENTRY_OFF + 2), 0xCB);
+    /* ---- DOS device driver chain in low memory -------------------------- *
+     * Real DOS keeps a chain of device driver headers in low memory and names
+     * one of them CON.  Programs find DOS's internal structures by locating that
+     * header -- Windows 2.x scans conventional memory below 512 KB for the
+     * string "CON " and treats "not found" as a fatal initialisation error
+     * (which it reports with its generic "Incorrect DOS version" message and
+     * exit code 1).
+     *
+     * UEFI-DOS intercepts devices inside the kernel, so there was no header
+     * anywhere and that scan ran off the top of the area it searches.  Build a
+     * real chain: five headers, correct `next` links, character-device
+     * attributes, a space-padded name, and strategy/interrupt entries that point
+     * at a lone RETF (a program that only locates the chain never calls them;
+     * one that does gets an empty completion instead of a crash).
+     *
+     * The chain lives at 0050h -- 1.25 KB, just above the BIOS data area, which
+     * is where a real DOS kernel sits and is comfortably below the 2000h where
+     * program images start. */
+    {
+        static const char *dev_names[] = { "CON", "AUX", "PRN", "CLOCK$", "NUL" };
+        const u16 dseg = 0x0050u;
+        const u16 stride = 0x12u;              /* the real DOS device header size:
+                                                * next(4) attr(2) strat(2) intr(2)
+                                                * name(8) = 18 bytes */
+        const u16 dcount = (u16)(sizeof(dev_names) / sizeof(dev_names[0]));
+        const u16 stub_off = 0xFFD0u;          /* F000:FFD0 = RETF */
+        u16 i;
+        int k;
+        emu_wb(e, MAGIC_SEG, stub_off, 0xCB);  /* retf */
+        for (i = 0; i < dcount; i++) {
+            u16 at = (u16)(i * stride);
+            if (i + 1u < dcount) {
+                emu_ww(e, dseg, (u16)(at + 0), (u16)(at + stride));  /* next off */
+                emu_ww(e, dseg, (u16)(at + 2), dseg);                /* next seg */
+            } else {
+                emu_ww(e, dseg, (u16)(at + 0), 0xFFFFu);             /* end of chain */
+                emu_ww(e, dseg, (u16)(at + 2), 0xFFFFu);
+            }
+            emu_ww(e, dseg, (u16)(at + 4), 0x8000u | (i == 0 ? 0x0003u : 0x0001u));
+            emu_ww(e, dseg, (u16)(at + 6), stub_off);                /* strategy */
+            emu_ww(e, dseg, (u16)(at + 8), stub_off);                /* interrupt */
+            for (k = 0; k < 8; k++)                                  /* name, padded */
+                emu_wb(e, dseg, (u16)(at + 10 + k), (u8)' ');
+            for (k = 0; dev_names[i][k] && k < 8; k++)
+                emu_wb(e, dseg, (u16)(at + 10 + k), (u8)dev_names[i][k]);
+            emu_ww(e, dseg, (u16)(at + 0x10), 0);  /* last 2 bytes of the name */
+        }
+    }
     /* IRET stub at F000:FFE0, magic marker at F000:FFF0 */
     emu_wb(e, MAGIC_SEG, STUB_OFF, 0xCF);
     emu_wb(e, MAGIC_SEG, (u16)(STUB_OFF + 1), 0x90);
@@ -6650,6 +6698,32 @@ int emu_run(Emu *e)
     }
     video_flush_force(e);
     dump_vram(e);
+#ifdef UEFIDOS_HOST
+    /* UEFIDOS_DUMP_MEM=SEG:OFF:LEN (host only): write that slice of emulated RAM
+     * to build/dump_mem.bin at the end of the run.  Guest memory at runtime is
+     * not the file on disk -- a DOS extender or an overlay loader is free to
+     * relocate the image while loading it (Windows 2.x moves 0x6D-byte blocks
+     * around), so a routine found in a ring dump can only be understood by
+     * disassembling the bytes the guest actually executed. */
+    {
+        const char *d = getenv("UEFIDOS_DUMP_MEM");
+        if (d && *d) {
+            unsigned long seg = 0, off = 0, len = 0;
+            if (sscanf(d, "%lx:%lx:%lx", &seg, &off, &len) == 3 && len && len < 0x100000ul) {
+                FILE *fp = fopen("build/dump_mem.bin", "wb");
+                if (fp) {
+                    unsigned long i;
+                    fprintf(stderr, "[dump] %lu bytes from %04lX:%04lX\n", len, seg, off);
+                    for (i = 0; i < len; i++) {
+                        u32 a = (u32)(((seg + ((off + i) >> 4)) << 4) + ((off + i) & 0xF)) & MEM_MASK;
+                        fputc(e->mem[a], fp);
+                    }
+                    fclose(fp);
+                }
+            }
+        }
+    }
+#endif
 #ifdef UEFIDOS_HOST
     {
         /* UEFIDOS_DUMP_MEM=<path>: write the low 640 KB as the program ends.
